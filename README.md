@@ -36,16 +36,39 @@ on tool failure (unreadable file, no tty).
 | Key | Action |
 |---|---|
 | `h`/`j`/`k`/`l`, arrows | move by character / line |
+| `C-d` / `C-u` | half page down / up |
+| `C-f` / `C-b`, PgDn/PgUp | full page down / up (two lines of overlap) |
 | `0` / `$` | start / end of line |
 | `J` / `K` | move by navigation unit |
 | `g` / `G` | first / last line |
 | `v` | select a range of units — `J`/`K` extends |
 | `V` | select whole lines, ignoring unit boundaries — `j`/`k` extends |
 | `+` / `-` | widen / narrow along the markdown hierarchy |
-| `c` | comment on the selection (`Enter` saves, `Esc` cancels) |
+| `c` | comment on the selection |
 | `x` | remove the annotation under the cursor |
 | `Esc` | drop the selection |
 | `q` | quit |
+
+### Writing a comment
+
+Readline bindings, because that is what fingers expect. `Enter` saves, `Esc`
+cancels, and **`C-j` inserts a newline** — comments can be several lines.
+
+| Key | Action |
+|---|---|
+| `C-a` / `C-e` | start / end of line (line-local in a multi-line comment) |
+| `C-b` / `C-f`, arrows | back / forward one character |
+| `M-b` / `M-f` | back / forward one word |
+| `C-d`, Delete | delete character forward |
+| `C-h`, Backspace | delete character back |
+| `C-w` | delete word back, whitespace-delimited — takes punctuation with it |
+| `M-DEL` | delete word back, stopping at punctuation |
+| `M-d` | delete word forward |
+| `C-k` | kill to end of line; at the end, joins the next line |
+| `C-u` | kill to start of line, keeping anything after the cursor |
+| `C-p` / `C-n`, Up/Down | recall earlier comments from this session |
+
+There is no kill ring: killed text is gone.
 
 ## Selection
 
@@ -70,6 +93,22 @@ You never have to point precisely — land near the thing and adjust. `-` from a
 paragraph gets you the code span inside it; `+` from a table row gets you the
 whole table. Runs of nodes with identical spans collapse, so every press
 visibly moves.
+
+## Syntax highlighting
+
+Headings, fences, inline code, links, emphasis, blockquotes, table pipes and
+list markers are coloured from **the AST that already exists** — no second
+parser, no regexes, no extra dependency. `blocks::parse_tree` knows where every
+node is to the byte, so `highlight` turns that into per-line tagged ranges and
+`ui` maps tags to colours.
+
+The renderer composites overlapping ranges with later marks winning, so the
+layering is: syntax, then selection, then cursor. Highlighting can never hide
+where you are or what you have chosen, and `**bold**` inside a blockquote wins
+over the quote's own styling.
+
+Code *inside* a fence is not highlighted by language — that would need syntect
+or a tree-sitter grammar set. Deliberately out of scope; see `STATUS.md`.
 
 ## How positions work
 
@@ -114,7 +153,7 @@ gets checked without a terminal.
 cargo test
 ```
 
-58 tests, none requiring a terminal. The UI is covered through ratatui's
+95 tests, none requiring a terminal. The UI is covered through ratatui's
 `TestBackend`, which renders into an in-memory buffer, so the gutter, partial
 line highlighting, multibyte segmentation and scrolling are asserted on rather
 than assumed.

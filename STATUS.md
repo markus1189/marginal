@@ -9,9 +9,40 @@
   scrolling
 - three selection mechanisms: unit ranges (`v`), line ranges (`V`), and
   expand/contract along the hierarchy (`+`/`-`)
+- markdown syntax highlighting driven by the same AST, no extra dependency
+- multi-line comment editor with readline bindings and per-session history
+- paging keys (`C-d`/`C-u`/`C-f`/`C-b`, PgDn/PgUp)
 - comments on any selection, removal, result JSON + feedback markdown,
   exit `0` / `1` / `2`
-- 58 tests, none requiring a terminal (UI covered via ratatui `TestBackend`)
+- 95 tests, none requiring a terminal (UI covered via ratatui `TestBackend`)
+
+## Dependency diet
+
+`comrak`'s `default = ["cli", "syntect-onig", "bon"]` pulled an entire
+command-line app (clap, shell-words, xdg, fmt2io) plus syntect and the
+oniguruma **C** library — none of it used. With `default-features = false`:
+
+| | crates | release binary |
+|---|---|---|
+| comrak defaults | 142 | 4.01 MB |
+| lean | **104** | **2.09 MB** |
+
+## Highlighting code inside fences
+
+Not done, and it is the one thing the AST cannot provide — comrak sees a fence
+body as opaque text. Options, ranked, if it ever matters:
+
+1. **syntect** — ~100 syntaxes and themes. Costs back the 38 crates and ~1.9 MB
+   above, plus oniguruma; the `regex-fancy` feature trades speed for pure Rust.
+   comrak's `CodeBlock` carries the info string, so each fence can be
+   highlighted independently and syntect's cross-line parser state — normally
+   the painful part in a scrolling viewport — never comes up.
+2. **two-face** — syntect plus bat's extra syntaxes/themes. Only worth it after
+   syntect proves it lacks a language you need.
+3. **inkjet / syntastica** (tree-sitter) — best quality, one grammar crate per
+   language and a build that dwarfs the rest of this program.
+
+Put it behind a cargo feature so the lean build stays the default.
 
 ### Granularity tiers, as scoped
 

@@ -6,12 +6,14 @@
 
 mod app;
 mod blocks;
+mod editor;
+mod highlight;
 mod ui;
 
 use std::io;
 use std::process::ExitCode;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use app::{App, Mode, Sel};
 
@@ -131,7 +133,7 @@ fn run(app: &mut App) -> io::Result<()> {
             break Err(e);
         }
         match event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => handle_key(app, k.code),
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => handle_key(app, k),
             Ok(_) => {}
             Err(e) => break Err(e),
         }
@@ -143,18 +145,65 @@ fn run(app: &mut App) -> io::Result<()> {
     outcome
 }
 
-fn handle_key(app: &mut App, code: KeyCode) {
+fn handle_key(app: &mut App, k: KeyEvent) {
+    let code = k.code;
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+
     match app.mode {
-        Mode::Input => match code {
-            KeyCode::Enter => app.commit_comment(),
-            KeyCode::Esc => app.cancel_input(),
-            KeyCode::Backspace => {
-                app.input.pop();
+        // Readline bindings, as bash has trained everyone to expect.
+        Mode::Input => {
+            let alt = k.modifiers.contains(KeyModifiers::ALT);
+            let e = &mut app.editor;
+            match code {
+                KeyCode::Enter => app.commit_comment(),
+                KeyCode::Esc => app.cancel_input(),
+
+                // C-j inserts a newline; Enter is reserved for committing.
+                KeyCode::Char('j') if ctrl => e.newline(),
+
+                KeyCode::Char('a') if ctrl => e.home(),
+                KeyCode::Char('e') if ctrl => e.end(),
+                KeyCode::Char('b') if ctrl => e.left(),
+                KeyCode::Char('f') if ctrl => e.right(),
+                KeyCode::Char('d') if ctrl => e.delete_forward(),
+                KeyCode::Char('k') if ctrl => e.kill_to_end(),
+                KeyCode::Char('u') if ctrl => e.kill_to_start(),
+                KeyCode::Char('w') if ctrl => e.kill_word_back_ws(),
+                KeyCode::Char('h') if ctrl => e.backspace(),
+                KeyCode::Char('p') if ctrl => e.history_prev(),
+                KeyCode::Char('n') if ctrl => e.history_next(),
+
+                KeyCode::Char('b') if alt => e.word_left(),
+                KeyCode::Char('f') if alt => e.word_right(),
+                KeyCode::Char('d') if alt => e.kill_word_forward(),
+                KeyCode::Backspace if alt => e.kill_word_back(),
+
+                KeyCode::Backspace => e.backspace(),
+                KeyCode::Delete => e.delete_forward(),
+                KeyCode::Left => e.left(),
+                KeyCode::Right => e.right(),
+                KeyCode::Home => e.home(),
+                KeyCode::End => e.end(),
+                KeyCode::Up => e.history_prev(),
+                KeyCode::Down => e.history_next(),
+
+                // Anything else with a modifier is a chord we do not bind, not
+                // text to insert.
+                KeyCode::Char(c) if !ctrl && !alt => e.insert(c),
+                _ => {}
             }
-            KeyCode::Char(c) => app.input.push(c),
+        }
+        // Paging. C-f/C-b keep two lines of overlap, as vim does.
+        Mode::Normal if ctrl => match code {
+            KeyCode::Char('d') => app.page(1, true),
+            KeyCode::Char('u') => app.page(-1, true),
+            KeyCode::Char('f') => app.page(1, false),
+            KeyCode::Char('b') => app.page(-1, false),
             _ => {}
         },
         Mode::Normal => match code {
+            KeyCode::PageDown => app.page(1, false),
+            KeyCode::PageUp => app.page(-1, false),
             KeyCode::Char('q') => app.quit = true,
             KeyCode::Char('j') | KeyCode::Down => app.move_line(1),
             KeyCode::Char('k') | KeyCode::Up => app.move_line(-1),

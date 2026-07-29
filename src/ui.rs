@@ -16,7 +16,12 @@ use ratatui::Frame;
 use crate::app::{App, Mode};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
-    let input_h = if app.mode == Mode::Input { 3 } else { 0 };
+    // The comment box grows with the comment, up to a point.
+    let input_h = if app.mode == Mode::Input {
+        (app.editor.rows().len().clamp(1, 8) + 2) as u16
+    } else {
+        0
+    };
     let chunks = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(input_h),
@@ -31,6 +36,29 @@ pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
     }
     draw_annotations(f, chunks[2], app);
     draw_footer(f, chunks[3], app);
+}
+
+/// Colours for the markdown syntax tags produced by `highlight`.
+fn syntax_style(tag: &str) -> Style {
+    let s = Style::default();
+    match tag {
+        "heading" => s.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        "heading-marker" => s.fg(Color::Blue).add_modifier(Modifier::DIM),
+        "list-marker" => s.fg(Color::Blue),
+        "code" => s.fg(Color::Indexed(108)),
+        "code-span" => s.fg(Color::Indexed(180)),
+        "link" => s.fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+        "image" => s.fg(Color::Magenta),
+        "strong" => s.add_modifier(Modifier::BOLD),
+        "emph" => s.add_modifier(Modifier::ITALIC),
+        "strike" => s.add_modifier(Modifier::CROSSED_OUT),
+        "html" => s.fg(Color::DarkGray),
+        "hr" => s.fg(Color::DarkGray),
+        "quote" => s.fg(Color::Indexed(245)).add_modifier(Modifier::ITALIC),
+        "table" => s.fg(Color::DarkGray),
+        "cell" => s.fg(Color::Reset),
+        _ => s,
+    }
 }
 
 /// Cut `text` into styled segments. Later marks win over earlier ones, and
@@ -67,6 +95,7 @@ fn segments(text: &str, marks: &[(usize, usize, Style)], base: Style) -> Vec<Spa
 
 fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
     let viewport = area.height.saturating_sub(2) as usize;
+    app.viewport = viewport;
     keep_cursor_visible(app, scroll, viewport);
 
     let current = app.current_block();
@@ -90,7 +119,18 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
             .unwrap_or(false);
         let n = app.annotations_on(lineno);
 
-        let mut marks: Vec<(usize, usize, Style)> = Vec::new();
+        // Syntax first, then selection, then the cursor: later marks win, so
+        // highlighting never hides where you are or what you have chosen.
+        let mut marks: Vec<(usize, usize, Style)> = app
+            .marks
+            .get(lineno - 1)
+            .map(|row| {
+                row.iter()
+                    .map(|(a, b, tag)| (*a, *b, syntax_style(tag)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         if let Some((a, b)) = app.selected_bytes_on(lineno) {
             marks.push((a, b, sel_style));
         }
@@ -197,17 +237,45 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         None => String::new(),
     };
     let title = format!(
-        " comment on {} {} — Enter to save, Esc to cancel ",
+        " comment on {} {} — Enter saves · C-j newline · Esc cancels ",
         app.selection_kind(),
         range
     );
+
+    let caret = Style::default().bg(Color::Yellow).fg(Color::Black);
+    let (crow, ccol) = app.editor.row_col();
+    let rows: Vec<Line> = app
+        .editor
+        .rows()
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let prompt = Span::styled(
+                if i == 0 { "> " } else { "  " },
+                Style::default().fg(Color::Yellow),
+            );
+            let mut spans = vec![prompt];
+            if i == crow {
+                // Draw the caret as a cell so it is visible on any terminal,
+                // including one sitting past the end of the line.
+                let c1 = text[ccol..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(n, _)| ccol + n)
+                    .unwrap_or(text.len());
+                spans.extend(segments(text, &[(ccol, c1.max(ccol), caret)], Style::default()));
+                if ccol >= text.len() {
+                    spans.push(Span::styled(" ", caret));
+                }
+            } else {
+                spans.push(Span::raw((*text).to_string()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Yellow)),
-            Span::raw(app.input.clone()),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
-        ]))
-        .block(
+        Paragraph::new(rows).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
@@ -268,7 +336,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let keys = if app.mode == Mode::Input {
         "Enter save · Esc cancel"
     } else {
-        "hjkl move · J/K unit · v units · V lines · +/- widen/narrow · c comment · x remove · q quit"
+        "hjkl move · ^d/^u/^f/^b page · J/K unit · v units · V lines · +/- widen/narrow · c comment · x remove · q quit"
     };
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(28)]).split(area);
     f.render_widget(
@@ -336,7 +404,7 @@ mod tests {
         assert!(screen.contains("   4 ▍- [ ] Write tests"));
 
         app.begin_comment();
-        app.input = "model layer".into();
+        app.editor.set("model layer");
         app.commit_comment();
         let screen = render(&mut app, 100, 24);
         assert!(screen.contains("●1"));
@@ -374,7 +442,34 @@ mod tests {
         let screen = render(&mut app, 100, 24);
         assert!(screen.contains("comment on"));
         assert!(screen.contains("L3-4"));
-        assert!(screen.contains("Enter to save, Esc to cancel"));
+        assert!(screen.contains("Enter saves"));
+        assert!(screen.contains("C-j newline"));
+    }
+
+    #[test]
+    fn a_multi_line_comment_renders_every_row() {
+        let mut app = App::new("PLAN.md".into(), DOC);
+        app.begin_comment();
+        for c in "first".chars() {
+            app.editor.insert(c);
+        }
+        app.editor.newline();
+        for c in "second".chars() {
+            app.editor.insert(c);
+        }
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("> first"), "{screen}");
+        assert!(screen.contains("  second"), "{screen}");
+    }
+
+    #[test]
+    fn syntax_marks_do_not_disturb_the_rendered_text() {
+        // Highlighting adds styles, never characters.
+        let src = "## Steps\n\n- [ ] Use `parse_document` and **mind** the [docs](https://x.dev)\n";
+        let mut app = App::new("PLAN.md".into(), src);
+        let screen = render(&mut app, 100, 16);
+        assert!(screen.contains("## Steps"));
+        assert!(screen.contains("- [ ] Use `parse_document` and **mind** the [docs](https://x.dev)"));
     }
 
     #[test]

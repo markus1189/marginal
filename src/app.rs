@@ -13,6 +13,8 @@
 use serde::Serialize;
 
 use crate::blocks::{self, Block, Pos, Span, TreeNode};
+use crate::editor::Editor;
+use crate::highlight::{self, LineMarks};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -78,13 +80,18 @@ pub struct App {
     pub lines: Vec<String>,
     pub blocks: Vec<Block>,
     pub tree: TreeNode,
+    /// Syntax highlighting marks, one entry per source line. Computed once.
+    pub marks: Vec<LineMarks>,
     pub cursor: Pos,
     pub sel: Sel,
     pub annotations: Vec<Annotation>,
     pub mode: Mode,
-    pub input: String,
+    pub editor: Editor,
     pub status: String,
     pub quit: bool,
+    /// Source rows currently visible. Owned by the renderer, which is the only
+    /// thing that knows the terminal size; paging keys read it.
+    pub viewport: usize,
     next_id: usize,
 }
 
@@ -115,6 +122,7 @@ impl App {
         let lines: Vec<String> = src.lines().map(|l| l.to_string()).collect();
         let blocks = blocks::parse(src);
         let tree = blocks::parse_tree(src);
+        let marks = highlight::marks(&tree, src);
         let cursor = blocks
             .first()
             .map(|b| b.span.start)
@@ -124,13 +132,15 @@ impl App {
             lines,
             blocks,
             tree,
+            marks,
             cursor,
             sel: Sel::Here,
             annotations: Vec::new(),
             mode: Mode::Normal,
-            input: String::new(),
+            editor: Editor::default(),
             status: String::new(),
             quit: false,
+            viewport: 20,
             next_id: 1,
         }
     }
@@ -350,6 +360,18 @@ impl App {
         self.snap();
     }
 
+    /// Page the cursor. `dir` is +1 down / -1 up; a full page keeps two lines
+    /// of overlap the way vim's C-f does, so you never lose your place.
+    pub fn page(&mut self, dir: isize, half: bool) {
+        let v = self.viewport.max(1);
+        let step = if half {
+            (v / 2).max(1)
+        } else {
+            v.saturating_sub(2).max(1)
+        };
+        self.move_line(dir * step as isize);
+    }
+
     pub fn goto_first(&mut self) {
         self.drop_region();
         self.cursor = Pos::new(1, 1);
@@ -380,17 +402,18 @@ impl App {
             return;
         }
         self.mode = Mode::Input;
-        self.input.clear();
+        self.editor.start_fresh();
     }
 
     pub fn commit_comment(&mut self) {
-        let text = self.input.trim().to_string();
+        let text = self.editor.text().trim().to_string();
         self.mode = Mode::Normal;
-        self.input.clear();
         if text.is_empty() {
+            self.editor.start_fresh();
             self.status = "empty comment discarded".into();
             return;
         }
+        self.editor.submit();
         let Some(span) = self.selection() else { return };
         let kind = self.selection_kind();
         let quoted = self.slice(span);
@@ -414,7 +437,7 @@ impl App {
 
     pub fn cancel_input(&mut self) {
         self.mode = Mode::Normal;
-        self.input.clear();
+        self.editor.start_fresh();
         self.status = "cancelled".into();
     }
 
@@ -531,7 +554,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
     fn commit(a: &mut App, text: &str) {
         a.begin_comment();
-        a.input = text.into();
+        a.editor.set(text);
         a.commit_comment();
     }
 
@@ -551,6 +574,47 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         assert_eq!(a.cursor.line, 4);
         a.move_block(1);
         assert_eq!(a.cursor.line, 6);
+    }
+
+    #[test]
+    fn paging_moves_by_half_and_whole_viewports() {
+        let src: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        let mut a = App::new("big.md".into(), &src);
+        a.viewport = 20;
+        a.cursor = Pos::new(1, 1);
+
+        a.page(1, true); // C-d
+        assert_eq!(a.cursor.line, 11);
+        a.page(1, false); // C-f, two lines of overlap
+        assert_eq!(a.cursor.line, 29);
+        a.page(-1, true); // C-u
+        assert_eq!(a.cursor.line, 19);
+        a.page(-1, false); // C-b
+        assert_eq!(a.cursor.line, 1);
+    }
+
+    #[test]
+    fn paging_is_clamped_and_never_stalls() {
+        let src: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let mut a = App::new("big.md".into(), &src);
+        a.cursor = Pos::new(1, 1);
+
+        // a degenerate viewport must still advance by at least one line
+        a.viewport = 0;
+        a.page(1, true);
+        assert_eq!(a.cursor.line, 2);
+        a.page(1, false);
+        assert_eq!(a.cursor.line, 3);
+
+        a.viewport = 20;
+        for _ in 0..10 {
+            a.page(1, false);
+        }
+        assert_eq!(a.cursor.line, a.line_count());
+        for _ in 0..10 {
+            a.page(-1, false);
+        }
+        assert_eq!(a.cursor.line, 1);
     }
 
     #[test]
@@ -777,7 +841,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     fn cancelling_input_leaves_no_annotation() {
         let mut a = app();
         a.begin_comment();
-        a.input = "half typed".into();
+        a.editor.set("half typed");
         a.cancel_input();
         assert!(a.annotations.is_empty());
     }
