@@ -14,18 +14,20 @@
 - paging keys (`C-d`/`C-u`/`C-f`/`C-b`, PgDn/PgUp)
 - comments on any selection, removal, result JSON + feedback markdown,
   exit `0` / `1` / `2`
-- 95 tests, none requiring a terminal (UI covered via ratatui `TestBackend`)
+- no test requires a terminal (UI covered via ratatui `TestBackend`)
 
 ## Dependency diet
 
 `comrak`'s `default = ["cli", "syntect-onig", "bon"]` pulled an entire
 command-line app (clap, shell-words, xdg, fmt2io) plus syntect and the
-oniguruma **C** library — none of it used. With `default-features = false`:
+oniguruma **C** library — none of it used. Dropping it with
+`default-features = false` is worth roughly a third of the dependency graph and
+half the binary.
 
-| | crates | release binary |
-|---|---|---|
-| comrak defaults | 142 | 4.01 MB |
-| lean | **104** | **2.09 MB** |
+Measured 2026-07-30 — `cargo tree --prefix none | awk '{print $1}' | sort -u |
+wc -l` reports **93** crates, and the release binary is **2,079,608 bytes**.
+The pre-diet figures recorded on 2026-07-29 (142 crates, 4.01 MB) are kept only
+as the reason for the change; they are not reproducible from this tree.
 
 ## Highlighting code inside fences
 
@@ -60,9 +62,38 @@ Put it behind a cargo feature so the lean build stays the default.
   the agent does not own. Deliberately absent: see the open question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
-- the TUI has never been run by a human. Everything was verified through
-  `--dump-blocks`, unit tests and `TestBackend` renders, because the agent that
-  wrote it has no controlling tty.
+- **horizontal scrolling.** `draw_source` renders each line from column 1 and
+  lets ratatui truncate, so on a 95-column pane anything past roughly column 88
+  cannot be seen — awkward for a tool whose selling point is column-precise
+  selection.
+- the annotations pane is a fixed six rows and does not scroll; the comment
+  editor caps at eight rows and does not scroll either, so the caret vanishes
+  in a longer comment.
+
+## Found by running it
+
+On 2026-07-30 the TUI was driven for the first time, in a 95×54 tmux pane via
+`tmux send-keys`. A full green suite had missed four things, three now fixed:
+
+- **stale status line** — `drop_region` cleared the selection but not the
+  status, so after moving away the footer kept advertising `code L65-102` for a
+  selection that no longer existed. No test moved the cursor *after* a region
+  selection and re-rendered. Fixed; `app.rs` now covers it.
+- **title bar was 100% path** — the path came first and unbounded, pushing the
+  line/unit/annotation counts and the live selection readout past the border.
+  The only field that changes on every keypress was the first casualty. Fixed:
+  selection first, path last and elided from the left.
+- **footer truncated mid-word** — the ~105-column hint line was cut at 95,
+  losing `c comment · x remove · q quit`. Fixed: five hint variants, narrowest
+  keeps `q quit`, and the status column yields before the keys do.
+- **`C-c` did nothing** — raw mode delivers it as a keystroke, no `SIGINT` is
+  raised, and the `if ctrl` arm matched only `d`/`u`/`f`/`b`. `q` was the sole
+  exit. Now bound to quit, and to cancel in the comment editor.
+
+Also confirmed on a real terminal rather than a `TestBackend` buffer: syntax
+highlighting emits the expected SGR (dim blue `##`, bold cyan heading text),
+and the `--result` JSON round-trips a column-precise annotation
+(`code-span`, `L5:5-20`, `wholeLines: false`).
 
 ## Verified, not assumed
 
