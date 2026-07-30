@@ -312,9 +312,14 @@ impl App {
     /// Moving the cursor abandons a hierarchy selection — the stack it was an
     /// index into no longer applies. Block- and line-wise selections are
     /// anchored, so movement extends them instead.
-    const fn drop_region(&mut self) {
+    ///
+    /// The status line is cleared with it: it was showing that region's span,
+    /// and leaving it up means the footer keeps advertising a selection that no
+    /// longer exists.
+    fn drop_region(&mut self) {
         if matches!(self.sel, Sel::Region { .. }) {
             self.sel = Sel::Here;
+            self.status.clear();
         }
     }
 
@@ -368,7 +373,7 @@ impl App {
         self.move_line(dir * step as isize);
     }
 
-    pub const fn goto_first(&mut self) {
+    pub fn goto_first(&mut self) {
         self.drop_region();
         self.cursor = Pos::new(1, 1);
     }
@@ -379,7 +384,7 @@ impl App {
         self.snap();
     }
 
-    pub const fn goto_line_start(&mut self) {
+    pub fn goto_line_start(&mut self) {
         self.drop_region();
         self.cursor.col = 1;
     }
@@ -810,6 +815,29 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         assert!(matches!(a.sel, Sel::Region { .. }));
         a.move_line(-1);
         assert!(matches!(a.sel, Sel::Here));
+    }
+
+    /// Found by running the TUI: `g` back to the top left the footer still
+    /// reading `code L65-102` for a selection that had already been dropped.
+    #[test]
+    fn moving_away_clears_the_status_left_by_a_region_selection() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 6);
+        a.contract();
+        assert!(a.status.contains("code-span"), "{}", a.status);
+
+        a.goto_first();
+        assert!(matches!(a.sel, Sel::Here));
+        assert!(a.status.is_empty(), "stale status: {}", a.status);
+    }
+
+    #[test]
+    fn an_anchored_selection_keeps_its_status_while_being_extended() {
+        let mut a = app();
+        a.move_block(1);
+        a.toggle_blocks();
+        a.move_block(1);
+        assert!(a.status.contains("J/K"), "{}", a.status);
     }
 
     #[test]
