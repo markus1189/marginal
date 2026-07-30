@@ -1,5 +1,19 @@
 # marginal — agent notes
 
+## Working on main
+
+**Commit to `main` unless told otherwise.** This is a POC with a linear
+history and no remote; a branch per change is friction, not safety. Do not
+create one uninvited, and do not ask each time.
+
+What is still expected of every commit:
+
+- one concern each, scoped to the files that concern touches
+- green on its own — `cargo test` must pass at that commit, not merely at
+  the tip of a series
+- a message that says what was wrong, what verified the fix, and why no
+  existing test caught it. `git log` is the only design record this repo has.
+
 ## Build & check
 
 ```sh
