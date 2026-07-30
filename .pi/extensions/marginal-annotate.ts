@@ -1,10 +1,14 @@
 /**
- * marginal-annotate — review the agent's last message with marginal.
+ * marginal-annotate — review the agent's messages with marginal.
  *
  * `/annotate` writes the last assistant message to a temp .md file, suspends
  * pi's TUI, and hands the terminal to marginal. Quitting with annotations
  * (exit 1) sends the feedback markdown back as the next user prompt; quitting
  * clean (exit 0) does nothing.
+ *
+ *   /annotate        the last assistant message, on its own
+ *   /annotate 3      the last 3 assistant messages plus the prompts between
+ *   /annotate all    the whole branch
  *
  * Binary resolution, in order:
  *   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  `marginal` on PATH
@@ -15,17 +19,28 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_BUILD = resolve(HERE, "../../target/release/marginal");
 
-const PROMPT_HEADER = [
+const PROMPT_HEADER_ONE = [
 	"I reviewed your last message in marginal. Below is my annotated feedback:",
 	"each `##` heading gives the location and kind of the span I selected, the",
 	"blockquote is the exact text I selected, and the prose under it is my comment.",
 	"Line/column numbers refer to your message as markdown, not to any file.",
 	"Address every comment.",
+	"",
+].join("\n");
+
+const PROMPT_HEADER_MANY = [
+	"I reviewed our conversation in marginal. It was laid out as one markdown",
+	"document, with a `## you [n]` / `## agent [n]` heading per message; the",
+	"annotations below can therefore span or compare several messages. Each `##`",
+	"heading gives the location and kind of the span I selected, the blockquote is",
+	"the exact text I selected, and the prose under it is my comment. Line/column",
+	"numbers refer to that assembled document, not to any file. Address every",
+	"comment.",
 	"",
 ].join("\n");
 
@@ -44,28 +59,98 @@ function resolveBinary(): string | undefined {
 	return found ? found : undefined;
 }
 
-/** Last assistant message on the current branch, as plain markdown text. */
-function lastAssistantMarkdown(ctx: ExtensionCommandContext): string | undefined {
-	const entries = ctx.sessionManager.getBranch();
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role !== "assistant") continue;
-		const text = message.content
-			.filter((block): block is { type: "text"; text: string } => block.type === "text")
-			.map((block) => block.text)
-			.join("\n\n")
-			.trim();
-		if (text.length > 0) return text;
+/** What `/annotate <args>` asked for. `undefined` means the args were nonsense. */
+export function parseSpec(args: string): { count: number | "all" } | undefined {
+	const arg = args.trim().toLowerCase();
+	if (arg === "") return { count: 1 };
+	if (arg === "all") return { count: "all" };
+	if (/^\d+$/.test(arg)) {
+		const n = Number.parseInt(arg, 10);
+		return n > 0 ? { count: n } : undefined;
 	}
 	return undefined;
 }
 
+interface Turn {
+	role: "user" | "assistant";
+	text: string;
+}
+
+function blockText(content: unknown): string {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((block): block is { type: "text"; text: string } => {
+			return typeof block === "object" && block !== null && (block as { type?: string }).type === "text";
+		})
+		.map((block) => block.text)
+		.join("\n\n")
+		.trim();
+}
+
+/**
+ * User and assistant messages on a branch, oldest first. Thinking blocks, tool
+ * calls, tool results and extension messages carry no prose worth annotating,
+ * so they are dropped — which means the numbering below counts messages that
+ * survived, not turns of the agent loop.
+ */
+export function collectTurns(entries: SessionEntry[]): Turn[] {
+	const turns: Turn[] = [];
+	for (const entry of entries) {
+		if (entry.type !== "message") continue;
+		const role = entry.message.role;
+		if (role !== "user" && role !== "assistant") continue;
+		const text = blockText(entry.message.content);
+		if (text.length > 0) turns.push({ role, text });
+	}
+	return turns;
+}
+
+/**
+ * The markdown handed to marginal. One assistant message goes in bare, so its
+ * line numbers are its own; anything wider gets `## you [n]` / `## agent [n]`
+ * headings, because otherwise a comment cannot say which message it means.
+ */
+export function buildDocument(turns: Turn[], count: number | "all"): { text: string; label: string } | undefined {
+	if (count === 1) {
+		for (let i = turns.length - 1; i >= 0; i--) {
+			const turn = turns[i];
+			if (turn.role === "assistant") return { text: `${turn.text}\n`, label: "assistant-message" };
+		}
+		return undefined;
+	}
+
+	let start = 0;
+	if (count !== "all") {
+		let seen = 0;
+		start = turns.length;
+		for (let i = turns.length - 1; i >= 0; i--) {
+			if (turns[i].role === "assistant") {
+				seen++;
+				if (seen > count) break;
+			}
+			start = i;
+		}
+		if (seen === 0) return undefined;
+	}
+
+	const slice = turns.slice(start);
+	if (slice.length === 0) return undefined;
+	const body = slice
+		.map((turn, i) => `## ${turn.role === "user" ? "you" : "agent"} [${i + 1}]\n\n${turn.text}`)
+		.join("\n\n");
+	return { text: `${body}\n`, label: "conversation" };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("annotate", {
-		description: "Annotate the agent's last message in marginal, then send the feedback back",
-		handler: async (_args, ctx) => {
+		description: "Annotate the agent's message(s) in marginal: /annotate [N|all]",
+		handler: async (args, ctx) => {
+			const spec = parseSpec(args);
+			if (!spec) {
+				ctx.ui.notify("Usage: /annotate [N|all] — N is how many assistant messages to include.", "warning");
+				return;
+			}
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/annotate needs the TUI — marginal refuses to start without a tty.", "error");
 				return;
@@ -81,16 +166,16 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const markdown = lastAssistantMarkdown(ctx);
-			if (!markdown) {
+			const document = buildDocument(collectTurns(ctx.sessionManager.getBranch()), spec.count);
+			if (!document) {
 				ctx.ui.notify("No assistant message with text on this branch.", "warning");
 				return;
 			}
 
 			const dir = mkdtempSync(join(tmpdir(), "marginal-annotate."));
-			const source = join(dir, "reply.md");
+			const source = join(dir, `${document.label}.md`);
 			const resultPath = join(dir, "result.json");
-			writeFileSync(source, markdown.endsWith("\n") ? markdown : `${markdown}\n`);
+			writeFileSync(source, document.text);
 
 			try {
 				const status = await ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
@@ -98,7 +183,7 @@ export default function (pi: ExtensionAPI) {
 					process.stdout.write("\x1b[2J\x1b[H");
 					let code: number | null = 2;
 					try {
-						const run = spawnSync(binary, ["--result", resultPath, "--label", "assistant-message", source], {
+						const run = spawnSync(binary, ["--result", resultPath, "--label", document.label, source], {
 							stdio: "inherit",
 							env: process.env,
 						});
@@ -132,7 +217,8 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				pi.sendUserMessage(`${PROMPT_HEADER}\n${feedback}\n`);
+				const header = document.label === "conversation" ? PROMPT_HEADER_MANY : PROMPT_HEADER_ONE;
+				pi.sendUserMessage(`${header}\n${feedback}\n`);
 				ctx.ui.notify(`Sent ${count} annotation${count === 1 ? "" : "s"}.`, "info");
 			} finally {
 				rmSync(dir, { recursive: true, force: true });

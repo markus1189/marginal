@@ -92,17 +92,38 @@ format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.
 writes it to a temp `.md`, suspends pi's TUI, runs marginal over it, and sends
 `feedbackMarkdown` back as the next prompt. Exit `0` sends nothing.
 
+| Command | Document handed to marginal |
+|---|---|
+| `/annotate` | the last assistant message, bare |
+| `/annotate 3` | the last 3 assistant messages, plus the prompts between them |
+| `/annotate all` | the whole branch |
+
+One message goes in bare, so its line numbers are its own. Anything wider is
+assembled with a `## you [n]` / `## agent [n]` heading per message — otherwise a
+comment cannot say which message it means. Thinking blocks, tool calls and tool
+results are dropped; the numbering counts what survived.
+
 The binary is looked up as `$MARGINAL_BIN`, then `target/release/marginal`, then
 `marginal` on `PATH` — the repo build wins, so you review with what you just
 compiled. Project-local extensions load only in a trusted project, so start pi
 with `-a` or trust the project once.
 
-`--label assistant-message` is what makes it readable: the temp path is noise,
-so every location reads `assistant-message:29 · list-item` instead.
+`--label` is what makes it readable: the temp path is noise, so every location
+reads `assistant-message:29 · list-item`, or `conversation:64 · paragraph` for
+the wider views.
 
 No tty relocation is involved. pi already owns the terminal, so the extension
 stops the host TUI and starts it again in a `finally`. That is the whole trick,
 and it only works for a host that is itself a terminal program.
+
+The document builder — which messages go in, how they are headed — has its own
+tests, since it is the part that can be wrong quietly:
+
+```sh
+node --test .pi/extensions/marginal-annotate.test.mjs
+```
+
+`./check` runs them too when `node` is on `PATH`, and skips them when it is not.
 
 ## Keys
 

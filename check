@@ -25,6 +25,15 @@ run "typos"    typos
 run "machete"  cargo machete
 run "deny"     cargo deny check
 
+# The pi extension's document builder. Node is deliberately not in the dev
+# shell — it is a launcher for one host, not a build dependency of the binary —
+# so this is skipped when node is absent rather than failing the run.
+if command -v node >/dev/null 2>&1; then
+  run "extension" node --test .pi/extensions/marginal-annotate.test.mjs
+else
+  printf '\n\033[33m– extension tests skipped (no node)\033[0m\n'
+fi
+
 if [[ $fail -eq 0 ]]; then
   printf '\n\033[32m\033[1mall checks passed\033[0m\n'
 else
