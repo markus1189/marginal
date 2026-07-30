@@ -8,9 +8,12 @@
 //!   which powers expand/contract selection.
 //!
 //! Positions come from comrak's sourcepos: 1-based line, 1-based **byte**
-//! column, end inclusive. Byte, not character — verified against
-//! `Prüfen \`köde\``, where the backtick is character 8 but comrak reports
-//! column 9. Every consumer of `col` therefore has to respect char boundaries.
+//! column, end inclusive. Byte, not character — verified against the line
+//!
+//!     Prüfen `köde`
+//!
+//! where the backtick is character 8 but comrak reports column 9. Every
+//! consumer of `col` therefore has to respect char boundaries.
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{parse_document, Arena, Options};
@@ -23,8 +26,8 @@ pub struct Pos {
 }
 
 impl Pos {
-    pub fn new(line: usize, col: usize) -> Self {
-        Pos { line, col }
+    pub const fn new(line: usize, col: usize) -> Self {
+        Self { line, col }
     }
 }
 
@@ -40,7 +43,7 @@ impl Span {
         p >= self.start && p <= self.end
     }
 
-    pub fn touches_line(&self, line: usize) -> bool {
+    pub const fn touches_line(&self, line: usize) -> bool {
         line >= self.start.line && line <= self.end.line
     }
 
@@ -63,8 +66,8 @@ impl Span {
         Some((s.min(line_len), e.min(line_len)))
     }
 
-    pub fn union(self, other: Span) -> Span {
-        Span {
+    pub fn union(self, other: Self) -> Self {
+        Self {
             start: self.start.min(other.start),
             end: self.end.max(other.end),
         }
@@ -81,13 +84,13 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn start(&self) -> usize {
+    pub const fn start(&self) -> usize {
         self.span.start.line
     }
-    pub fn end(&self) -> usize {
+    pub const fn end(&self) -> usize {
         self.span.end.line
     }
-    pub fn contains_line(&self, line: usize) -> bool {
+    pub const fn contains_line(&self, line: usize) -> bool {
         self.span.touches_line(line)
     }
 }
@@ -97,7 +100,7 @@ impl Block {
 pub struct TreeNode {
     pub kind: &'static str,
     pub span: Span,
-    pub children: Vec<TreeNode>,
+    pub children: Vec<Self>,
 }
 
 fn options() -> Options<'static> {
@@ -111,10 +114,7 @@ fn options() -> Options<'static> {
 }
 
 fn line_len(lines: &[&str], line: usize) -> usize {
-    lines
-        .get(line.saturating_sub(1))
-        .map(|l| l.len())
-        .unwrap_or(0)
+    lines.get(line.saturating_sub(1)).map_or(0, |l| l.len())
 }
 
 /// comrak reports `line:0` as an end position when a block is terminated by the
@@ -136,7 +136,7 @@ fn norm(sp: comrak::nodes::Sourcepos, lines: &[&str]) -> Span {
     }
 }
 
-fn kind_of(v: &NodeValue) -> Option<&'static str> {
+const fn kind_of(v: &NodeValue) -> Option<&'static str> {
     Some(match v {
         // block level
         NodeValue::Paragraph => "paragraph",
@@ -164,7 +164,7 @@ fn kind_of(v: &NodeValue) -> Option<&'static str> {
     })
 }
 
-fn is_list(v: &NodeValue) -> bool {
+const fn is_list(v: &NodeValue) -> bool {
     matches!(v, NodeValue::List(_) | NodeValue::DescriptionList)
 }
 
@@ -180,7 +180,10 @@ fn walk_flat<'a>(node: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut 
         // Containers that are navigated *through*, not annotated as a unit. The
         // container itself stays reachable via expand-selection.
         if is_list(&value)
-            || matches!(value, NodeValue::BlockQuote | NodeValue::FootnoteDefinition(_))
+            || matches!(
+                value,
+                NodeValue::BlockQuote | NodeValue::FootnoteDefinition(_)
+            )
         {
             walk_flat(child, lines, depth, out);
             continue;
@@ -206,7 +209,9 @@ fn walk_flat<'a>(node: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut 
             continue;
         }
 
-        let Some(kind) = kind_of(&value) else { continue };
+        let Some(kind) = kind_of(&value) else {
+            continue;
+        };
 
         if kind == "list-item" {
             // The item's range spans its nested sublist; trim it so item and
@@ -418,7 +423,11 @@ still para.
 
     #[test]
     fn navigation_units_never_overlap() {
-        for src in [DOC, "> quote\n\n| a |\n|---|\n| 1 |\n", "- a\n  - b\n    - c\n"] {
+        for src in [
+            DOC,
+            "> quote\n\n| a |\n|---|\n| 1 |\n",
+            "- a\n  - b\n    - c\n",
+        ] {
             let bs = parse(src);
             for w in bs.windows(2) {
                 assert!(
@@ -523,7 +532,10 @@ still para.
         let (kind, span) = stack.iter().find(|(k, _)| *k == "code-span").unwrap();
         assert_eq!(*kind, "code-span");
         assert_eq!(span.start.col, 5);
-        assert_eq!(&INLINE[span.start.col - 1..span.end.col], "`parse_document`");
+        assert_eq!(
+            &INLINE[span.start.col - 1..span.end.col],
+            "`parse_document`"
+        );
     }
 
     #[test]

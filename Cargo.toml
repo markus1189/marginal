@@ -2,6 +2,7 @@
 name = "marginal"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 comrak = { version = "0.54", default-features = false }
@@ -12,3 +13,54 @@ serde_json = "1"
 
 [profile.release]
 opt-level = 2
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Cursor motion (App::move_line / move_char / move_block / page) takes a signed
+# delta and clamps it back into a usize index. Bounded by lines.len(),
+# blocks.len(), a char-index vector or the viewport — nothing near isize::MAX.
+# Each clamp is separately guarded against the min > max panic:
+#   move_line   — line_count() is `.max(1)`, so clamp(1, n) has n >= 1
+#   move_char   — `bounds` gets a 0 pushed when empty, so len - 1 >= 0
+#   move_block  — behind a `let Some(cur) = current_block() else { return }`,
+#                 and block_at() returns None for an empty slice
+# The checked-arithmetic rewrite is noise around a guarded idiom.
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+
+# NB: `cast_possible_truncation` has no exception here either. Its single site
+# carries a `#[expect]` in `ui.rs` instead, so a second lossy cast anywhere in
+# the crate is a build failure rather than a silent inheritance.
+
+# NB: `doc_markdown` has no exception at all. Its one false positive was the
+# sourcepos example in the `blocks.rs` header doc; that is now an indented code
+# block, so the lint fires nowhere and stays armed across the whole crate.
+# A `#![allow]` in `blocks.rs` would have covered all 600 lines of it.
+
+# All three sites are `#[cfg(test)]` fixtures building source text with
+# `(1..=n).map(format!).collect()`. This is a perf lint and no fixture is hot,
+# so the only thing the rewrite would buy is a less readable fixture.
+# Census not enforced: a future non-test site would inherit this silently.
+format_collect = "allow"
+
+# Distinct markdown token kinds that happen to share a colour ("html", "hr" and
+# "table" are all DarkGray). Merging the arms would couple them, and they drift
+# apart the moment the theme grows.
+match_same_arms = "allow"
+
+# Fires on `ui::draw_source` (104/100), not on `draw`. It is genuinely doing
+# several things — viewport bookkeeping, scroll, and a per-row loop layering
+# syntax, selection and cursor marks — but the layering is order-dependent and
+# reads worse split across helpers than it does in one sequence. Revisit if it
+# grows past ~150; this allow is a judgement call, not an absolution.
+too_many_lines = "allow"
+
+# Known-contentious nursery lint. Both sites (`expand` and `contract`, which are
+# structurally identical) would become `map_or`, putting the default *before* the
+# multi-line transform closure. Worse to read.
+option_if_let_else = "allow"

@@ -47,9 +47,8 @@ fn heading_marker_len(line: &str) -> usize {
 /// Byte length of a list item's marker: bullet or ordinal, trailing spaces, and
 /// a task checkbox if present. Measured from `from` within `line`.
 fn list_marker_len(line: &str, from: usize) -> usize {
-    let rest = match line.get(from..) {
-        Some(r) => r,
-        None => return 0,
+    let Some(rest) = line.get(from..) else {
+        return 0;
     };
     let mut i = 0;
     let b = rest.as_bytes();
@@ -91,7 +90,7 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
 
         if let Some(tag) = tag_of(child.kind) {
             for line in span.start.line..=span.end.line {
-                let len = lines.get(line - 1).map(|l| l.len()).unwrap_or(0);
+                let len = lines.get(line - 1).map_or(0, |l| l.len());
                 if let Some((a, b)) = span.byte_range_on(line, len) {
                     add(out, line, a, b, tag);
                 }
@@ -176,9 +175,15 @@ mod tests {
     fn inline_spans_are_tagged_with_their_delimiters() {
         let src = "Use `code` and **bold** and *soft*.\n";
         let m = tags(src, 1);
-        assert!(m.iter().any(|(a, b, t)| *t == "code-span" && &src[*a..*b] == "`code`"));
-        assert!(m.iter().any(|(a, b, t)| *t == "strong" && &src[*a..*b] == "**bold**"));
-        assert!(m.iter().any(|(a, b, t)| *t == "emph" && &src[*a..*b] == "*soft*"));
+        assert!(m
+            .iter()
+            .any(|(a, b, t)| *t == "code-span" && &src[*a..*b] == "`code`"));
+        assert!(m
+            .iter()
+            .any(|(a, b, t)| *t == "strong" && &src[*a..*b] == "**bold**"));
+        assert!(m
+            .iter()
+            .any(|(a, b, t)| *t == "emph" && &src[*a..*b] == "*soft*"));
     }
 
     #[test]
@@ -231,7 +236,10 @@ mod tests {
     fn multibyte_lines_produce_valid_byte_ranges() {
         let src = "Prüfen `köde` — ✓ fertig.\n";
         for (a, b, _) in tags(src, 1) {
-            assert!(src.is_char_boundary(a) && src.is_char_boundary(b), "{a}..{b}");
+            assert!(
+                src.is_char_boundary(a) && src.is_char_boundary(b),
+                "{a}..{b}"
+            );
         }
     }
 

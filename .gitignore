@@ -1,6 +1,8 @@
 /target
 /result
 /.cargo-home
+/mutants.out
+/mutants.out.old
 
 # The global gitignore excludes Cargo.lock. This is a binary, not a library, and
 # the flake cannot build without it — so track it here.

@@ -33,7 +33,7 @@ impl Editor {
     pub fn row_col(&self) -> (usize, usize) {
         let before = &self.text[..self.cursor];
         let row = before.matches('\n').count();
-        let col = self.cursor - before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col = self.cursor - before.rfind('\n').map_or(0, |i| i + 1);
         (row, col)
     }
 
@@ -92,17 +92,13 @@ impl Editor {
     }
 
     fn line_start(&self) -> usize {
-        self.text[..self.cursor]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
     }
 
     fn line_end(&self) -> usize {
         self.text[self.cursor..]
             .find('\n')
-            .map(|i| self.cursor + i)
-            .unwrap_or(self.text.len())
+            .map_or(self.text.len(), |i| self.cursor + i)
     }
 
     fn char_before(&self, i: usize) -> Option<char> {
@@ -162,7 +158,7 @@ impl Editor {
 
     // ---- editing --------------------------------------------------------
 
-    fn browsing_off(&mut self) {
+    const fn browsing_off(&mut self) {
         self.browsing = None;
     }
 
@@ -201,7 +197,7 @@ impl Editor {
     pub fn kill_to_end(&mut self) {
         let e = self.line_end();
         if e == self.cursor && e < self.text.len() {
-            self.text.replace_range(e..e + 1, "");
+            self.text.replace_range(e..=e, "");
         } else {
             self.text.replace_range(self.cursor..e, "");
         }
@@ -220,10 +216,10 @@ impl Editor {
     /// `C-w` — whitespace-delimited, so it takes punctuation with it.
     pub fn kill_word_back_ws(&mut self) {
         let mut i = self.cursor;
-        while i > 0 && self.char_before(i).is_some_and(|c| c.is_whitespace()) {
+        while i > 0 && self.char_before(i).is_some_and(char::is_whitespace) {
             i = self.prev(i);
         }
-        while i > 0 && !self.char_before(i).is_some_and(|c| c.is_whitespace()) {
+        while i > 0 && !self.char_before(i).is_some_and(char::is_whitespace) {
             i = self.prev(i);
         }
         self.text.replace_range(i..self.cursor, "");

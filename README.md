@@ -10,7 +10,7 @@ markdown. No launcher, no tmux popup, no gate semantics yet — see `STATUS.md`.
 ## Run
 
 ```sh
-nix develop                      # cargo, rustc, clippy, rust-analyzer
+nix develop                      # rust toolchain + the checkers behind ./check
 cargo run --release -- PLAN.md
 ```
 
@@ -147,10 +147,27 @@ Four normalisations sit on top, each pinned by a test:
 `--dump-blocks` prints the unit table for any file, which is how the parser
 gets checked without a terminal.
 
-## Tests
+## Tests and checks
 
 ```sh
 cargo test
+nix develop --command ./check    # everything CI would run
+```
+
+`./check` runs, cheapest-first: `cargo fmt --check`, `taplo` on the TOML,
+`cargo clippy -D warnings`, the test suite, `typos`, `cargo machete` (unused
+deps) and `cargo deny check` (advisories, licenses, source provenance).
+
+Clippy runs with `pedantic` and `nursery` enabled. The exceptions live in
+`[lints.clippy]` in `Cargo.toml`, each with a comment saying why — that list is
+meant to be argued with, not grown silently.
+
+Two tools are in the dev shell but deliberately out of `./check`, being far too
+slow for a pre-commit loop:
+
+```sh
+cargo mutants     # do the tests actually catch anything?
+bacon             # watch loop
 ```
 
 95 tests, none requiring a terminal. The UI is covered through ratatui's

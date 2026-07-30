@@ -1,0 +1,3 @@
+[default.extend-words]
+# The TUI library. Not a vegetable dish.
+ratatui = "ratatui"

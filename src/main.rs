@@ -34,7 +34,9 @@ fn parse_args() -> Result<Args, String> {
             "--result" => {
                 result = Some(it.next().ok_or("--result needs a path")?);
             }
-            "-h" | "--help" => return Err("usage: marginal [--dump-blocks] [--result PATH] FILE".into()),
+            "-h" | "--help" => {
+                return Err("usage: marginal [--dump-blocks] [--result PATH] FILE".into())
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
             other => file = Some(other.to_string()),
         }
@@ -218,8 +220,8 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('v') => app.toggle_blocks(),
             KeyCode::Char('V') => app.toggle_lines(),
             // widen / narrow along the markdown hierarchy
-            KeyCode::Char('+') | KeyCode::Char('=') => app.expand(),
-            KeyCode::Char('-') | KeyCode::Char('_') => app.contract(),
+            KeyCode::Char('+' | '=') => app.expand(),
+            KeyCode::Char('-' | '_') => app.contract(),
             KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),
             KeyCode::Esc => app.sel = Sel::Here,

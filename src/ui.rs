@@ -17,6 +17,12 @@ use crate::app::{App, Mode};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
     // The comment box grows with the comment, up to a point.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamp(1, 8) + 2 is 3..=10, which fits u16. `expect` rather than \
+                  `allow` so the build breaks if this stops being the only lossy \
+                  cast in the crate."
+    )]
     let input_h = if app.mode == Mode::Input {
         (app.editor.rows().len().clamp(1, 8) + 2) as u16
     } else {
@@ -86,8 +92,7 @@ fn segments(text: &str, marks: &[(usize, usize, Style)], base: Style) -> Vec<Spa
             .iter()
             .rev()
             .find(|(ma, mb, _)| *ma <= a && b <= *mb)
-            .map(|(_, _, s)| *s)
-            .unwrap_or(base);
+            .map_or(base, |(_, _, s)| *s);
         out.push(Span::styled(text[a..b].to_string(), style));
     }
     out
@@ -114,9 +119,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
         }
         let text = app.line_text(lineno).to_string();
         let on_cursor_line = lineno == app.cursor.line;
-        let in_current = current
-            .map(|c| app.blocks[c].contains_line(lineno))
-            .unwrap_or(false);
+        let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
         let n = app.annotations_on(lineno);
 
         // Syntax first, then selection, then the cursor: later marks win, so
@@ -139,19 +142,22 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
             let c1 = text[c0..]
                 .char_indices()
                 .nth(1)
-                .map(|(i, _)| c0 + i)
-                .unwrap_or(text.len());
+                .map_or(text.len(), |(i, _)| c0 + i);
             if c1 > c0 {
                 marks.push((c0, c1, cur_style));
             }
         }
 
         let selected_here = app.line_selected(lineno);
-        let bar = if in_current || selected_here { "▍" } else { " " };
+        let bar = if in_current || selected_here {
+            "▍"
+        } else {
+            " "
+        };
 
         let mut spans = vec![
             Span::styled(
-                format!("{:>4} ", lineno),
+                format!("{lineno:>4} "),
                 Style::default().fg(if on_cursor_line {
                     Color::Yellow
                 } else {
@@ -177,7 +183,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
 
         if n > 0 {
             spans.push(Span::styled(
-                format!("  ●{}", n),
+                format!("  ●{n}"),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
@@ -261,9 +267,12 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
                 let c1 = text[ccol..]
                     .char_indices()
                     .nth(1)
-                    .map(|(n, _)| ccol + n)
-                    .unwrap_or(text.len());
-                spans.extend(segments(text, &[(ccol, c1.max(ccol), caret)], Style::default()));
+                    .map_or(text.len(), |(n, _)| ccol + n);
+                spans.extend(segments(
+                    text,
+                    &[(ccol, c1.max(ccol), caret)],
+                    Style::default(),
+                ));
                 if ccol >= text.len() {
                     spans.push(Span::styled(" ", caret));
                 }
@@ -303,7 +312,10 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
                 } else if a.start_line == a.end_line {
                     format!("L{}:{}-{}", a.start_line, a.start_col, a.end_col)
                 } else {
-                    format!("L{}:{}-{}:{}", a.start_line, a.start_col, a.end_line, a.end_col)
+                    format!(
+                        "L{}:{}-{}:{}",
+                        a.start_line, a.start_col, a.end_line, a.end_col
+                    )
                 };
                 let here = app.cursor.line >= a.start_line && app.cursor.line <= a.end_line;
                 Line::from(vec![
@@ -326,8 +338,11 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
     };
 
     f.render_widget(
-        Paragraph::new(rows)
-            .block(Block::default().borders(Borders::ALL).title(" annotations ")),
+        Paragraph::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" annotations "),
+        ),
         area,
     );
 }
@@ -341,7 +356,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(28)]).split(area);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!(" {}", keys),
+            format!(" {keys}"),
             Style::default().fg(Color::DarkGray),
         )),
         cols[0],
@@ -469,7 +484,9 @@ mod tests {
         let mut app = App::new("PLAN.md".into(), src);
         let screen = render(&mut app, 100, 16);
         assert!(screen.contains("## Steps"));
-        assert!(screen.contains("- [ ] Use `parse_document` and **mind** the [docs](https://x.dev)"));
+        assert!(
+            screen.contains("- [ ] Use `parse_document` and **mind** the [docs](https://x.dev)")
+        );
     }
 
     #[test]

@@ -21,7 +21,17 @@
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer ];
+          packages = with pkgs; [
+            cargo rustc rustfmt clippy rust-analyzer
+            # checks — see ./check
+            cargo-deny      # advisories, licenses, duplicate deps
+            cargo-machete   # unused dependencies
+            typos           # spelling, config in _typos.toml
+            taplo           # TOML formatting
+            # not wired into ./check; slow, run by hand
+            cargo-mutants   # does the suite actually catch anything?
+            bacon           # watch loop
+          ];
         };
       });
     };

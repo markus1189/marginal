@@ -10,6 +10,8 @@
 //! * `+`/`-` — a node from the markdown containment hierarchy, from an inline
 //!   code span up to the whole document
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
 use crate::blocks::{self, Block, Pos, Span, TreeNode};
@@ -119,15 +121,12 @@ fn strictly_contains(outer: Span, inner: Span) -> bool {
 
 impl App {
     pub fn new(path: String, src: &str) -> Self {
-        let lines: Vec<String> = src.lines().map(|l| l.to_string()).collect();
+        let lines: Vec<String> = src.lines().map(std::string::ToString::to_string).collect();
         let blocks = blocks::parse(src);
         let tree = blocks::parse_tree(src);
         let marks = highlight::marks(&tree, src);
-        let cursor = blocks
-            .first()
-            .map(|b| b.span.start)
-            .unwrap_or(Pos::new(1, 1));
-        App {
+        let cursor = blocks.first().map_or(Pos::new(1, 1), |b| b.span.start);
+        Self {
             path,
             lines,
             blocks,
@@ -152,8 +151,7 @@ impl App {
     pub fn line_text(&self, line: usize) -> &str {
         self.lines
             .get(line.saturating_sub(1))
-            .map(|s| s.as_str())
-            .unwrap_or("")
+            .map_or("", std::string::String::as_str)
     }
 
     pub fn line_len(&self, line: usize) -> usize {
@@ -179,10 +177,7 @@ impl App {
                 Some(self.blocks[a].span.union(self.blocks[b].span))
             }
             Sel::Lines { anchor } => {
-                let (a, b) = (
-                    anchor.min(self.cursor.line),
-                    anchor.max(self.cursor.line),
-                );
+                let (a, b) = (anchor.min(self.cursor.line), anchor.max(self.cursor.line));
                 Some(Span {
                     start: Pos::new(a, 1),
                     end: Pos::new(b, self.line_len(b).max(1)),
@@ -190,7 +185,9 @@ impl App {
             }
             Sel::Region { depth } => {
                 let stack = self.stack();
-                stack.get(depth.min(stack.len().saturating_sub(1))).map(|(_, s)| *s)
+                stack
+                    .get(depth.min(stack.len().saturating_sub(1)))
+                    .map(|(_, s)| *s)
             }
         }
     }
@@ -241,31 +238,25 @@ impl App {
     }
 
     pub fn toggle_blocks(&mut self) {
-        self.sel = match self.sel {
-            Sel::Blocks { .. } => {
-                self.status = "selection cleared".into();
-                Sel::Here
-            }
-            _ => {
-                self.status = "block selection — J/K to extend".into();
-                Sel::Blocks {
-                    anchor: self.current_block().unwrap_or(0),
-                }
+        self.sel = if let Sel::Blocks { .. } = self.sel {
+            self.status = "selection cleared".into();
+            Sel::Here
+        } else {
+            self.status = "block selection — J/K to extend".into();
+            Sel::Blocks {
+                anchor: self.current_block().unwrap_or(0),
             }
         };
     }
 
     pub fn toggle_lines(&mut self) {
-        self.sel = match self.sel {
-            Sel::Lines { .. } => {
-                self.status = "selection cleared".into();
-                Sel::Here
-            }
-            _ => {
-                self.status = "line selection — j/k to extend".into();
-                Sel::Lines {
-                    anchor: self.cursor.line,
-                }
+        self.sel = if let Sel::Lines { .. } = self.sel {
+            self.status = "selection cleared".into();
+            Sel::Here
+        } else {
+            self.status = "line selection — j/k to extend".into();
+            Sel::Lines {
+                anchor: self.cursor.line,
             }
         };
     }
@@ -307,7 +298,10 @@ impl App {
     fn note_region(&mut self, stack: &[(&'static str, Span)], depth: usize) {
         let (kind, span) = stack[depth];
         self.status = if span.start.line == span.end.line {
-            format!("{} L{}:{}-{}", kind, span.start.line, span.start.col, span.end.col)
+            format!(
+                "{} L{}:{}-{}",
+                kind, span.start.line, span.start.col, span.end.col
+            )
         } else {
             format!("{} L{}-{}", kind, span.start.line, span.end.line)
         };
@@ -318,7 +312,7 @@ impl App {
     /// Moving the cursor abandons a hierarchy selection — the stack it was an
     /// index into no longer applies. Block- and line-wise selections are
     /// anchored, so movement extends them instead.
-    fn drop_region(&mut self) {
+    const fn drop_region(&mut self) {
         if matches!(self.sel, Sel::Region { .. }) {
             self.sel = Sel::Here;
         }
@@ -354,7 +348,9 @@ impl App {
 
     pub fn move_block(&mut self, delta: isize) {
         self.drop_region();
-        let Some(cur) = self.current_block() else { return };
+        let Some(cur) = self.current_block() else {
+            return;
+        };
         let target = (cur as isize + delta).clamp(0, self.blocks.len() as isize - 1) as usize;
         self.cursor = self.blocks[target].span.start;
         self.snap();
@@ -372,7 +368,7 @@ impl App {
         self.move_line(dir * step as isize);
     }
 
-    pub fn goto_first(&mut self) {
+    pub const fn goto_first(&mut self) {
         self.drop_region();
         self.cursor = Pos::new(1, 1);
     }
@@ -383,7 +379,7 @@ impl App {
         self.snap();
     }
 
-    pub fn goto_line_start(&mut self) {
+    pub const fn goto_line_start(&mut self) {
         self.drop_region();
         self.cursor.col = 1;
     }
@@ -508,11 +504,11 @@ impl App {
         }
         let mut out = format!("# Review feedback: {}\n", self.path);
         for a in &self.annotations {
-            out.push_str(&format!("\n## {} · {}\n", self.loc(a), a.block_kind));
+            let _ = write!(out, "\n## {} · {}\n", self.loc(a), a.block_kind);
             for l in a.original_text.lines() {
-                out.push_str(&format!("> {}\n", l));
+                let _ = writeln!(out, "> {l}");
             }
-            out.push_str(&format!("\n{}\n", a.text));
+            let _ = write!(out, "\n{}\n", a.text);
         }
         out
     }
@@ -636,10 +632,18 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     fn tier1_table_rows_are_separate_navigation_units() {
         let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
         let a = App::new("t.md".into(), src);
-        let kinds: Vec<_> = a.blocks.iter().map(|b| (b.kind, b.start(), b.end())).collect();
+        let kinds: Vec<_> = a
+            .blocks
+            .iter()
+            .map(|b| (b.kind, b.start(), b.end()))
+            .collect();
         assert_eq!(
             kinds,
-            vec![("table-row", 1, 2), ("table-row", 3, 3), ("table-row", 4, 4)]
+            vec![
+                ("table-row", 1, 2),
+                ("table-row", 3, 3),
+                ("table-row", 4, 4)
+            ]
         );
     }
 
@@ -918,5 +922,22 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         a.contract();
         a.remove_at_cursor();
         assert_eq!(a.result().decision, "approved");
+    }
+
+    /// `move_line` clamps into `1..=line_count()`, and `Ord::clamp` panics when
+    /// min > max. On an empty file `lines` is empty, so the `.max(1)` in
+    /// `line_count()` is the only thing keeping that range well-ordered.
+    #[test]
+    fn vertical_motion_on_an_empty_file_does_not_panic() {
+        let mut a = App::new("empty.md".into(), "");
+        assert_eq!(a.line_count(), 1, "the clamp upper bound must stay >= 1");
+
+        a.move_line(1);
+        a.move_line(-1);
+        a.page(1, false);
+        a.page(-1, true);
+        a.goto_last();
+        a.goto_first();
+        assert_eq!(a.cursor, Pos::new(1, 1));
     }
 }
