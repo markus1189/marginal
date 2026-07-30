@@ -204,19 +204,36 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
         None => "—".into(),
     };
 
-    let title = format!(
-        " {} · {} lines · {} units · {} annotations · [{}] ",
-        app.path,
+    // The selection readout goes first: it is the only field that changes on
+    // every keypress, and a long path used to push it off the end of the border
+    // entirely. The path is last and shortened to whatever is left, because a
+    // truncated path is still recognisable and a missing selection is not.
+    let rest = format!(
+        " [{}] · {} lines · {} units · {} annotations · ",
+        sel,
         app.lines.len(),
         app.blocks.len(),
         app.annotations.len(),
-        sel
     );
+    let budget = usize::from(area.width).saturating_sub(rest.chars().count() + 3);
+    let title = format!("{rest}{} ", shorten_path(&app.path, budget));
 
     f.render_widget(
         Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
+}
+
+/// Keep the tail of an over-long path — the file name is what identifies it,
+/// the directory prefix is what makes it too long.
+fn shorten_path(path: &str, max: usize) -> String {
+    let n = path.chars().count();
+    if n <= max {
+        return path.to_string();
+    }
+    // One column goes to the ellipsis that marks the cut.
+    let tail: String = path.chars().skip(n + 1 - max.max(1)).collect();
+    format!("…{tail}")
 }
 
 fn keep_cursor_visible(app: &App, scroll: &mut usize, viewport: usize) {
@@ -347,13 +364,45 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Hint lines from fullest to barest. The full one is ~105 columns; in a
+/// narrower pane it used to be cut mid-word, losing `c comment · x remove ·
+/// q quit` — precisely the part a first-time reader needs. Whichever variant
+/// fits the room available wins, and `q quit` survives to the very last.
+const KEYS: [&str; 5] = [
+    "hjkl move · ^d/^u/^f/^b page · J/K unit · v units · V lines · +/- widen/narrow · c comment · x remove · q quit",
+    "hjkl · J/K unit · v/V select · +/- widen · c comment · x remove · q quit",
+    "hjkl · v/V · +/- · c comment · x remove · q quit",
+    "c comment · x remove · q quit",
+    "q quit",
+];
+const INPUT_KEYS: [&str; 2] = ["Enter save · Esc cancel", "Enter · Esc"];
+
+const STATUS_W: u16 = 28;
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-    let keys = if app.mode == Mode::Input {
-        "Enter save · Esc cancel"
+    let width = usize::from(area.width);
+    // The status field is a luxury; the key hints are the only documentation
+    // on screen. Below the width where both fit, the status goes.
+    let bare = KEYS[KEYS.len() - 1].chars().count();
+    let status_w = if width >= usize::from(STATUS_W) + bare + 2 {
+        STATUS_W
     } else {
-        "hjkl move · ^d/^u/^f/^b page · J/K unit · v units · V lines · +/- widen/narrow · c comment · x remove · q quit"
+        0
     };
-    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(28)]).split(area);
+    // One column for the leading space.
+    let room = width.saturating_sub(usize::from(status_w) + 1);
+    let table: &[&str] = if app.mode == Mode::Input {
+        &INPUT_KEYS
+    } else {
+        &KEYS
+    };
+    let keys = table
+        .iter()
+        .copied()
+        .find(|k| k.chars().count() <= room)
+        .unwrap_or("q");
+
+    let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(status_w)]).split(area);
     f.render_widget(
         Paragraph::new(Span::styled(
             format!(" {keys}"),
@@ -401,11 +450,12 @@ mod tests {
     fn renders_source_with_gutter_and_header() {
         let mut app = App::new("PLAN.md".into(), DOC);
         let screen = render(&mut app, 100, 24);
-        assert!(screen.contains("PLAN.md · 6 lines · 4 units · 0 annotations"));
+        assert!(screen.contains("6 lines · 4 units · 0 annotations · PLAN.md"));
         assert!(screen.contains("   1 ▍# Steps"));
         assert!(screen.contains("   3  - [ ] Add validation to the login form"));
         assert!(screen.contains("no annotations yet"));
-        assert!(screen.contains("hjkl move"));
+        assert!(screen.contains("c comment"));
+        assert!(screen.contains("q quit"));
     }
 
     #[test]
@@ -511,6 +561,58 @@ mod tests {
         let mut app = App::new("PLAN.md".into(), DOC);
         render(&mut app, 20, 6);
         render(&mut app, 10, 3);
+    }
+
+    /// Found by running the TUI in a 95-column pane: the path was first in the
+    /// title and long enough to push every other field past the border, so the
+    /// live selection readout — the only part that changes — was never visible.
+    #[test]
+    fn a_long_path_never_costs_the_selection_readout_in_the_title() {
+        let long = "/tmp/claude-1000/-home-markus-Stuff-2026-07-27-scratch-marginal/\
+                    7d415313-bed3-412e-8fed-f0dd60064d/scratchpad/review.md";
+        let mut app = App::new(long.into(), DOC);
+        app.cursor = Pos::new(6, 6);
+        app.contract();
+        let screen = render(&mut app, 95, 24);
+        assert!(screen.contains("code-span L6:5-20"), "{screen}");
+        assert!(screen.contains("6 lines"), "{screen}");
+        assert!(
+            screen.contains("review.md"),
+            "path tail must survive: {screen}"
+        );
+        assert!(screen.contains('…'), "long path should be elided: {screen}");
+    }
+
+    #[test]
+    fn a_short_path_is_left_alone() {
+        let mut app = App::new("PLAN.md".into(), DOC);
+        let screen = render(&mut app, 95, 24);
+        assert!(screen.contains("PLAN.md"));
+        assert!(!screen.contains('…'), "{screen}");
+    }
+
+    #[test]
+    fn shorten_path_keeps_the_tail_and_respects_the_budget() {
+        assert_eq!(shorten_path("short.md", 20), "short.md");
+        assert_eq!(shorten_path("/a/b/c/long.md", 8), "…long.md");
+        assert_eq!(shorten_path("/a/b/c/long.md", 1), "…");
+        assert_eq!(shorten_path("/a/b/c/long.md", 0), "…");
+        // multibyte must not be sliced apart
+        assert_eq!(shorten_path("/tmp/Prüfen/köde.md", 8), "…köde.md");
+    }
+
+    /// The full hint line is ~105 columns; in a 95-column pane it was cut
+    /// mid-word, hiding `q quit` from the one reader who needs it most.
+    #[test]
+    fn narrow_footers_fall_back_to_shorter_key_hints() {
+        for w in [120u16, 95, 60, 30, 12] {
+            let mut app = App::new("PLAN.md".into(), DOC);
+            let screen = render(&mut app, w, 12);
+            assert!(
+                screen.contains("q quit"),
+                "width {w} lost the quit key:\n{screen}"
+            );
+        }
     }
 
     #[test]
