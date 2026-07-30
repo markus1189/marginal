@@ -5,7 +5,8 @@ an inline code span, a table row, a range of list items, a whole section — and
 emit the result as prose an agent can act on.
 
 POC scope: open a file, navigate, select, comment, emit JSON + feedback
-markdown. No launcher, no tmux popup, no gate semantics yet — see `STATUS.md`.
+markdown. No launcher, no tmux popup, no gate semantics yet — see `STATUS.md`
+for what exists, what does not, and why.
 
 ## Run
 
@@ -25,11 +26,58 @@ nix run . -- PLAN.md
 ```
 marginal FILE.md [--result PATH]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
+marginal --help                    # exits 0
 ```
 
-`--result PATH` writes the result JSON. Feedback markdown goes to stdout on
-exit. Exit code is `0` when nothing was annotated, `1` when something was, `2`
-on tool failure (unreadable file, no tty).
+`--dump-blocks` prints the flat navigation-unit table, which is how the parser
+gets checked without a terminal:
+
+```
+  0  heading      L1-1  level=1
+  1  list-item    L3-3
+  2  paragraph    L5-5
+```
+
+## Output
+
+**Use `--result PATH`.** The TUI needs a real tty, so it refuses to start when
+stdout is redirected — which means the feedback markdown it prints on exit can
+only ever land on the screen, never in a pipe. The result JSON is the only
+machine-readable route, and it carries the same markdown in
+`feedbackMarkdown`.
+
+Exit codes: `0` nothing was annotated, `1` something was, `2` tool failure
+(unreadable file, no tty, bad flag).
+
+A real run, annotating the inline code span in
+``Use `parse_document` and the [comrak docs](https://docs.rs) here.``:
+
+```json
+{
+  "version": 1,
+  "decision": "changes-requested",
+  "source": { "path": "PLAN.md", "lines": 5 },
+  "annotations": [
+    {
+      "id": "a1",
+      "type": "comment",
+      "blockKind": "code-span",
+      "startLine": 5,
+      "startCol": 5,
+      "endLine": 5,
+      "endCol": 20,
+      "wholeLines": false,
+      "originalText": "`parse_document`",
+      "text": "parse once and reuse the arena"
+    }
+  ],
+  "feedbackMarkdown": "# Review feedback: PLAN.md\n\n## PLAN.md:5:5-20 · code-span\n> `parse_document`\n\nparse once and reuse the arena\n"
+}
+```
+
+`wholeLines` says whether the span covers its lines entirely, so a consumer
+knows to quote whole lines rather than a fragment. It also picks the location
+format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.
 
 ## Keys
 
@@ -38,21 +86,24 @@ on tool failure (unreadable file, no tty).
 | `h`/`j`/`k`/`l`, arrows | move by character / line |
 | `C-d` / `C-u` | half page down / up |
 | `C-f` / `C-b`, PgDn/PgUp | full page down / up (two lines of overlap) |
-| `0` / `$` | start / end of line |
+| `0` / `$`, Home/End | start / end of line |
 | `J` / `K` | move by navigation unit |
 | `g` / `G` | first / last line |
 | `v` | select a range of units — `J`/`K` extends |
 | `V` | select whole lines, ignoring unit boundaries — `j`/`k` extends |
-| `+` / `-` | widen / narrow along the markdown hierarchy |
+| `+` / `-` (also `=` / `_`) | widen / narrow along the markdown hierarchy |
 | `c` | comment on the selection |
-| `x` | remove the annotation under the cursor |
+| `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `Esc` | drop the selection |
-| `q` | quit |
+| `q`, `C-c` | quit |
+
+Raw mode delivers `C-c` as a keystroke and no `SIGINT` is ever raised, so it is
+bound explicitly. Without that binding there is no way out but `q`.
 
 ### Writing a comment
 
-Readline bindings, because that is what fingers expect. `Enter` saves, `Esc`
-cancels, and **`C-j` inserts a newline** — comments can be several lines.
+Readline bindings, because that is what fingers expect. `Enter` saves, `Esc` or
+`C-c` cancels, and **`C-j` inserts a newline** — comments can be several lines.
 
 | Key | Action |
 |---|---|
@@ -72,7 +123,9 @@ There is no kill ring: killed text is gone.
 
 ## Selection
 
-Three mechanisms, all resolving to one `(line, column)` span.
+Three mechanisms, all resolving to one `(line, column)` span — and the screen
+shows **raw source lines**, so there is no rendered→source mapping layer to get
+wrong. Every node already *is* a span.
 
 **`v` — units.** `J`/`K` steps through *navigation units*: headings,
 paragraphs, list items, code blocks, **table rows**, and the inner blocks of a
@@ -94,30 +147,11 @@ paragraph gets you the code span inside it; `+` from a table row gets you the
 whole table. Runs of nodes with identical spans collapse, so every press
 visibly moves.
 
-## Syntax highlighting
+Note that the cursor must actually sit *inside* a node to reach it: with the
+cursor on the `#` of a heading, `-` has nothing to narrow to, because the text
+run starts two columns later.
 
-Headings, fences, inline code, links, emphasis, blockquotes, table pipes and
-list markers are coloured from **the AST that already exists** — no second
-parser, no regexes, no extra dependency. `blocks::parse_tree` knows where every
-node is to the byte, so `highlight` turns that into per-line tagged ranges and
-`ui` maps tags to colours.
-
-The renderer composites overlapping ranges with later marks winning, so the
-layering is: syntax, then selection, then cursor. Highlighting can never hide
-where you are or what you have chosen, and `**bold**` inside a blockquote wins
-over the quote's own styling.
-
-Code *inside* a fence is not highlighted by language — that would need syntect
-or a tree-sitter grammar set. Deliberately out of scope; see `STATUS.md`.
-
-## How positions work
-
-Annotations attach to source spans, and the screen shows **raw source lines** —
-so there is no rendered→source mapping layer, because every node already *is* a
-span.
-
-Spans come from [comrak](https://github.com/kivikakk/comrak)'s `sourcepos`,
-chosen over the alternatives after measuring all of them on one fixture.
+Positions come from [comrak](https://github.com/kivikakk/comrak)'s `sourcepos`.
 Container nodes carry real ranges, markers and fences sit *inside* the range,
 ranges are contiguous, and it reaches all the way down to inline nodes:
 
@@ -130,22 +164,26 @@ TableRow    L4:1  - L4:9
   TableCell L4:2  - L4:4
 ```
 
-Four normalisations sit on top, each pinned by a test:
+**Columns are 1-based *byte* offsets, not characters.** In ``Prüfen `köde` ``
+the backtick is character 8 and comrak calls it column 9. Every slice and every
+render cut is forced onto a character boundary. The four normalisations layered
+on top of `sourcepos`, each pinned by a test, are documented in `STATUS.md`.
 
-- comrak reports `line:0` as an end position when a block is terminated by the
-  next line; that is pulled back onto the last line the block occupies.
-- a list item's range spans its nested sublist, so the item is trimmed to end
-  where the sublist begins — item and sublist never overlap.
-- comrak emits no node for a table's `|---|---|` delimiter row, so each row is
-  stretched to just before the next one. The delimiter rides with the header,
-  and the unit list stays gapless.
-- **columns are 1-based *byte* offsets, not characters.** In `Prüfen \`köde\``
-  the backtick is character 8 and comrak calls it column 9. Every slice and
-  every render cut is forced onto a character boundary; there is a test that
-  deliberately asks for a cut inside `ü` and checks the line survives.
+## Syntax highlighting
 
-`--dump-blocks` prints the unit table for any file, which is how the parser
-gets checked without a terminal.
+Headings, fences, inline code, links, emphasis, blockquotes, table pipes and
+list markers are coloured from **the AST that already exists** — no second
+parser, no regexes, no extra dependency. `blocks::parse_tree` knows where every
+node is to the byte, `highlight` turns that into per-line tagged ranges, and
+`ui` maps tags to colours.
+
+The renderer composites overlapping ranges with later marks winning, so the
+layering is: syntax, then selection, then cursor. Highlighting can never hide
+where you are or what you have chosen, and `**bold**` inside a blockquote wins
+over the quote's own styling.
+
+Code *inside* a fence is not highlighted by language. Deliberately out of
+scope — see `STATUS.md` for the options if it ever matters.
 
 ## Tests and checks
 
@@ -170,7 +208,11 @@ cargo mutants     # do the tests actually catch anything?
 bacon             # watch loop
 ```
 
-95 tests, none requiring a terminal. The UI is covered through ratatui's
+**No test requires a terminal.** The UI is covered through ratatui's
 `TestBackend`, which renders into an in-memory buffer, so the gutter, partial
-line highlighting, multibyte segmentation and scrolling are asserted on rather
-than assumed.
+line highlighting, multibyte segmentation, narrow-pane layout and scrolling are
+asserted on rather than assumed.
+
+What that leaves uncovered is `main.rs::handle_key` — crossterm's key decoding
+and the mode dispatch. Driving the real binary in a tmux pane is the way to
+exercise it; `AGENTS.md` has the recipe.
