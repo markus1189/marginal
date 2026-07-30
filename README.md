@@ -5,8 +5,8 @@ an inline code span, a table row, a range of list items, a whole section — and
 emit the result as prose an agent can act on.
 
 POC scope: open a file, navigate, select, comment, emit JSON + feedback
-markdown. No launcher, no tmux popup, no gate semantics yet — see `STATUS.md`
-for what exists, what does not, and why.
+markdown. No tmux popup and no gate semantics yet; the only launcher is the pi
+extension below — see `STATUS.md` for what exists, what does not, and why.
 
 ## Run
 
@@ -84,6 +84,25 @@ A real run, annotating the inline code span in
 `wholeLines` says whether the span covers its lines entirely, so a consumer
 knows to quote whole lines rather than a fragment. It also picks the location
 format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.
+
+## Launcher: annotating an agent's reply
+
+`.pi/extensions/marginal-annotate.ts` registers `/annotate` in
+[pi](https://github.com/badlogic/pi-mono). It takes the agent's last message,
+writes it to a temp `.md`, suspends pi's TUI, runs marginal over it, and sends
+`feedbackMarkdown` back as the next prompt. Exit `0` sends nothing.
+
+The binary is looked up as `$MARGINAL_BIN`, then `target/release/marginal`, then
+`marginal` on `PATH` — the repo build wins, so you review with what you just
+compiled. Project-local extensions load only in a trusted project, so start pi
+with `-a` or trust the project once.
+
+`--label assistant-message` is what makes it readable: the temp path is noise,
+so every location reads `assistant-message:29 · list-item` instead.
+
+No tty relocation is involved. pi already owns the terminal, so the extension
+stops the host TUI and starts it again in a `finally`. That is the whole trick,
+and it only works for a host that is itself a terminal program.
 
 ## Keys
 

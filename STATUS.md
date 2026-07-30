@@ -58,8 +58,11 @@ Put it behind a cargo feature so the lean build stays the default.
 
 ## Not built yet
 
-- **the launcher** — the piece that relocates the TUI onto a tty
-  the agent does not own. Deliberately absent: see the open question below.
+- **the general launcher** — the piece that relocates the TUI onto a tty the
+  agent does not own. The pi extension (`.pi/extensions/marginal-annotate.ts`,
+  see the README) is not one: it suspends a host TUI that already holds the
+  terminal. A headless agent still has nowhere to put the screen — see the open
+  question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
 - **horizontal scrolling.** `draw_source` renders each line from column 1 and
@@ -139,3 +142,8 @@ approve/reject gate is already bound in the user's config (`C-c C-c` /
 What the finer selection work does change: `+`/`-` on the markdown hierarchy is
 something an Emacs buffer does not give you for free. That is now a real
 argument for the terminal version rather than a hypothetical one.
+
+One data point since: the pi extension needs none of the above. A host that is
+itself a terminal program can hand its tty over and take it back, and a result
+file read after the fact makes the exit-code ambiguity moot. It answers nothing
+about the headless case, which is the hard one.
