@@ -216,7 +216,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
         app.annotations.len(),
     );
     let budget = usize::from(area.width).saturating_sub(rest.chars().count() + 3);
-    let title = format!("{rest}{} ", shorten_path(&app.path, budget));
+    let title = format!("{rest}{} ", shorten_path(app.display_name(), budget));
 
     f.render_widget(
         Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(title)),
@@ -588,6 +588,20 @@ mod tests {
         let mut app = App::new("PLAN.md".into(), DOC);
         let screen = render(&mut app, 95, 24);
         assert!(screen.contains("PLAN.md"));
+        assert!(!screen.contains('…'), "{screen}");
+    }
+
+    /// The same temp path, labelled: the title names what is being reviewed and
+    /// needs no eliding at all, because the label is short by construction.
+    #[test]
+    fn a_label_replaces_the_path_in_the_title() {
+        let long = "/tmp/claude-1000/-home-markus-Stuff-2026-07-27-scratch-marginal/\
+                    7d415313-bed3-412e-8fed-f0dd60064d/scratchpad/review.md";
+        let mut app = App::new(long.into(), DOC);
+        app.label = Some("assistant-message".into());
+        let screen = render(&mut app, 95, 24);
+        assert!(screen.contains("assistant-message"), "{screen}");
+        assert!(!screen.contains("scratchpad"), "{screen}");
         assert!(!screen.contains('…'), "{screen}");
     }
 

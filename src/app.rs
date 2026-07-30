@@ -64,6 +64,10 @@ pub struct Annotation {
 #[derive(Debug, Serialize)]
 pub struct Source {
     pub path: String,
+    /// Display name a launcher asked for. `path` stays the real file, so
+    /// provenance survives even when the file is a temporary one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub lines: usize,
 }
 
@@ -79,6 +83,9 @@ pub struct Outcome {
 
 pub struct App {
     pub path: String,
+    /// Overrides `path` everywhere a human reads it. A launcher that opens a
+    /// temp file names the thing being reviewed instead of where it landed.
+    pub label: Option<String>,
     pub lines: Vec<String>,
     pub blocks: Vec<Block>,
     pub tree: TreeNode,
@@ -128,6 +135,7 @@ impl App {
         let cursor = blocks.first().map_or(Pos::new(1, 1), |b| b.span.start);
         Self {
             path,
+            label: None,
             lines,
             blocks,
             tree,
@@ -483,22 +491,25 @@ impl App {
 
     // ---- output ---------------------------------------------------------
 
+    /// What a human should see this file called.
+    pub fn display_name(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.path)
+    }
+
     fn loc(&self, a: &Annotation) -> String {
+        let name = self.display_name();
         if a.whole_lines {
             if a.start_line == a.end_line {
-                format!("{}:{}", self.path, a.start_line)
+                format!("{}:{}", name, a.start_line)
             } else {
-                format!("{}:{}-{}", self.path, a.start_line, a.end_line)
+                format!("{}:{}-{}", name, a.start_line, a.end_line)
             }
         } else if a.start_line == a.end_line {
-            format!(
-                "{}:{}:{}-{}",
-                self.path, a.start_line, a.start_col, a.end_col
-            )
+            format!("{}:{}:{}-{}", name, a.start_line, a.start_col, a.end_col)
         } else {
             format!(
                 "{}:{}:{}-{}:{}",
-                self.path, a.start_line, a.start_col, a.end_line, a.end_col
+                name, a.start_line, a.start_col, a.end_line, a.end_col
             )
         }
     }
@@ -507,7 +518,7 @@ impl App {
         if self.annotations.is_empty() {
             return String::new();
         }
-        let mut out = format!("# Review feedback: {}\n", self.path);
+        let mut out = format!("# Review feedback: {}\n", self.display_name());
         for a in &self.annotations {
             let _ = write!(out, "\n## {} · {}\n", self.loc(a), a.block_kind);
             for l in a.original_text.lines() {
@@ -528,6 +539,7 @@ impl App {
             },
             source: Source {
                 path: self.path.clone(),
+                label: self.label.clone(),
                 lines: self.lines.len(),
             },
             annotations: self.annotations.clone(),
@@ -923,6 +935,48 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let md = a.feedback_markdown();
         assert!(md.contains("## PLAN.md:6:5-20 · code-span"), "{md}");
         assert!(md.contains("> `parse_document`"));
+    }
+
+    /// A launcher opens a temp file whose absolute path is ~100 characters of
+    /// noise the consumer cannot use. The label replaces it everywhere a human
+    /// reads it, while `source.path` keeps saying where the bytes came from.
+    #[test]
+    fn a_label_replaces_the_path_in_feedback_but_not_in_provenance() {
+        let mut a = app();
+        a.label = Some("assistant-message".into());
+        a.cursor = Pos::new(6, 6);
+        a.contract();
+        commit(&mut a, "call it once");
+
+        let md = a.feedback_markdown();
+        assert!(
+            md.starts_with("# Review feedback: assistant-message\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("## assistant-message:6:5-20 · code-span"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("PLAN.md"),
+            "path must not leak into feedback: {md}"
+        );
+
+        let json = serde_json::to_string(&a.result()).unwrap();
+        assert!(json.contains("\"path\":\"PLAN.md\""), "{json}");
+        assert!(json.contains("\"label\":\"assistant-message\""), "{json}");
+    }
+
+    /// Without one, nothing about the output changes — including the absence
+    /// of the key, so an unlabelled result stays byte-identical to before.
+    #[test]
+    fn no_label_leaves_the_path_and_omits_the_key() {
+        let mut a = app();
+        commit(&mut a, "x");
+        assert_eq!(a.display_name(), "PLAN.md");
+        assert!(a.feedback_markdown().contains("# Review feedback: PLAN.md"));
+        let json = serde_json::to_string(&a.result()).unwrap();
+        assert!(!json.contains("label"), "{json}");
     }
 
     #[test]

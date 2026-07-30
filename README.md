@@ -24,10 +24,16 @@ nix run . -- PLAN.md
 ## Usage
 
 ```
-marginal FILE.md [--result PATH]
+marginal FILE.md [--result PATH] [--label NAME]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
 marginal --help                    # exits 0
 ```
+
+`--label NAME` replaces the path everywhere a human reads it — the title bar and
+every location in the feedback markdown. It exists for launchers, which open a
+temp file whose absolute path is noise the consumer cannot use. `source.path` in
+the result JSON still records where the bytes came from; `source.label` carries
+the name, and is omitted entirely when no label was given.
 
 `--dump-blocks` prints the flat navigation-unit table, which is how the parser
 gets checked without a terminal:

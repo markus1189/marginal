@@ -17,11 +17,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use app::{App, Mode, Sel};
 
-const USAGE: &str = "usage: marginal [--dump-blocks] [--result PATH] FILE";
+const USAGE: &str = "usage: marginal [--dump-blocks] [--result PATH] [--label NAME] FILE";
 
 struct Args {
     file: String,
     result: Option<String>,
+    label: Option<String>,
     dump: bool,
 }
 
@@ -29,6 +30,7 @@ struct Args {
 fn parse_args() -> Result<Option<Args>, String> {
     let mut file = None;
     let mut result = None;
+    let mut label = None;
     let mut dump = false;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -36,6 +38,9 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--dump-blocks" => dump = true,
             "--result" => {
                 result = Some(it.next().ok_or("--result needs a path")?);
+            }
+            "--label" => {
+                label = Some(it.next().ok_or("--label needs a name")?);
             }
             "-h" | "--help" => return Ok(None),
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
@@ -45,6 +50,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     Ok(Some(Args {
         file: file.ok_or("no input file")?,
         result,
+        label,
         dump,
     }))
 }
@@ -99,6 +105,7 @@ fn main() -> ExitCode {
     }
 
     let mut app = App::new(args.file.clone(), &src);
+    app.label = args.label;
     match run(&mut app) {
         Ok(()) => {}
         Err(e) => {
