@@ -1,4 +1,4 @@
-# annot-tui
+# marginal
 
 Annotate markdown in a terminal at whatever granularity you actually mean —
 an inline code span, a table row, a range of list items, a whole section — and
@@ -23,8 +23,8 @@ nix run . -- PLAN.md
 ## Usage
 
 ```
-annot-tui FILE.md [--result PATH]
-annot-tui --dump-blocks FILE.md     # headless: print the navigation units
+marginal FILE.md [--result PATH]
+marginal --dump-blocks FILE.md     # headless: print the navigation units
 ```
 
 `--result PATH` writes the result JSON. Feedback markdown goes to stdout on

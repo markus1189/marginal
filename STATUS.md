@@ -56,7 +56,7 @@ Put it behind a cargo feature so the lean build stays the default.
 
 ## Not built yet
 
-- **the launcher** (`bin/annot`) — the piece that relocates the TUI onto a tty
+- **the launcher** — the piece that relocates the TUI onto a tty
   the agent does not own. Deliberately absent: see the open question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
@@ -68,7 +68,7 @@ Put it behind a cargo feature so the lean build stays the default.
 
 | | |
 |---|---|
-| flake build | `nix build .#annot-tui` → store path |
+| flake build | `nix build .#marginal` → store path |
 | 5500-line file, 2500 units | parsed in 4 ms |
 | real plan file | 89 units (66 before tables and quotes were split) |
 | no tty | exits `2` with a message, no panic |

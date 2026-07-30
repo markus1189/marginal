@@ -1,8 +1,8 @@
-//! annot-tui — POC: open a markdown file, navigate by block, annotate ranges.
+//! marginal — POC: open a markdown file, navigate by block, annotate ranges.
 //!
 //! Usage:
-//!   annot-tui FILE.md [--result PATH]
-//!   annot-tui --dump-blocks FILE.md     (headless; prints the block table)
+//!   marginal FILE.md [--result PATH]
+//!   marginal --dump-blocks FILE.md     (headless; prints the block table)
 
 mod app;
 mod blocks;
@@ -34,7 +34,7 @@ fn parse_args() -> Result<Args, String> {
             "--result" => {
                 result = Some(it.next().ok_or("--result needs a path")?);
             }
-            "-h" | "--help" => return Err("usage: annot-tui [--dump-blocks] [--result PATH] FILE".into()),
+            "-h" | "--help" => return Err("usage: marginal [--dump-blocks] [--result PATH] FILE".into()),
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
             other => file = Some(other.to_string()),
         }
@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("annot-tui: {e}");
+            eprintln!("marginal: {e}");
             return ExitCode::from(2);
         }
     };
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     let src = match std::fs::read_to_string(&args.file) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("annot-tui: cannot read {}: {e}", args.file);
+            eprintln!("marginal: cannot read {}: {e}", args.file);
             return ExitCode::from(2);
         }
     };
@@ -95,7 +95,7 @@ fn main() -> ExitCode {
     match run(&mut app) {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("annot-tui: {e}");
+            eprintln!("marginal: {e}");
             return ExitCode::from(2);
         }
     }
@@ -103,7 +103,7 @@ fn main() -> ExitCode {
     if let Some(path) = &args.result {
         let json = serde_json::to_string_pretty(&app.result()).expect("serialize");
         if let Err(e) = std::fs::write(path, json) {
-            eprintln!("annot-tui: cannot write {path}: {e}");
+            eprintln!("marginal: cannot write {path}: {e}");
             return ExitCode::from(2);
         }
     }

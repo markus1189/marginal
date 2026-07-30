@@ -1,5 +1,5 @@
 {
-  description = "annot-tui — block-range annotation for markdown, in a terminal";
+  description = "marginal — block-range annotation for markdown, in a terminal";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -10,13 +10,13 @@
     in
     {
       packages = forAll (pkgs: rec {
-        annot-tui = pkgs.rustPlatform.buildRustPackage {
-          pname = "annot-tui";
+        marginal = pkgs.rustPlatform.buildRustPackage {
+          pname = "marginal";
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
         };
-        default = annot-tui;
+        default = marginal;
       });
 
       devShells = forAll (pkgs: {
