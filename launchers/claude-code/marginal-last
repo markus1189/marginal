@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+#
+# marginal-last — review Claude Code's last assistant message(s) in marginal.
+#
+# The Claude Code counterpart of .pi/extensions/marginal-annotate.ts. Same
+# document model, different host: pi owns the terminal and can suspend its own
+# TUI, Claude Code runs the launcher from a tool call whose stdio is captured.
+# So the tty is borrowed rather than suspended — a tmux popup on the client
+# showing Claude's own pane, or a terminal window when there is no tmux.
+#
+#   marginal-last          the last assistant message, bare
+#   marginal-last 3        the last 3 assistant messages, plus the prompts between
+#   marginal-last all      the whole session
+#   marginal-last --dump   print the assembled document, launch nothing
+#
+# The transcript is cut at the most recent user prompt before anything is
+# assembled: that prompt is the `/marginal-last` invocation itself, so what is
+# offered for review is the message the human had actually read when they asked
+# — never the half-finished turn that is running this script.
+#
+# Binary resolution, in order:
+#   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  `marginal` on PATH
+#
+# Exit codes:
+#   0  handled — stdout is either the feedback or "No annotations"
+#   2  the gate could not run, at any stage, for any reason
+#
+# marginal's own 0/1 split is deliberately not propagated: a tool call that
+# exits non-zero reads as a broken command, and "the human commented" is not a
+# failure. The distinction is carried in stdout, which is what the agent reads.
+
+set -euo pipefail
+trap 'exit 2' ERR   # every failure leaves by the documented door, jq's included
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly REPO_BUILD="$SCRIPT_DIR/../../target/release/marginal"
+
+die() { printf 'marginal-last: %s\n' "$*" >&2; exit 2; }
+
+# ---------------------------------------------------------------- arguments
+
+dump_only=0
+spec=1
+for arg in "$@"; do
+  case "$arg" in
+    --dump) dump_only=1 ;;
+    all|ALL) spec="all" ;;
+    ''|*[!0-9]*) die "usage: marginal-last [N|all] [--dump]  (got '$arg')" ;;
+    # base 10 explicitly: `08` is not an octal literal here, it is eight
+    *) spec=$((10#$arg)); [ "$spec" -gt 0 ] || die "N must be a positive integer (got '$arg')" ;;
+  esac
+done
+
+command -v jq >/dev/null || die "jq is required to read the session transcript"
+
+# ---------------------------------------------------------------- transcript
+#
+# $CLAUDE_CODE_SESSION_ID names the transcript exactly. There is deliberately no
+# fallback: a project directory holds hundreds of past sessions, two windows open
+# on one repo share it, and picking by mtime would hand over a conversation the
+# human was never in — silently, and with no way to notice from the document.
+
+[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
+  || die "\$CLAUDE_CODE_SESSION_ID is unset — cannot identify this session's transcript"
+
+transcript=""
+for candidate in "$HOME"/.claude/projects/*/"$CLAUDE_CODE_SESSION_ID".jsonl; do
+  if [ -f "$candidate" ]; then transcript="$candidate"; break; fi
+done
+[ -n "$transcript" ] || die "no transcript for session $CLAUDE_CODE_SESSION_ID"
+
+# ---------------------------------------------------------------- document
+#
+# Thinking blocks, tool calls and tool results carry no prose worth annotating
+# and are dropped, so the numbering counts messages that survived rather than
+# turns of the agent loop.
+#
+# Claude Code also writes machine traffic as ordinary `user` messages: task
+# notifications, `!command` input and its output, slash-command stubs. All of it
+# is kept out of the document, but the two kinds are not interchangeable — a
+# stub records that the human invoked something and is therefore a valid place
+# to cut, while a notification that landed mid-turn is not, and cutting there
+# would leave the in-flight turn in the document.
+
+read -r -d '' JQ_PROG <<'JQ' || true
+def turn_text:
+  if (.message.content | type) == "string" then .message.content
+  else [ .message.content[]? | select(.type == "text") | .text ] | join("\n\n")
+  end;
+
+def trimmed: gsub("^\\s+|\\s+$"; "");
+
+# anything the human did not type — never the cut point
+def machine: test("^<(task-notification|bash-stdout|local-command-stdout|system-reminder)>");
+# anything wrapped in a tag — never part of the document
+def plumbing: test("^<[a-z][a-z0-9-]*>");
+
+[ .[]
+  | select((.isSidechain // false) | not)
+  | select((.isMeta // false) | not)
+  | select(.type == "assistant" or .type == "user")
+  | select(.message.role == "assistant" or .message.role == "user")
+  | { role: .message.role, text: ((turn_text // "") | trimmed) }
+  | select(.text != "")
+]
+
+# cut at the invoking prompt
+| . as $all
+| ([ range(0; $all | length)
+     | select($all[.].role == "user" and ($all[.].text | machine | not)) ] | last) as $cut
+| (if $cut == null then $all else $all[0:$cut] end)
+
+| [ .[] | select((.role == "user" and (.text | plumbing)) | not) ]
+
+| . as $turns
+| ([ range(0; $turns | length) | select($turns[.].role == "assistant") ]) as $ai
+| if ($ai | length) == 0 then null
+  elif $count == 1 then
+    { label: "assistant-message", text: ($turns[$ai[-1]].text + "\n") }
+  else
+    (if $count == "all" then 0
+     elif ($ai | length) > $count then $ai[-($count + 1)] + 1
+     else 0 end) as $start
+    | { label: "conversation",
+        text: ([ $turns[$start:] | to_entries[]
+                 | "## " + (if .value.role == "user" then "you" else "agent" end)
+                   + " [" + (.key + 1 | tostring) + "]\n\n" + .value.text ]
+               | join("\n\n")) + "\n" }
+  end
+JQ
+
+# --argjson so `1` is a number and `01` cannot become a different view
+if [ "$spec" = "all" ]; then count_arg='"all"'; else count_arg="$spec"; fi
+document="$(jq -s --argjson count "$count_arg" "$JQ_PROG" "$transcript")"
+[ "$document" != "null" ] || die "no assistant message with text in $(basename "$transcript")"
+
+workdir="$(mktemp -d -t claude-code.marginal-last.XXXXXX)"
+trap 'rm -rf "$workdir"' EXIT
+result_json="$workdir/result.json"
+
+label="$(printf '%s' "$document" | jq -r '.label')"
+source_md="$workdir/$label.md"
+# -j, not -r: the document already ends in its own newline
+printf '%s' "$document" | jq -j '.text' > "$source_md"
+
+if [ "$dump_only" -eq 1 ]; then
+  printf '# %s (%s, from %s)\n\n' "$label" "$spec" "$(basename "$transcript")"
+  cat "$source_md"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- binary
+
+binary=""
+if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
+  binary="$MARGINAL_BIN"
+elif [ -x "$REPO_BUILD" ]; then
+  binary="$REPO_BUILD"
+elif command -v marginal >/dev/null; then
+  binary="$(command -v marginal)"
+fi
+[ -n "$binary" ] || die "marginal not found — build it (cargo build --release) or set \$MARGINAL_BIN"
+
+# ---------------------------------------------------------------- the tty
+#
+# marginal refuses to start without a real tty, and this script has none. A tmux
+# popup is a blocking tty on the client that is already showing Claude's pane; a
+# terminal window is the same trade without tmux. There is deliberately no third
+# branch: a gate that cannot reach the human must say so, not answer on their
+# behalf.
+#
+# Three things about this, all measured:
+#   - A tmux session with no attached client still runs the command, with a pty,
+#     and still reports its exit status — to an audience of nobody. A TUI
+#     launched that way waits for a keypress that can never arrive, so the
+#     attached-client check below is what stands between the user and a silent
+#     30-minute hang.
+#   - The popup does not inherit this shell's environment; it gets the tmux
+#     server's. The binary is passed by absolute path for that reason, and the
+#     locale is forwarded explicitly, since a server started before the current
+#     locale settings would otherwise render multibyte text differently here
+#     than everywhere else.
+#   - alacritty does NOT forward its child's exit status: `alacritty -e sh -c
+#     'exit 7'` returns 0. Nothing below may read $rc as a verdict; see the
+#     result-file comment.
+
+rc=0
+if [ -n "${TMUX:-}" ]; then
+  [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
+    || die "this tmux session has no attached client — nobody could see the popup"
+
+  # if-blocks, not `[ -n "$x" ] && popup+=(…)`: a false test is a failed command,
+  # and under `set -e` an unset LC_ALL would end the script here instead.
+  popup=(-E -w 90% -h 90% -T " marginal · $label ")
+  if [ -n "${TMUX_PANE:-}" ]; then popup+=(-t "$TMUX_PANE"); fi
+  if [ -n "${LANG:-}" ]; then popup+=(-e "LANG=$LANG"); fi
+  if [ -n "${LC_ALL:-}" ]; then popup+=(-e "LC_ALL=$LC_ALL"); fi
+  if [ -n "${COLORTERM:-}" ]; then popup+=(-e "COLORTERM=$COLORTERM"); fi
+
+  tmux display-popup "${popup[@]}" \
+    -- "$binary" --result "$result_json" --label "$label" "$source_md" || rc=$?
+elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v alacritty >/dev/null; then
+  alacritty --title "marginal · $label" \
+    -e "$binary" --result "$result_json" --label "$label" "$source_md" || rc=$?
+else
+  die "no way to reach a terminal — run Claude Code inside tmux, or install alacritty"
+fi
+
+# ---------------------------------------------------------------- feedback
+#
+# The result file is the verdict; $rc is only ever a diagnostic. marginal writes
+# the file on every run that reached the TUI, before deciding its own exit code
+# (src/main.rs:117), so its absence means the TUI never ran — a popup that could
+# not open, a second popup on a client that already has one, a binary that
+# failed to start. Reading $rc for the annotated/clean split would report "no
+# annotations" over real feedback on the alacritty path, where rc is always 0.
+
+[ -f "$result_json" ] \
+  || die "marginal wrote no result file (launcher rc=$rc) — it never ran, or could not start"
+
+count="$(jq -r '.annotations | length' "$result_json")"
+feedback="$(jq -r '.feedbackMarkdown // ""' "$result_json")"
+
+if [ "$count" -eq 0 ] || [ -z "${feedback//[[:space:]]/}" ]; then
+  echo "No annotations — nothing to address."
+  exit 0
+fi
+
+if [ "$label" = "conversation" ]; then
+  cat <<'HDR'
+The user reviewed this conversation in marginal. It was laid out as one markdown
+document, with a `## you [n]` / `## agent [n]` heading per message, so an
+annotation may span or compare several messages. Each `##` heading below gives
+the location and kind of the span they selected, the blockquote is the exact
+text they selected, and the prose under it is their comment. Line and column
+numbers refer to that assembled document, not to any file. Address every
+comment.
+
+HDR
+else
+  cat <<'HDR'
+The user reviewed your last message in marginal. Each `##` heading below gives
+the location and kind of the span they selected, the blockquote is the exact
+text they selected, and the prose under it is their comment. Line and column
+numbers refer to your message as markdown, not to any file. Address every
+comment.
+
+HDR
+fi
+printf '%s\n' "$feedback"

@@ -64,7 +64,10 @@ Put it behind a cargo feature so the lean build stays the default.
 - **the general launcher** — the piece that relocates the TUI onto a tty the
   agent does not own. The pi extension (`.pi/extensions/marginal-annotate.ts`,
   see the README) is not one: it suspends a host TUI that already holds the
-  terminal. A headless agent still has nowhere to put the screen — see the open
+  terminal. The Claude Code launcher (`launchers/claude-code/marginal-last`) is
+  half of one: it borrows a tty from tmux, from a caller that has none, which is
+  the hard half — but it borrows from *this* human's tmux server. An agent with
+  no tmux and no `DISPLAY` still has nowhere to put the screen — see the open
   question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
@@ -210,3 +213,29 @@ One data point since: the pi extension needs none of the above. A host that is
 itself a terminal program can hand its tty over and take it back, and a result
 file read after the fact makes the exit-code ambiguity moot. It answers nothing
 about the headless case, which is the hard one.
+
+A second data point, which does bear on it: the Claude Code launcher runs from a
+tool call with captured stdio, no tty and no way to suspend anything, and the
+tmux popup carries it anyway. Measured, on that path:
+
+- `display-popup -E` blocks the caller for the full run (3 s sleep → 3.02 s
+  wall) and propagates the inner exit status unchanged — `0`/`1`/`2`/`3` all
+  arrive intact, so the wrapper the Emacs route needs is unnecessary here.
+- `$TMUX` and `$TMUX_PANE` survive into the tool call, so the popup lands on the
+  client already showing the agent — no client hunting.
+- A session with **no attached client** still runs the command, with a pty, and
+  still reports its exit status. That is the failure this design has to catch by
+  hand (`list-clients` before launching), and it is worse than the concurrent-
+  popup case: nothing is wrong, nobody can see it, and the caller waits.
+- The exit status is not portable across transports the way the popup makes it
+  look. `alacritty -e sh -c 'exit 7'` returns **0** — the terminal blocks, but
+  the child's verdict is gone. So the rule the concurrent-popup case already
+  forces (`0` means approved only when a well-formed result file exists) is not
+  a tmux quirk to work around; it is the only thing a launcher can rely on, and
+  reading the exit code at all is a portability trap.
+
+So the answer for a headless agent may be less "relocate the screen" than "find
+the human's multiplexer and prove somebody is attached to it". What is still
+unanswered is the agent with no human terminal anywhere — SSH-less CI, a cloud
+session — where the browser Plannotator opens is a real advantage and a tmux
+popup has nothing to attach to.

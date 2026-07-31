@@ -5,8 +5,8 @@ an inline code span, a table row, a range of list items, a whole section — and
 emit the result as prose an agent can act on.
 
 POC scope: open a file, navigate, select, comment, emit JSON + feedback
-markdown. No tmux popup and no gate semantics yet; the only launcher is the pi
-extension below — see `STATUS.md` for what exists, what does not, and why.
+markdown. No gate semantics yet; two launchers exist, one per host style — see
+`STATUS.md` for what exists, what does not, and why.
 
 ## Run
 
@@ -85,7 +85,15 @@ A real run, annotating the inline code span in
 knows to quote whole lines rather than a fragment. It also picks the location
 format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.
 
-## Launcher: annotating an agent's reply
+## Launchers: annotating an agent's reply
+
+Two hosts, two ways onto a tty. pi is a terminal program and can lend marginal
+the one it already holds; Claude Code runs the launcher from a tool call with no
+tty anywhere in reach, so one has to be borrowed from tmux. The document model —
+which messages go in, how they are headed, what `--label` they carry — is the
+same in both, deliberately.
+
+### pi — `/annotate`
 
 `.pi/extensions/marginal-annotate.ts` registers `/annotate` in
 [pi](https://github.com/badlogic/pi-mono). It takes the agent's last message,
@@ -124,6 +132,77 @@ node --test .pi/extensions/marginal-annotate.test.mjs
 ```
 
 `./check` runs them too when `node` is on `PATH`, and skips them when it is not.
+
+### Claude Code — `/marginal-last`
+
+`launchers/claude-code/marginal-last` is a bash script and `SKILL.md` beside it
+is the slash command, which does nothing but run the script and read its stdout.
+Both live here; installing is one symlink, so the two copies cannot drift:
+
+```sh
+ln -s "$PWD/launchers/claude-code" ~/.claude/skills/marginal-last
+```
+
+Same three views (`/marginal-last`, `/marginal-last 3`, `/marginal-last all`),
+same labels, same headers on the feedback.
+
+The transcript is read from `~/.claude/projects/*/$CLAUDE_CODE_SESSION_ID.jsonl`
+rather than from a session API. `isSidechain` entries (subagents) are dropped
+along with thinking, tool calls, tool results and `isMeta` entries — the last of
+those matters, since the injected skill body itself arrives as a user message.
+
+There is deliberately **no fallback** when the session id is missing. A project
+directory accumulates hundreds of past sessions and two windows on one repo
+share it, so picking by mtime would hand over a conversation the human was never
+in — silently, and with nothing in the document to give it away.
+
+**The transcript is cut at the most recent user prompt before anything is
+assembled.** That prompt is the `/marginal-last` invocation itself, so what is
+offered for review is the message the human had actually read when they asked —
+not the half-finished turn that is running the launcher. This has no pi
+equivalent, where commands run outside the agent loop.
+
+Which means "user prompt" has to be exact. Claude Code writes machine traffic as
+ordinary user messages — task notifications, `!command` input and its output —
+and the two kinds are not interchangeable: a slash-command stub records that the
+human invoked something and is a valid place to cut, while a notification that
+landed mid-turn is not, and cutting there would leave the in-flight turn in the
+document. Everything tag-wrapped is kept out of the document either way.
+
+`--dump` prints the assembled document and launches nothing, which is how the
+builder gets checked without a terminal — the same trick as `--dump-blocks`:
+
+```sh
+launchers/claude-code/marginal-last 3 --dump
+```
+
+The tty comes from `tmux display-popup -E`, which blocks the caller for exactly
+as long as the TUI runs and propagates its exit status unchanged (0/1/2/3 all
+survive, measured). Without `$TMUX` it falls back to `alacritty -e`. With
+neither, the launcher fails — a gate that cannot reach the human must say so
+rather than answer for them.
+
+**The result file is the verdict; the exit status is only a diagnostic.**
+marginal writes the file on every run that reached the TUI, before deciding its
+own exit code (`src/main.rs:117`), so its absence means the TUI never ran. That
+is not a stylistic preference: `alacritty -e sh -c 'exit 7'` returns **0**, so a
+launcher that reads the exit status for the annotated/clean split announces "no
+annotations" over real feedback on that path. Terminals that fork outright
+(ghostty, gnome-terminal) are not used, because they would not block either.
+
+Four behaviours the code has to defend against, all measured:
+
+| Behaviour | Consequence |
+|---|---|
+| A tmux session with no attached client still runs the command and reports its status | A TUI nobody can see, waiting for a keypress nobody can send. Refused up front via `list-clients`. |
+| One popup per client — a second concurrent caller gets `rc=0` having never run | Handled by the same rule as above: no result file, no verdict, exit `2`. |
+| The popup inherits the tmux server's environment, not the caller's | The binary is passed by absolute path, and `LANG`/`LC_ALL`/`COLORTERM` are forwarded explicitly. |
+| `alacritty` does not forward its child's exit status | Nothing reads `$rc` as a verdict; it appears only in the error message when no result file exists. |
+
+marginal's `0`/`1` split is deliberately not propagated to the agent: a tool call
+that exits non-zero reads as a broken command, and "the human commented" is not a
+failure. The launcher exits `0` for both and puts the distinction in stdout,
+which is what the agent actually reads; `2` is every failure, jq's included.
 
 ## Keys
 
