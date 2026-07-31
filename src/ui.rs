@@ -10,7 +10,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
@@ -42,6 +42,9 @@ pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
     }
     draw_annotations(f, chunks[2], app);
     draw_footer(f, chunks[3], app);
+    if app.peek {
+        draw_peek(f, chunks[0], app);
+    }
 }
 
 /// Colours for the markdown syntax tags produced by `highlight`.
@@ -98,6 +101,56 @@ fn segments(text: &str, marks: &[(usize, usize, Style)], base: Style) -> Vec<Spa
     out
 }
 
+/// Line-number field floor. The gutter is this plus two cells: the annotation
+/// dot and the selection bar.
+const LINENO_MIN: usize = 4;
+
+/// Byte index of the cursor within `text`, floored onto a character boundary.
+/// `App::snap` normally guarantees this, but tests assign `cursor` directly and
+/// slicing mid-character panics.
+fn cursor_byte(app: &App, text: &str) -> usize {
+    let mut i = app.cursor.col.saturating_sub(1).min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Syntax first, then selection, then the cursor: later marks win, so
+/// highlighting never hides where you are or what you have chosen.
+fn line_marks(
+    app: &App,
+    lineno: usize,
+    text: &str,
+    sel_style: Style,
+    cur_style: Style,
+) -> Vec<(usize, usize, Style)> {
+    let mut marks: Vec<(usize, usize, Style)> = app
+        .marks
+        .get(lineno - 1)
+        .map(|row| {
+            row.iter()
+                .map(|(a, b, tag)| (*a, *b, syntax_style(tag)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some((a, b)) = app.selected_bytes_on(lineno) {
+        marks.push((a, b, sel_style));
+    }
+    if lineno == app.cursor.line {
+        let c0 = cursor_byte(app, text);
+        let c1 = text[c0..]
+            .char_indices()
+            .nth(1)
+            .map_or(text.len(), |(i, _)| c0 + i);
+        if c1 > c0 {
+            marks.push((c0, c1, cur_style));
+        }
+    }
+    marks
+}
+
 fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
     let viewport = area.height.saturating_sub(2) as usize;
     app.viewport = viewport;
@@ -110,88 +163,119 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD);
 
-    let mut rows: Vec<Line> = Vec::with_capacity(viewport);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(source_title(app, area.width));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // The gutter is its own column. Nothing that happens to the body — running
+    // off the edge, or one day scrolling sideways — can push the line number,
+    // the annotation dot or the selection bar off the screen with it.
+    let lineno_w = app.lines.len().to_string().len().max(LINENO_MIN);
+    let gutter_w = u16::try_from(lineno_w + 2)
+        .unwrap_or(6)
+        .min(inner.width.saturating_sub(1));
+    let cols = Layout::horizontal([Constraint::Length(gutter_w), Constraint::Min(0)]).split(inner);
+    let (gutter_area, body_area) = (cols[0], cols[1]);
+    let body_w = usize::from(body_area.width);
+
+    let mut gutter: Vec<Line> = Vec::with_capacity(viewport);
+    let mut body: Vec<Line> = Vec::with_capacity(viewport);
+    // Rows whose line runs past the right edge, and the colour to say so in.
+    let mut overflow: Vec<(usize, Style)> = Vec::new();
 
     for idx in 0..viewport {
         let lineno = *scroll + idx + 1;
         if lineno > app.lines.len() {
             break;
         }
-        let text = app.line_text(lineno).to_string();
+        // One space per tab, not a tab stop. ratatui drops control characters
+        // outright, so a tab used to vanish and shift every column after it left
+        // by one. A single space is one byte for one cell, which keeps the byte
+        // column the screen shows identical to the byte column that goes in the
+        // JSON — worth more here than visually correct indentation.
+        let text = app.line_text(lineno).replace('\t', " ");
         let on_cursor_line = lineno == app.cursor.line;
         let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
+        let selected_here = app.line_selected(lineno);
         let n = app.annotations_on(lineno);
 
-        // Syntax first, then selection, then the cursor: later marks win, so
-        // highlighting never hides where you are or what you have chosen.
-        let mut marks: Vec<(usize, usize, Style)> = app
-            .marks
-            .get(lineno - 1)
-            .map(|row| {
-                row.iter()
-                    .map(|(a, b, tag)| (*a, *b, syntax_style(tag)))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if let Some((a, b)) = app.selected_bytes_on(lineno) {
-            marks.push((a, b, sel_style));
-        }
-        if on_cursor_line {
-            let c0 = app.cursor.col.saturating_sub(1).min(text.len());
-            let c1 = text[c0..]
-                .char_indices()
-                .nth(1)
-                .map_or(text.len(), |(i, _)| c0 + i);
-            if c1 > c0 {
-                marks.push((c0, c1, cur_style));
-            }
-        }
-
-        let selected_here = app.line_selected(lineno);
-        let bar = if in_current || selected_here {
-            "▍"
-        } else {
-            " "
-        };
-
-        let mut spans = vec![
+        gutter.push(Line::from(vec![
             Span::styled(
-                format!("{lineno:>4} "),
+                format!("{lineno:>lineno_w$}"),
                 Style::default().fg(if on_cursor_line {
                     Color::Yellow
                 } else {
                     Color::DarkGray
                 }),
             ),
+            // The dot used to trail the text, which made it the first thing
+            // truncated — an annotation you could not see you had made.
             Span::styled(
-                bar,
+                if n > 0 { "●" } else { " " },
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if in_current || selected_here {
+                    "▍"
+                } else {
+                    " "
+                },
                 Style::default().fg(if selected_here {
                     Color::Yellow
                 } else {
                     Color::DarkGray
                 }),
             ),
-        ];
+        ]));
 
-        let body = segments(&text, &marks, Style::default());
-        if body.is_empty() && on_cursor_line {
+        let marks = line_marks(app, lineno, &text, sel_style, cur_style);
+        let mut spans = segments(&text, &marks, Style::default());
+        if spans.is_empty() && on_cursor_line {
             spans.push(Span::styled(" ", cur_style));
-        } else {
-            spans.extend(body);
         }
-
-        if n > 0 {
-            spans.push(Span::styled(
-                format!("  ●{n}"),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        let row = Line::from(spans);
+        if row.width() > body_w {
+            // A cursor past the edge leaves no cursor cell on screen at all.
+            // The marker takes the cursor's colour in that case, so the screen
+            // still says where you are — `w`/`b`, `0` and `z` get you back to it.
+            let hidden =
+                on_cursor_line && Span::raw(&text[..cursor_byte(app, &text)]).width() >= body_w;
+            let dim = Style::default().fg(Color::DarkGray);
+            overflow.push((idx, if hidden { cur_style } else { dim }));
         }
-        rows.push(Line::from(spans));
+        body.push(row);
     }
 
+    f.render_widget(Paragraph::new(gutter), gutter_area);
+    f.render_widget(Paragraph::new(body), body_area);
+
+    // Overlaid afterwards: the marker replaces whatever the truncated line left
+    // in the last cell, which is precisely the character it is warning about.
+    //
+    // Not while the peek overlay is up. The overlay is inset, so the markers
+    // land beside it in the sliver of source still showing — a `›` with no line
+    // attached to it, which is the exact ambiguity the marker exists to remove.
+    if body_w > 0 && !app.peek {
+        let x = body_area.right() - 1;
+        for (idx, style) in overflow {
+            let Ok(dy) = u16::try_from(idx) else { continue };
+            let y = body_area.y + dy;
+            if y < body_area.bottom() {
+                f.buffer_mut()[(x, y)].set_symbol("›").set_style(style);
+            }
+        }
+    }
+}
+
+/// The selection readout goes first: it is the only field that changes on every
+/// keypress, and a long path used to push it off the end of the border
+/// entirely. The path is last and shortened to whatever is left, because a
+/// truncated path is still recognisable and a missing selection is not.
+fn source_title(app: &App, width: u16) -> String {
     let sel = match app.selection() {
         Some(s) if s.start.line == s.end.line => format!(
             "{} L{}:{}-{}",
@@ -203,25 +287,18 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
         Some(s) => format!("{} L{}-{}", app.selection_kind(), s.start.line, s.end.line),
         None => "—".into(),
     };
-
-    // The selection readout goes first: it is the only field that changes on
-    // every keypress, and a long path used to push it off the end of the border
-    // entirely. The path is last and shortened to whatever is left, because a
-    // truncated path is still recognisable and a missing selection is not.
+    // The cursor column is on screen even when the cursor itself is not.
     let rest = format!(
-        " [{}] · {} lines · {} units · {} annotations · ",
+        " [{}] · L{}:{} · {} lines · {} units · {} annotations · ",
         sel,
+        app.cursor.line,
+        app.cursor.col,
         app.lines.len(),
         app.blocks.len(),
         app.annotations.len(),
     );
-    let budget = usize::from(area.width).saturating_sub(rest.chars().count() + 3);
-    let title = format!("{rest}{} ", shorten_path(app.display_name(), budget));
-
-    f.render_widget(
-        Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(title)),
-        area,
-    );
+    let budget = usize::from(width).saturating_sub(rest.chars().count() + 3);
+    format!("{rest}{} ", shorten_path(app.display_name(), budget))
 }
 
 /// Keep the tail of an over-long path — the file name is what identifies it,
@@ -311,6 +388,107 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Display width of `s` in terminal cells.
+fn cells(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// Word-wrap to `width` cells, preserving each source line's own break and its
+/// leading indentation. Hand-rolled rather than `Paragraph::wrap` because the
+/// overlay needs the exact row count to clamp its scroll, and ratatui exposes
+/// no stable way to ask; `Wrap { trim: true }` also eats the indentation that
+/// makes nested markdown readable.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for line in text.split('\n') {
+        let mut row = String::new();
+        let mut w = 0usize;
+        for word in line.split_inclusive(' ') {
+            let ww = cells(word);
+            if w > 0 && w + ww > width {
+                out.push(std::mem::take(&mut row));
+                w = 0;
+            }
+            if ww > width {
+                // A single word wider than the pane — a URL, usually. It still
+                // has to go somewhere, so cut it on character boundaries.
+                let mut buf = [0u8; 4];
+                for ch in word.chars() {
+                    let cw = cells(ch.encode_utf8(&mut buf));
+                    if w + cw > width {
+                        out.push(std::mem::take(&mut row));
+                        w = 0;
+                    }
+                    row.push(ch);
+                    w += cw;
+                }
+            } else {
+                row.push_str(word);
+                w += ww;
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// Centre a rect inside `area`, inset by `dx`/`dy` on each side.
+fn inset(area: Rect, dx: u16, dy: u16) -> Rect {
+    let w = area.width.saturating_sub(dx * 2).max(1).min(area.width);
+    let h = area.height.saturating_sub(dy * 2).max(1).min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// The selection, wrapped, over the source view. Read-only: it answers "what
+/// did I actually select" for a block whose lines run off the edge, without
+/// touching the cursor or the one-line-per-row mapping underneath.
+fn draw_peek(f: &mut Frame, area: Rect, app: &mut App) {
+    let popup = inset(area, 2, 1);
+    let text = app.peek_text().replace('\t', " ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+
+    let rows = wrap(&text, usize::from(inner.width));
+    app.peek_rows = rows.len();
+    let top = app.peek_scroll.min(rows.len().saturating_sub(1));
+    let height = usize::from(inner.height);
+    let shown: Vec<Line> = rows
+        .iter()
+        .skip(top)
+        .take(height)
+        .map(|r| Line::raw(r.clone()))
+        .collect();
+
+    let more = if rows.len() > height {
+        format!(
+            " {}-{}/{}",
+            top + 1,
+            (top + height).min(rows.len()),
+            rows.len()
+        )
+    } else {
+        String::new()
+    };
+    let title = format!(
+        " peek: {}{} — j/k scroll · z closes ",
+        app.selection_kind(),
+        more
+    );
+
+    f.render_widget(Clear, popup);
+    f.render_widget(Paragraph::new(shown).block(block.title(title)), popup);
+}
+
 fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Line> = if app.annotations.is_empty() {
         vec![Line::from(Span::styled(
@@ -348,7 +526,9 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
                         format!("{:<14}", a.block_kind),
                         Style::default().fg(Color::DarkGray),
                     ),
-                    Span::raw(a.text.clone()),
+                    // The editor advertises C-j, so a comment can be several
+                    // lines; a raw span would silently swallow every break.
+                    Span::raw(a.text.replace('\n', " ⏎ ")),
                 ])
             })
             .collect()
@@ -368,14 +548,16 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// narrower pane it used to be cut mid-word, losing `c comment · x remove ·
 /// q quit` — precisely the part a first-time reader needs. Whichever variant
 /// fits the room available wins, and `q quit` survives to the very last.
-const KEYS: [&str; 5] = [
-    "hjkl move · ^d/^u/^f/^b page · J/K unit · v units · V lines · +/- widen/narrow · c comment · x remove · q quit",
-    "hjkl · J/K unit · v/V select · +/- widen · c comment · x remove · q quit",
-    "hjkl · v/V · +/- · c comment · x remove · q quit",
+const KEYS: [&str; 6] = [
+    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · c comment · x remove · q quit",
+    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · c comment · x remove · q quit",
+    "hjkl · w/b · v/V · +/- · z peek · c comment · x remove · q quit",
+    "w/b · z peek · c comment · x remove · q quit",
     "c comment · x remove · q quit",
     "q quit",
 ];
 const INPUT_KEYS: [&str; 2] = ["Enter save · Esc cancel", "Enter · Esc"];
+const PEEK_KEYS: [&str; 2] = ["j/k scroll · z or Esc closes", "z closes"];
 
 const STATUS_W: u16 = 28;
 
@@ -393,6 +575,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let room = width.saturating_sub(usize::from(status_w) + 1);
     let table: &[&str] = if app.mode == Mode::Input {
         &INPUT_KEYS
+    } else if app.peek {
+        &PEEK_KEYS
     } else {
         &KEYS
     };
@@ -431,6 +615,23 @@ mod tests {
 
     /// Render into an in-memory backend and return the screen as text. The only
     /// way to exercise the drawing code without a tty.
+    /// The raw cells, for the handful of assertions that are about *style* —
+    /// the string harness below throws styles away, which is exactly how the
+    /// vanishing cursor went unnoticed.
+    fn render_buf(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut scroll = 0usize;
+        term.draw(|f| draw(f, app, &mut scroll)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// Is there a cursor cell anywhere on screen? Yellow background, and only
+    /// the cursor uses it.
+    fn has_cursor(buf: &ratatui::buffer::Buffer) -> bool {
+        (0..buf.area.height)
+            .any(|y| (0..buf.area.width).any(|x| buf[(x, y)].style().bg == Some(Color::Yellow)))
+    }
+
     fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         let mut scroll = 0usize;
@@ -472,7 +673,15 @@ mod tests {
         app.editor.set("model layer");
         app.commit_comment();
         let screen = render(&mut app, 100, 24);
-        assert!(screen.contains("●1"));
+        // The dot sits in the gutter, pinned to the line number. It no longer
+        // carries the count — `annotations_on` can exceed 1, and the pane below
+        // lists each one; what the gutter owes you is "there is something here"
+        // at a position no line length can push off the screen.
+        // The dot is independent of the selection bar: committing collapsed the
+        // selection back onto the cursor's block, so line 3 keeps its dot and
+        // loses its bar.
+        assert!(screen.contains("   3● "), "{screen}");
+        assert!(screen.contains("   4●▍"), "{screen}");
         assert!(screen.contains("L3-4"));
         assert!(screen.contains("model layer"));
     }
@@ -627,6 +836,201 @@ mod tests {
                 "width {w} lost the quit key:\n{screen}"
             );
         }
+    }
+
+    // ---- long lines --------------------------------------------------------
+
+    /// 200 columns of prose in a 60-column pane.
+    fn long_doc() -> String {
+        format!("# H\n\n{}and `code_span` at the end.\n", "word ".repeat(34))
+    }
+
+    #[test]
+    fn a_line_that_runs_past_the_edge_says_so() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        let buf = render_buf(&mut app, 60, 12);
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 3)].symbol()).collect();
+        assert!(row.contains("   3"), "expected line 3 on row 3: {row}");
+        assert!(row.ends_with("›│"), "no truncation marker: {row}");
+
+        // …and a short line does not claim to continue.
+        let row1: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(
+            !row1.contains('›'),
+            "short line marked as truncated: {row1}"
+        );
+    }
+
+    /// Found by probing: `$` on a long line moved the cursor to a column the
+    /// renderer never drew, so no cell on screen had the cursor style at all.
+    #[test]
+    fn the_cursor_is_never_silently_off_screen() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.goto_line_end();
+        let buf = render_buf(&mut app, 60, 12);
+        assert!(
+            has_cursor(&buf),
+            "cursor vanished at column {}",
+            app.cursor.col
+        );
+        // it is the truncation marker that carries it
+        let x = buf.area.width - 2;
+        assert_eq!(buf[(x, 3)].symbol(), "›");
+        assert_eq!(buf[(x, 3)].style().bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn the_title_reports_the_cursor_column_even_when_the_cursor_is_not_drawn() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.goto_line_end();
+        let screen = render(&mut app, 60, 12);
+        assert!(screen.contains("L3:197"), "{screen}");
+    }
+
+    /// The dot used to trail the body text, which made it the first thing
+    /// truncated: an annotation you could not see you had made.
+    #[test]
+    fn an_annotation_on_a_long_line_is_still_visible() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.begin_comment();
+        app.editor.set("too long");
+        app.commit_comment();
+        let screen = render(&mut app, 60, 12);
+        assert!(screen.contains("   3●"), "{screen}");
+    }
+
+    #[test]
+    fn the_gutter_widens_for_five_digit_line_numbers() {
+        let src: String = (1..=10_050).map(|i| format!("p{i}\n\n")).collect();
+        let mut app = App::new("huge.md".into(), &src);
+        app.goto_last();
+        let screen = render(&mut app, 60, 12);
+        assert!(screen.contains("20099"), "{screen}");
+    }
+
+    // ---- peek --------------------------------------------------------------
+
+    /// ratatui's `styled_graphemes` filters control characters, so a tab was
+    /// deleted rather than expanded and every column after it drifted left by
+    /// one — a silent off-by-one in a tool whose entire output is columns.
+    #[test]
+    fn a_tab_occupies_exactly_one_cell_so_columns_do_not_drift() {
+        let mut app = App::new("t.md".into(), "a\tb\tc END\n");
+        assert_eq!(app.line_len(1), 9);
+        let buf = render_buf(&mut app, 40, 8);
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row.contains("a b c END"), "{row}");
+
+        // and the cursor cell lands on the byte the model says it is on
+        // bytes: a \t b \t c ' ' E N D — so the 'c' is byte 4, column 5
+        app.cursor = Pos::new(1, 5);
+        let buf = render_buf(&mut app, 40, 8);
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, 1)].style().bg == Some(Color::Yellow))
+            .expect("cursor on screen");
+        assert_eq!(buf[(x, 1)].symbol(), "c");
+    }
+
+    #[test]
+    fn peek_wraps_the_selection_over_the_source_view() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.toggle_peek();
+        let screen = render(&mut app, 60, 16);
+        assert!(screen.contains("peek: paragraph"), "{screen}");
+        // the tail of the 200-column line is on screen, which is the point
+        assert!(screen.contains("at the end."), "{screen}");
+        assert!(app.peek_rows > 1, "text should have wrapped");
+    }
+
+    /// Found by running it: the overlay is inset, so the markers landed in the
+    /// strip of source still visible beside it — a `›` with no line attached.
+    #[test]
+    fn peek_suppresses_the_truncation_markers_underneath_it() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        assert!(render(&mut app, 60, 16).contains('›'));
+        app.toggle_peek();
+        let screen = render(&mut app, 60, 16);
+        assert!(!screen.contains('›'), "{screen}");
+    }
+
+    #[test]
+    fn peek_scroll_is_clamped_to_the_rows_it_has() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.toggle_peek();
+        render(&mut app, 60, 16);
+        for _ in 0..50 {
+            app.scroll_peek(1);
+        }
+        assert_eq!(app.peek_scroll, app.peek_rows - 1);
+        for _ in 0..50 {
+            app.scroll_peek(-1);
+        }
+        assert_eq!(app.peek_scroll, 0);
+    }
+
+    #[test]
+    fn peek_needs_something_to_peek_at() {
+        let mut app = App::new("empty.md".into(), "");
+        app.toggle_peek();
+        assert!(!app.peek);
+        render(&mut app, 60, 12);
+    }
+
+    #[test]
+    fn wrap_preserves_every_character_and_the_indentation() {
+        for width in [1usize, 3, 12, 40] {
+            let text = "    - a nested item with several words\nand a second line";
+            let rows = wrap(text, width);
+            let rebuilt: String = rows.join("").replace(' ', "");
+            assert_eq!(rebuilt, text.replace([' ', '\n'], ""), "width {width}");
+            assert!(
+                rows[0].starts_with(' ') || width < 4,
+                "lost indent at {width}"
+            );
+            for r in &rows {
+                assert!(cells(r) <= width || width == 0, "row over width: {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_hard_cuts_a_word_wider_than_the_pane() {
+        let rows = wrap("see https://example.dev/a/very/long/path/indeed here", 12);
+        assert!(rows.len() > 3, "{rows:?}");
+        for r in &rows {
+            assert!(cells(r) <= 12, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_survives_multibyte_and_a_zero_width_pane() {
+        assert!(wrap("Prüfen köde — ✓ fertig", 0).is_empty());
+        let rows = wrap("Prüfen köde — ✓ fertig", 7);
+        for r in &rows {
+            assert!(cells(r) <= 7, "{r:?}");
+        }
+    }
+
+    /// The editor advertises `C-j newline`, and the pane used to render a
+    /// two-line comment as `onetwo`.
+    #[test]
+    fn a_multi_line_comment_keeps_its_break_visible_in_the_pane() {
+        let mut app = App::new("PLAN.md".into(), DOC);
+        app.begin_comment();
+        app.editor.set("one");
+        app.editor.newline();
+        for c in "two".chars() {
+            app.editor.insert(c);
+        }
+        app.commit_comment();
+        let screen = render(&mut app, 100, 24);
+        assert!(screen.contains("one ⏎ two"), "{screen}");
     }
 
     #[test]

@@ -134,10 +134,12 @@ node --test .pi/extensions/marginal-annotate.test.mjs
 | `C-f` / `C-b`, PgDn/PgUp | full page down / up (two lines of overlap) |
 | `0` / `$`, Home/End | start / end of line |
 | `J` / `K` | move by navigation unit |
+| `w` / `b` | move by **inline node** — the next/previous code span, link, emphasis or text run |
 | `g` / `G` | first / last line |
 | `v` | select a range of units — `J`/`K` extends |
 | `V` | select whole lines, ignoring unit boundaries — `j`/`k` extends |
 | `+` / `-` (also `=` / `_`) | widen / narrow along the markdown hierarchy |
+| `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `c` | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `Esc` | drop the selection |
@@ -145,6 +147,26 @@ node --test .pi/extensions/marginal-annotate.test.mjs
 
 Raw mode delivers `C-c` as a keystroke and no `SIGINT` is ever raised, so it is
 bound explicitly. Without that binding there is no way out but `q`.
+
+### Lines wider than the pane
+
+The view does not scroll sideways and does not wrap; a line longer than the pane
+is cut at the right edge, and a dim `›` in the last column says so. Three things
+make that survivable rather than a trap:
+
+- **`w`/`b` reach what you cannot see.** The interesting columns on a long line
+  are its inline node starts, and there are a handful of them, not two hundred.
+  `w` lands *inside* the code span at column 176 so `-` can narrow onto it; the
+  status line and the title both report where the cursor went.
+- **The cursor is never silently gone.** When it sits past the right edge the
+  `›` on that row takes the cursor's own colour, and the title carries
+  `L{line}:{col}` regardless.
+- **`z` shows the whole thing.** The peek overlay wraps the current selection —
+  read-only, so the one-source-line-per-screen-row mapping the rest of the
+  program rests on is never in question.
+
+The gutter is a separate column, so the line number, the annotation dot and the
+selection bar cannot be pushed off screen by anything the body does.
 
 ### Writing a comment
 

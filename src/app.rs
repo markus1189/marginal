@@ -101,6 +101,14 @@ pub struct App {
     /// Source rows currently visible. Owned by the renderer, which is the only
     /// thing that knows the terminal size; paging keys read it.
     pub viewport: usize,
+    /// Peek overlay: the selection, wrapped, over the source view. Read-only —
+    /// it exists to answer "what did I actually select", not to edit.
+    pub peek: bool,
+    /// Wrapped-row offset inside the peek overlay.
+    pub peek_scroll: usize,
+    /// Rows the peeked text wraps to at the current width. Published by the
+    /// renderer for the same reason `viewport` is: only it knows the geometry.
+    pub peek_rows: usize,
     next_id: usize,
 }
 
@@ -148,6 +156,9 @@ impl App {
             status: String::new(),
             quit: false,
             viewport: 20,
+            peek: false,
+            peek_scroll: 0,
+            peek_rows: 0,
             next_id: 1,
         }
     }
@@ -403,6 +414,53 @@ impl App {
         self.snap();
     }
 
+    /// Step to the next/previous inline node start. On a line wider than the
+    /// pane this is what puts the cursor *inside* the code span or link at
+    /// column 200, which is the only thing `+`/`-` needs the column for — and
+    /// it reports where it landed, because the target may be off screen.
+    pub fn move_inline(&mut self, dir: isize) {
+        self.drop_region();
+        let target = if dir > 0 {
+            blocks::next_inline(&self.tree, self.cursor)
+        } else {
+            blocks::prev_inline(&self.tree, self.cursor)
+        };
+        let Some(pos) = target else {
+            self.status = "no further inline node".into();
+            return;
+        };
+        self.cursor = pos;
+        self.snap();
+        let kind = self
+            .stack()
+            .first()
+            .map_or_else(String::new, |(k, _)| (*k).to_string());
+        self.status = format!("{kind} L{}:{}", self.cursor.line, self.cursor.col);
+    }
+
+    // ---- peek -----------------------------------------------------------
+
+    pub fn toggle_peek(&mut self) {
+        self.peek = !self.peek;
+        self.peek_scroll = 0;
+        if self.peek && self.selection().is_none() {
+            self.peek = false;
+            self.status = "nothing to peek at".into();
+        }
+    }
+
+    pub fn scroll_peek(&mut self, delta: isize) {
+        self.peek_scroll = self
+            .peek_scroll
+            .saturating_add_signed(delta)
+            .min(self.peek_rows.saturating_sub(1));
+    }
+
+    /// The text the peek overlay shows: exactly what would be quoted.
+    pub fn peek_text(&self) -> String {
+        self.selection().map(|s| self.slice(s)).unwrap_or_default()
+    }
+
     // ---- annotating -----------------------------------------------------
 
     pub fn begin_comment(&mut self) {
@@ -470,7 +528,7 @@ impl App {
     }
 
     /// The exact source text a span covers.
-    fn slice(&self, span: Span) -> String {
+    pub fn slice(&self, span: Span) -> String {
         let mut out = Vec::new();
         for line in span.start.line..=span.end.line {
             let text = self.line_text(line);
@@ -587,6 +645,60 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         assert_eq!(a.cursor.line, 4);
         a.move_block(1);
         assert_eq!(a.cursor.line, 6);
+    }
+
+    /// The long-line workflow without a viewport offset: `w` walks onto the
+    /// code span, `-` narrows to it, and the status says where it went — which
+    /// matters precisely because the target may be off the right edge.
+    #[test]
+    fn inline_motion_lands_inside_a_node_so_contract_can_narrow_to_it() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 1);
+        a.move_inline(1);
+        a.contract();
+        assert_eq!(a.selection_kind(), "code-span");
+        let s = a.selection().unwrap();
+        assert_eq!(a.slice(s), "`parse_document`");
+    }
+
+    #[test]
+    fn inline_motion_reports_where_it_landed_and_stops_at_the_ends() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 1);
+        a.move_inline(1);
+        assert!(a.status.starts_with("code-span L6:5"), "{}", a.status);
+
+        a.cursor = Pos::new(1, 1);
+        a.move_inline(-1);
+        assert_eq!(a.status, "no further inline node");
+        assert_eq!(a.cursor, Pos::new(1, 1));
+    }
+
+    #[test]
+    fn inline_motion_drops_a_hierarchy_selection_like_every_other_move() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 6);
+        a.contract();
+        assert!(matches!(a.sel, Sel::Region { .. }));
+        a.move_inline(1);
+        assert!(matches!(a.sel, Sel::Here));
+    }
+
+    #[test]
+    fn peek_shows_the_selection_and_refuses_when_there_is_none() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 6);
+        a.contract();
+        a.toggle_peek();
+        assert!(a.peek);
+        assert_eq!(a.peek_text(), "`parse_document`");
+        a.toggle_peek();
+        assert!(!a.peek);
+
+        let mut empty = App::new("empty.md".into(), "");
+        empty.toggle_peek();
+        assert!(!empty.peek);
+        assert_eq!(empty.status, "nothing to peek at");
     }
 
     #[test]

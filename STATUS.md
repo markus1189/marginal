@@ -9,6 +9,8 @@
   scrolling
 - three selection mechanisms: unit ranges (`v`), line ranges (`V`), and
   expand/contract along the hierarchy (`+`/`-`)
+- inline motions (`w`/`b`) and a wrapped read-only peek overlay (`z`), which
+  together make a line wider than the pane navigable without a sideways scroll
 - markdown syntax highlighting driven by the same AST, no extra dependency
 - multi-line comment editor with readline bindings and per-session history
 - paging keys (`C-d`/`C-u`/`C-f`/`C-b`, PgDn/PgUp)
@@ -53,8 +55,9 @@ Put it behind a cargo feature so the lean build stays the default.
 - **tier 3** — columns in the cursor, the selection, the rendering, the JSON
   and the feedback locations. Done.
 - **tier 4** — expand/contract on the AST. Done.
-- **tier 2** (heading-scoped sections) and **tier 5** (semantic `w`/`b`
-  motions between inline nodes) — not built.
+- **tier 5** — semantic `w`/`b` motions between inline nodes. Done, and it
+  turned out to be the answer to long lines rather than a nicety: see below.
+- **tier 2** (heading-scoped sections) — not built.
 
 ## Not built yet
 
@@ -65,13 +68,56 @@ Put it behind a cargo feature so the lean build stays the default.
   question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
-- **horizontal scrolling.** `draw_source` renders each line from column 1 and
-  lets ratatui truncate, so on a 95-column pane anything past roughly column 88
-  cannot be seen — awkward for a tool whose selling point is column-precise
-  selection.
+- **horizontal scrolling** — deliberately, now. See below.
+- **soft wrap.** The obvious alternative, and the real fix for prose. It costs
+  an explicit rendered-row → `(line, byte offset)` map, because `lineno =
+  scroll + idx + 1` in `draw_source` stops being invertible. Worth doing behind
+  a toggle if the peek overlay turns out not to be enough; `keep_cursor_visible`
+  then works unchanged, on rows instead of lines, and there is still only one
+  scrolling axis. (tui-textarea has refused word wrap for three years for
+  exactly this reason: *"it assumes height is equal to number of lines"*.)
 - the annotations pane is a fixed six rows and does not scroll; the comment
   editor caps at eight rows and does not scroll either, so the caret vanishes
   in a longer comment.
+
+## Why long lines are not solved by scrolling sideways
+
+Measured over 243,887 markdown lines in `~/Stuff`: **75.7% are ≤87 columns**,
+the width of one body column in a 95-column pane. Of the 24.3% that are longer,
+73% are prose, 22% are tables, 3% URLs. Set a horizontal offset to 87 and three
+quarters of the screen becomes line numbers over blank space; the longest line
+in the corpus is 215,364 columns, so the axis has no sensible maximum either.
+
+Markdown *table source* is not column-aligned, so the header row is useless as a
+ruler even while it is still on screen — panning right cuts diagonally through
+the table. And `blocks.rs` already makes a table navigate by **row**.
+
+The deciding argument is that the column axis is irrelevant to three of the four
+selection modes: `Sel::Here`, `Sel::Blocks` and `Sel::Lines` never read
+`cursor.col`. Only `Sel::Region` (`+`/`-`) does, and what it needs is the cursor
+*inside* a node — which is a motion, not a viewport offset. Hence `w`/`b`.
+
+Every implementation surveyed (ratatui, Helix, Kakoune, edtui, less, lazygit)
+makes soft wrap and horizontal scroll mutually exclusive; none ships both.
+
+If it is built anyway: split the gutter into its own layout column (done) and
+use `Paragraph::scroll((0, x))` rather than slicing by hand — it skips by
+`cell_width` over already-styled graphemes, so no mark rebasing is needed. Its
+one defect is that odd offsets round down *per line* with wide characters, so
+two rows can show different source columns at screen column 0.
+
+## Tabs render as one space each
+
+Found while checking the above, and it had nothing to do with long lines.
+ratatui's `Span::styled_graphemes` filters control characters, so a tab was
+*deleted* rather than expanded: `a\tb\tc END` — 9 bytes — rendered as `abc END`,
+and every column past a tab was off by one on screen while the JSON reported the
+true byte column. Silent, and precisely the kind of error this tool exists not to
+make.
+
+`draw_source` now substitutes one space per tab. Not a tab stop: one byte for
+one cell keeps the column on screen identical to the column in the output, which
+is worth more here than visually correct indentation. Covered by a test.
 
 ## Found by running it
 
@@ -97,6 +143,23 @@ Also confirmed on a real terminal rather than a `TestBackend` buffer: syntax
 highlighting emits the expected SGR (dim blue `##`, bold cyan heading text),
 and the `--result` JSON round-trips a column-precise annotation
 (`code-span`, `L5:5-20`, `wholeLines: false`).
+
+Driven again on 2026-07-30 for the long-line work, 90×30 and 80×20, on a fixture
+with a 248-column paragraph and a 92-column table row. Three defects were already
+in the suite by then; the run found one more:
+
+- **orphaned truncation markers under the peek overlay** — the overlay is inset
+  by two columns, so the `›` markers were painted into the strip of source still
+  visible beside it, detached from any line. Exactly the "is this scrolled or is
+  this short" ambiguity the marker exists to remove. Suppressed while peeking;
+  `ui.rs` now covers it.
+
+Confirmed working on the real terminal, none of it visible to a `TestBackend`
+string: the marker takes SGR `1;38;5;0;48;5;3` — bold black on yellow, the
+cursor's own style — when the cursor is off the right edge; `w` walks from
+column 1 to the code span at column 176 with `code-span L5:176` in the status;
+`-` then narrows to `[code-span L5:176-186]` and the emitted JSON carries
+`"originalText": "`code_span`"` for a span 90 columns past the edge of the pane.
 
 ## Verified, not assumed
 

@@ -354,6 +354,56 @@ pub fn containment_stack(root: &TreeNode, pos: Pos) -> Vec<(&'static str, Span)>
     out
 }
 
+// ---------------------------------------------------------------------------
+// Inline motions
+// ---------------------------------------------------------------------------
+
+/// Inline node kinds — the things `+`/`-` can narrow onto, and therefore the
+/// things worth stepping between.
+fn is_inline(kind: &str) -> bool {
+    matches!(
+        kind,
+        "code-span" | "link" | "image" | "strong" | "emph" | "strike" | "html-inline" | "text"
+    )
+}
+
+/// Start of the next inline node strictly after `from`, in document order.
+///
+/// This is how a column past the right edge of the pane is reached without a
+/// viewport offset: the interesting columns on a long line are exactly the
+/// inline node starts, and there are a handful of them, not two hundred.
+pub fn next_inline(root: &TreeNode, from: Pos) -> Option<Pos> {
+    fold_inline(root, |p| p > from, Pos::min)
+}
+
+/// Start of the previous inline node strictly before `from`.
+pub fn prev_inline(root: &TreeNode, from: Pos) -> Option<Pos> {
+    fold_inline(root, |p| p < from, Pos::max)
+}
+
+fn fold_inline(
+    root: &TreeNode,
+    keep: impl Fn(Pos) -> bool,
+    pick: impl Fn(Pos, Pos) -> Pos,
+) -> Option<Pos> {
+    fn go(
+        n: &TreeNode,
+        keep: &impl Fn(Pos) -> bool,
+        pick: &impl Fn(Pos, Pos) -> Pos,
+        best: &mut Option<Pos>,
+    ) {
+        if is_inline(n.kind) && keep(n.span.start) {
+            *best = Some(best.map_or(n.span.start, |b| pick(b, n.span.start)));
+        }
+        for c in &n.children {
+            go(c, keep, pick, best);
+        }
+    }
+    let mut best = None;
+    go(root, &keep, &pick, &mut best);
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,5 +653,60 @@ still para.
         assert_eq!(s.byte_range_on(4, 10), Some((0, 5)));
         assert_eq!(s.byte_range_on(4, 3), Some((0, 3)));
         assert_eq!(s.byte_range_on(5, 10), None);
+    }
+
+    // ---- tier 5: inline motions --------------------------------------------
+
+    #[test]
+    fn inline_motions_step_through_the_nodes_of_a_line() {
+        let t = parse_tree(INLINE);
+        // "Use " text, `parse_document`, " and the " text, the link, its label…
+        let mut p = Pos::new(1, 1);
+        let mut cols = Vec::new();
+        while let Some(next) = next_inline(&t, p) {
+            cols.push((next.line, next.col));
+            p = next;
+        }
+        assert!(cols.contains(&(1, 5)), "the code span: {cols:?}");
+        assert!(cols.contains(&(1, 30)), "the link: {cols:?}");
+        // and it walks off the end of the line into the next paragraph
+        assert!(cols.iter().any(|(l, _)| *l == 3), "{cols:?}");
+    }
+
+    #[test]
+    fn inline_motions_are_inverses_and_terminate() {
+        let t = parse_tree(INLINE);
+        let a = next_inline(&t, Pos::new(1, 1)).unwrap();
+        let b = next_inline(&t, a).unwrap();
+        assert_eq!(prev_inline(&t, b), Some(a));
+        // nothing before the first node, nothing after the last
+        assert_eq!(prev_inline(&t, Pos::new(1, 1)), None);
+        let mut last = Pos::new(1, 1);
+        while let Some(n) = next_inline(&t, last) {
+            last = n;
+        }
+        assert_eq!(next_inline(&t, last), None);
+    }
+
+    #[test]
+    fn inline_motions_reach_a_node_far_past_the_right_edge_of_any_pane() {
+        // The case horizontal scrolling exists to serve: a link at column 200+.
+        let filler = "word ".repeat(45);
+        let src = format!("{filler}[label](https://example.dev) tail.\n");
+        let t = parse_tree(&src);
+        let link = next_inline(&t, Pos::new(1, 2)).unwrap();
+        assert!(link.col > 200, "expected a far column, got {}", link.col);
+        let stack = containment_stack(&t, link);
+        assert!(
+            stack.iter().any(|(k, _)| *k == "link"),
+            "cursor should land inside the link: {stack:?}"
+        );
+    }
+
+    #[test]
+    fn inline_motions_on_a_file_without_inline_content_do_nothing() {
+        let t = parse_tree("---\n");
+        assert_eq!(next_inline(&t, Pos::new(1, 1)), None);
+        assert_eq!(prev_inline(&t, Pos::new(9, 9)), None);
     }
 }

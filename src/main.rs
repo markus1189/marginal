@@ -210,6 +210,15 @@ fn handle_key(app: &mut App, k: KeyEvent) {
                 _ => {}
             }
         }
+        // The peek overlay swallows the movement keys: while it is up, j/k
+        // scroll the overlay rather than the cursor underneath it.
+        Mode::Normal if app.peek => match code {
+            KeyCode::Char('z' | 'q') | KeyCode::Esc => app.toggle_peek(),
+            KeyCode::Char('c') if ctrl => app.quit = true,
+            KeyCode::Char('j') | KeyCode::Down => app.scroll_peek(1),
+            KeyCode::Char('k') | KeyCode::Up => app.scroll_peek(-1),
+            _ => {}
+        },
         // Paging. C-f/C-b keep two lines of overlap, as vim does.
         Mode::Normal if ctrl => match code {
             KeyCode::Char('d') => app.page(1, true),
@@ -231,6 +240,10 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('l') | KeyCode::Right => app.move_char(1),
             KeyCode::Char('J') => app.move_block(1),
             KeyCode::Char('K') => app.move_block(-1),
+            // Inline motions: the way to reach a code span or link sitting past
+            // the right edge of the pane without panning the viewport there.
+            KeyCode::Char('w') => app.move_inline(1),
+            KeyCode::Char('b') => app.move_inline(-1),
             KeyCode::Char('0') | KeyCode::Home => app.goto_line_start(),
             KeyCode::Char('$') | KeyCode::End => app.goto_line_end(),
             KeyCode::Char('g') => app.goto_first(),
@@ -240,6 +253,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // widen / narrow along the markdown hierarchy
             KeyCode::Char('+' | '=') => app.expand(),
             KeyCode::Char('-' | '_') => app.contract(),
+            KeyCode::Char('z') => app.toggle_peek(),
             KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),
             KeyCode::Esc => app.sel = Sel::Here,
