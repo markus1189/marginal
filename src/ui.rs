@@ -508,6 +508,24 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
     let caret = Style::default().bg(Color::Yellow).fg(Color::Black);
     let (crow, ccol) = app.editor.row_col();
+
+    // `Editor::rows` splits on `\n` only, so a comment typed without `C-j` is
+    // always exactly one row however long it grows. With no wrap and no scroll
+    // the paragraph was simply clipped at the border, and the caret — a styled
+    // cell like any other — was clipped with it: everything typed past the edge
+    // happened blind, with nothing on screen to say where the insertion point
+    // was. The source view has a marker for exactly this; the comment box had
+    // nothing. Scrolling rather than wrapping because the box's height is
+    // computed from `rows().len()`, so a wrapped line would overflow it
+    // vertically and be clipped again, one axis over.
+    let inner_w = usize::from(area.width.saturating_sub(2));
+    let all_rows = app.editor.rows();
+    let cur = all_rows.get(crow).copied().unwrap_or("");
+    // Two cells for the prompt.
+    let caret_x = 2 + cells(&cur[..ccol.min(cur.len())]);
+    let hscroll =
+        u16::try_from(caret_x.saturating_sub(inner_w.saturating_sub(1))).unwrap_or(u16::MAX);
+
     let rows: Vec<Line> = app
         .editor
         .rows()
@@ -542,7 +560,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     f.render_widget(
-        Paragraph::new(rows).block(
+        Paragraph::new(rows).scroll((0, hscroll)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
@@ -948,6 +966,39 @@ mod tests {
         assert_eq!(shorten_path("/a/b/c/long.md", 0), "…");
         // multibyte must not be sliced apart
         assert_eq!(shorten_path("/tmp/Prüfen/köde.md", 8), "…köde.md");
+    }
+
+    /// `Editor::rows` splits on `\n` only, so a comment typed without `C-j` is
+    /// one row however long. With no wrap and no scroll the paragraph was
+    /// clipped at the border and the caret — a styled cell like any other — was
+    /// clipped with it, so everything typed past the edge happened blind. The
+    /// source view protects the same invariant with a marker; the comment box
+    /// had nothing.
+    #[test]
+    fn the_comment_caret_stays_on_screen_however_long_the_comment() {
+        // The comment box is the only block with a yellow border, so its left
+        // edge names its rows: top, the single content row, bottom.
+        let caret_row = |buf: &ratatui::buffer::Buffer| -> u16 {
+            let edge: Vec<u16> = (0..buf.area.height)
+                .filter(|&y| buf[(0, y)].style().fg == Some(Color::Yellow))
+                .collect();
+            assert_eq!(edge.len(), 3, "comment box not found: {edge:?}");
+            edge[1]
+        };
+
+        for w in [30u16, 60, 100] {
+            for len in [1usize, 40, 300] {
+                let mut app = App::new("PLAN.md".into(), DOC);
+                app.begin_comment();
+                app.editor.set(&"x".repeat(len));
+                let buf = render_buf(&mut app, w, 20);
+                let y = caret_row(&buf);
+                assert!(
+                    (0..buf.area.width).any(|x| buf[(x, y)].style().bg == Some(Color::Yellow)),
+                    "caret off-screen at width {w} with {len} characters typed"
+                );
+            }
+        }
     }
 
     /// Widening the pane must never take hints away. The status field was
