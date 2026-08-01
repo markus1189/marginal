@@ -296,7 +296,18 @@ impl App {
         self.drop_region();
         let (rows, _) = self.line_rows(self.cursor.line);
         let cur = self.cursor_row();
-        let off = self.cursor.col.saturating_sub(1) - wrap::row_start(&rows[cur]);
+        // Saturating, not bare: `cursor_row` falls back to row 0 when no row
+        // starts at or below the cursor byte, and a bare subtraction then
+        // underflows -- a panic in debug, and in release a wrapped offset that
+        // the `min` below silently clamps to the end of the target row. Rows are
+        // a partition again as of `wrap_line`'s indentation fix, so the fallback
+        // should be unreachable; this keeps a wrong answer from becoming a crash
+        // if some future row shape reopens the gap.
+        let off = self
+            .cursor
+            .col
+            .saturating_sub(1)
+            .saturating_sub(wrap::row_start(&rows[cur]));
 
         let here = Anchor {
             line: self.cursor.line,
@@ -919,6 +930,41 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         a.move_line(1);
         assert_eq!(a.cursor.line, 2, "j should clear the whole wrapped line");
+    }
+
+    /// `move_row` subtracts the current row's start from the cursor byte, which
+    /// is only sound while row 0 starts at byte 0. It did not for an indented
+    /// line whose first word overflows the row: the wrapper stepped past the
+    /// indentation, `cursor_row`'s `unwrap_or(0)` fallback fired, and the
+    /// subtraction underflowed — a panic in debug, and in release a wrapped
+    /// offset the `min` clamped to the end of the target row.
+    #[test]
+    fn move_row_survives_an_indented_line_whose_first_word_overflows() {
+        let doc = "- item\n\n    https://example.dev/docs/reference/config/advanced#section-42\n";
+        for width in [20usize, 42, 72] {
+            let mut a = App::new("w.md".into(), doc);
+            a.body_width = width;
+
+            for line in 1..=a.line_count() {
+                let (rows, _) = a.line_rows(line);
+                assert_eq!(
+                    wrap::row_start(&rows[0]),
+                    0,
+                    "line {line} at width {width} starts past byte 0"
+                );
+            }
+
+            a.cursor = Pos::new(3, 1);
+            a.move_row(1);
+            let (rows, _) = a.line_rows(3);
+            if rows.len() > 1 {
+                assert_eq!(
+                    a.cursor.col,
+                    wrap::row_start(&rows[1]) + 1,
+                    "C-n landed off the row start at width {width}"
+                );
+            }
+        }
     }
 
     /// `viewport` counts rows, so paging must too — paging by lines while
