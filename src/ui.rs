@@ -364,7 +364,18 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
             let Ok(dy) = u16::try_from(idx) else { continue };
             let y = body_area.y + dy;
             if y < body_area.bottom() {
-                f.buffer_mut()[(x, y)].set_symbol("›").set_style(style);
+                let buf = f.buffer_mut();
+                // A double-width grapheme covering the last two body columns
+                // lives at `x - 1`, with `x` as its continuation cell. Writing
+                // the marker into `x` alone leaves a wide cell followed by a
+                // non-blank one — the state ratatui documents as ill-formed —
+                // and `Buffer::diff` skips whatever follows a wide symbol, so
+                // the marker would reach the front buffer and never the
+                // terminal. Blank the lead cell and both survive.
+                if x > body_area.x && cells(buf[(x - 1, y)].symbol()) > 1 {
+                    buf[(x - 1, y)].set_symbol(" ");
+                }
+                buf[(x, y)].set_symbol("›").set_style(style);
             }
         }
     }
@@ -990,6 +1001,39 @@ mod tests {
                     line + 1
                 );
             }
+        }
+    }
+
+    /// The marker is poked straight into the last body cell. Where a
+    /// double-width grapheme covers the last two columns, that cell is its
+    /// continuation half: the buffer goes ill-formed and `Buffer::diff` skips
+    /// the cell after a wide symbol, so the marker reached the front buffer and
+    /// never the backend. `render_buf` returns the backend buffer, which is the
+    /// only place the difference shows.
+    #[test]
+    fn the_overflow_marker_survives_a_wide_last_column() {
+        let doc = format!("{}\n", "日".repeat(200));
+        for w in 20u16..=40 {
+            let mut app = App::new("cjk.md".into(), &doc);
+            app.pretty = false;
+            app.cursor = Pos::new(1, 1);
+            let buf = render_buf(&mut app, w, 6);
+            assert_eq!(buf[(w - 2, 1)].symbol(), "›", "marker missing at width {w}");
+        }
+    }
+
+    /// And the second thing it costs: the marker is what says where the cursor
+    /// is when the cursor itself is past the edge. On a CJK line both used to
+    /// vanish, leaving no indication anywhere on the row.
+    #[test]
+    fn a_cursor_past_the_edge_is_still_marked_on_a_wide_line() {
+        let doc = format!("{}\n", "日".repeat(200));
+        for w in 20u16..=40 {
+            let mut app = App::new("cjk.md".into(), &doc);
+            app.pretty = false;
+            app.cursor = Pos::new(1, 150);
+            let buf = render_buf(&mut app, w, 6);
+            assert!(has_cursor(&buf), "no cursor indication at width {w}");
         }
     }
 
