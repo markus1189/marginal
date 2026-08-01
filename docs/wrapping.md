@@ -267,6 +267,11 @@ The plan above survived, with two changes:
 The toggle is `W` (`w` is the inline motion) and the flag is `--no-wrap`, since
 wrapping ships **on**.
 
+> Superseded by `docs/tables.md`: wrapping stopped being its own switch when
+> table alignment arrived. Both live behind one `pretty` boolean now — `P`, and
+> `--raw` to start without it — because the question a reader is actually
+> asking is "am I looking at the bytes or at something readable".
+
 Verified in a real tty via the tmux recipe in AGENTS.md, at 80, 95, 120 and 191
 columns: a 3,497-column line renders across 20 rows, `W` returns exactly the old
 truncated screen, `k` clears a 20-row line in one press, `C-n` walks inside it,

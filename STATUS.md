@@ -76,11 +76,18 @@ Put it behind a cargo feature so the lean build stays the default.
   editor caps at eight rows and does not scroll either, so the caret vanishes
   in a longer comment.
 
-## Soft wrap
+## Pretty mode — soft wrap and aligned tables
 
-Built, on by default; `W` toggles it and `--no-wrap` starts without it. The
-peek overlay was not enough — it answers "what did I select", not "what does
-this line say", and prose is the common case.
+Built, on by default; `P` toggles it and `--raw` starts without it. The peek
+overlay was not enough — it answers "what did I select", not "what does this
+line say", and prose is the common case.
+
+One switch rather than two. Wrapping shipped first and owned `W`/`--no-wrap`;
+table alignment joined it rather than adding a second flag, because the question
+a reader asks is "am I looking at the bytes or at something readable" and a
+half-pretty third mode is a state nobody wanted. `docs/tables.md` has the
+design, the four alternatives it beat, and the two defects the real terminal
+found that `TestBackend` could not.
 
 `lineno = scroll + idx + 1` in `draw_source` is gone. The viewport top is an
 `Anchor { line, row }` and only the visible rows are ever wrapped, so a width
