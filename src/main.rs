@@ -675,4 +675,259 @@ mod tests {
         handle_key(&mut app, key('z', KeyModifiers::NONE));
         assert!(!app.peek, "plain z stopped closing the overlay");
     }
+
+    const INPUT_TEXT: &str = "alpha beta gamma";
+    /// Byte 8 — `alpha be|ta gamma`. Inside a word, with a whole word on either
+    /// side and a space either way, so a motion or a kill that goes the wrong
+    /// direction lands somewhere visibly different rather than on the same
+    /// boundary the right one would have found.
+    const INPUT_CURSOR: usize = 8;
+
+    /// Input mode, one comment already committed so the history is not empty,
+    /// `INPUT_TEXT` in the buffer and the cursor at `INPUT_CURSOR`.
+    fn editing() -> App {
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        app.editor.set("older note");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 1, "setup failed");
+
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Input, "setup failed");
+        app.editor.set(INPUT_TEXT);
+        for _ in 0..(INPUT_TEXT.len() - INPUT_CURSOR) {
+            app.editor.left();
+        }
+        assert_eq!(app.editor.row_col(), (0, INPUT_CURSOR), "setup failed");
+        app
+    }
+
+    /// Every binding Input mode has, against the buffer it is supposed to leave
+    /// behind. `handle_key` is a 64-arm dispatch table typed out by hand and it
+    /// had exactly two tests, neither of which pressed a readline key: `C-k`
+    /// calling `kill_to_start` and `C-u` calling `kill_to_end` would have passed
+    /// the suite, and so would `M-f` moving left. The editor's own tests cannot
+    /// see it — they call the methods, and it is the wiring that is unproven.
+    ///
+    /// One row per arm of the `Mode::Input` match, in the order they appear
+    /// there. `C-n` and `Down` need a `C-p` first: with nothing being browsed
+    /// they are documented no-ops, and a row asserting "nothing happened" would
+    /// pass just as well if they were unbound.
+    #[test]
+    fn every_input_mode_binding_does_what_its_name_says() {
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let plain = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let chord = |c: char, m| key(c, m);
+
+        // name, keys, expected text, expected (row, col), expected mode
+        let table = vec![
+            (
+                "Enter",
+                vec![plain(KeyCode::Enter)],
+                "",
+                (0, 0),
+                Mode::Normal,
+            ),
+            ("Esc", vec![plain(KeyCode::Esc)], "", (0, 0), Mode::Normal),
+            ("C-c", vec![chord('c', ctrl)], "", (0, 0), Mode::Normal),
+            (
+                "C-j",
+                vec![chord('j', ctrl)],
+                "alpha be\nta gamma",
+                (1, 0),
+                Mode::Input,
+            ),
+            (
+                "C-a",
+                vec![chord('a', ctrl)],
+                INPUT_TEXT,
+                (0, 0),
+                Mode::Input,
+            ),
+            (
+                "C-e",
+                vec![chord('e', ctrl)],
+                INPUT_TEXT,
+                (0, 16),
+                Mode::Input,
+            ),
+            (
+                "C-b",
+                vec![chord('b', ctrl)],
+                INPUT_TEXT,
+                (0, 7),
+                Mode::Input,
+            ),
+            (
+                "C-f",
+                vec![chord('f', ctrl)],
+                INPUT_TEXT,
+                (0, 9),
+                Mode::Input,
+            ),
+            (
+                "C-d",
+                vec![chord('d', ctrl)],
+                "alpha bea gamma",
+                (0, 8),
+                Mode::Input,
+            ),
+            (
+                "C-k",
+                vec![chord('k', ctrl)],
+                "alpha be",
+                (0, 8),
+                Mode::Input,
+            ),
+            (
+                "C-u",
+                vec![chord('u', ctrl)],
+                "ta gamma",
+                (0, 0),
+                Mode::Input,
+            ),
+            (
+                "C-w",
+                vec![chord('w', ctrl)],
+                "alpha ta gamma",
+                (0, 6),
+                Mode::Input,
+            ),
+            (
+                "C-h",
+                vec![chord('h', ctrl)],
+                "alpha bta gamma",
+                (0, 7),
+                Mode::Input,
+            ),
+            (
+                "C-p",
+                vec![chord('p', ctrl)],
+                "older note",
+                (0, 10),
+                Mode::Input,
+            ),
+            (
+                "C-p C-n",
+                vec![chord('p', ctrl), chord('n', ctrl)],
+                INPUT_TEXT,
+                (0, 16),
+                Mode::Input,
+            ),
+            (
+                "M-b",
+                vec![chord('b', alt)],
+                INPUT_TEXT,
+                (0, 6),
+                Mode::Input,
+            ),
+            (
+                "M-f",
+                vec![chord('f', alt)],
+                INPUT_TEXT,
+                (0, 10),
+                Mode::Input,
+            ),
+            (
+                "M-d",
+                vec![chord('d', alt)],
+                "alpha be gamma",
+                (0, 8),
+                Mode::Input,
+            ),
+            (
+                "M-Backspace",
+                vec![KeyEvent::new(KeyCode::Backspace, alt)],
+                "alpha ta gamma",
+                (0, 6),
+                Mode::Input,
+            ),
+            (
+                "Backspace",
+                vec![plain(KeyCode::Backspace)],
+                "alpha bta gamma",
+                (0, 7),
+                Mode::Input,
+            ),
+            (
+                "Delete",
+                vec![plain(KeyCode::Delete)],
+                "alpha bea gamma",
+                (0, 8),
+                Mode::Input,
+            ),
+            (
+                "Left",
+                vec![plain(KeyCode::Left)],
+                INPUT_TEXT,
+                (0, 7),
+                Mode::Input,
+            ),
+            (
+                "Right",
+                vec![plain(KeyCode::Right)],
+                INPUT_TEXT,
+                (0, 9),
+                Mode::Input,
+            ),
+            (
+                "Home",
+                vec![plain(KeyCode::Home)],
+                INPUT_TEXT,
+                (0, 0),
+                Mode::Input,
+            ),
+            (
+                "End",
+                vec![plain(KeyCode::End)],
+                INPUT_TEXT,
+                (0, 16),
+                Mode::Input,
+            ),
+            (
+                "Up",
+                vec![plain(KeyCode::Up)],
+                "older note",
+                (0, 10),
+                Mode::Input,
+            ),
+            (
+                "Up Down",
+                vec![plain(KeyCode::Up), plain(KeyCode::Down)],
+                INPUT_TEXT,
+                (0, 16),
+                Mode::Input,
+            ),
+            (
+                "Z",
+                vec![chord('Z', KeyModifiers::SHIFT)],
+                "alpha beZta gamma",
+                (0, 9),
+                Mode::Input,
+            ),
+        ];
+
+        for (name, keys, text, at, mode) in table {
+            let mut app = editing();
+            for k in keys {
+                handle_key(&mut app, k);
+            }
+            assert_eq!(app.editor.text(), text, "{name}: text");
+            assert_eq!(app.editor.row_col(), at, "{name}: cursor");
+            assert_eq!(app.mode, mode, "{name}: mode");
+        }
+
+        // Enter, Esc and C-c all leave Normal mode over an empty buffer; what
+        // separates committing from cancelling is whether the comment survived.
+        let mut app = editing();
+        handle_key(&mut app, plain(KeyCode::Enter));
+        assert_eq!(app.annotations.len(), 2, "Enter did not commit");
+        assert_eq!(app.annotations[1].text, INPUT_TEXT);
+        for cancel in [plain(KeyCode::Esc), chord('c', ctrl)] {
+            let mut app = editing();
+            handle_key(&mut app, cancel);
+            assert_eq!(app.annotations.len(), 1, "{cancel:?} committed the comment");
+        }
+    }
 }
