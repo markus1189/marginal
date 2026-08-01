@@ -850,8 +850,8 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// selection — J/K to extend` in the status field this rung has just bought,
 /// so the three cells they cost name three more keys than they spell.
 const KEYS: [&str; 6] = [
-    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · c comment · x remove · q quit",
-    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · c comment · x remove · q quit",
+    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · Enter comment · x remove · q quit",
+    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · Enter comment · x remove · q quit",
     "w/b · v/V · z peek · c comment · x remove · q quit",
     "w/b · z peek · c comment · x remove · q quit",
     "c comment · x remove · q quit",

@@ -246,7 +246,7 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `+` / `-` (also `=` / `_`) | widen / narrow along the markdown hierarchy |
 | `P` | pretty on / off — soft wrap and aligned tables (on by default; `--raw` starts off) |
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
-| `c` | comment on the selection |
+| `Enter` (also `c`) | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `Esc` | drop the selection |
 | `q`, `C-c` | quit |

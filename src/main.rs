@@ -482,7 +482,9 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('-' | '_') => app.contract(),
             KeyCode::Char('P') => app.toggle_pretty(),
             KeyCode::Char('z') => app.toggle_peek(),
-            KeyCode::Char('c') => app.begin_comment(),
+            // Enter is the primary; `c` stays bound because it is what the
+            // first two weeks of muscle memory reach for.
+            KeyCode::Enter | KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),
             KeyCode::Esc => app.sel = Sel::Here,
             _ => {}
