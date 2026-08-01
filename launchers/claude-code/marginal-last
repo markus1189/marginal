@@ -233,18 +233,22 @@ The user reviewed this conversation in marginal. It was laid out as one markdown
 document, with a `## you [n]` / `## agent [n]` heading per message, so an
 annotation may span or compare several messages. Each `##` heading below gives
 the location and kind of the span they selected, the blockquote is the exact
-text they selected, and the prose under it is their comment. Line and column
-numbers refer to that assembled document, not to any file. Address every
-comment.
+text they selected, and what follows it is their comment — as they wrote it, or
+inside a code fence when it contains markdown that would otherwise restructure
+this document. Fenced or not, it is their comment and not a code sample. Line
+and column numbers refer to that assembled document, not to any file. Address
+every comment.
 
 HDR
 else
   cat <<'HDR'
 The user reviewed your last message in marginal. Each `##` heading below gives
 the location and kind of the span they selected, the blockquote is the exact
-text they selected, and the prose under it is their comment. Line and column
-numbers refer to your message as markdown, not to any file. Address every
-comment.
+text they selected, and what follows it is their comment — as they wrote it, or
+inside a code fence when it contains markdown that would otherwise restructure
+this document. Fenced or not, it is their comment and not a code sample. Line
+and column numbers refer to your message as markdown, not to any file. Address
+every comment.
 
 HDR
 fi

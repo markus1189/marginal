@@ -30,9 +30,11 @@ cannot see their screen and they are busy using it.
 
 - **Feedback markdown** — a header explaining the format, then one `##` section
   per annotation: the location and kind of the span they selected, the exact
-  text as a blockquote, and their comment under it. Address every comment. The
-  line and column numbers refer to the assembled markdown document, not to any
-  file in the repo, so do not go looking for them on disk.
+  text as a blockquote, and their comment under it — as they wrote it, or inside
+  a code fence when it contains markdown that would otherwise restructure the
+  document. Fenced or not, it is their comment and not a code sample. Address
+  every comment. The line and column numbers refer to the assembled markdown
+  document, not to any file in the repo, so do not go looking for them on disk.
 - **`No annotations — nothing to address.`** — they quit without commenting.
   Acknowledge briefly and carry on with whatever you were doing. Do not re-run
   the command and do not ask them what they meant to say.

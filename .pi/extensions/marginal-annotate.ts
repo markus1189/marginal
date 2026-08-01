@@ -27,9 +27,11 @@ const REPO_BUILD = resolve(HERE, "../../target/release/marginal");
 const PROMPT_HEADER_ONE = [
 	"I reviewed your last message in marginal. Below is my annotated feedback:",
 	"each `##` heading gives the location and kind of the span I selected, the",
-	"blockquote is the exact text I selected, and the prose under it is my comment.",
-	"Line/column numbers refer to your message as markdown, not to any file.",
-	"Address every comment.",
+	"blockquote is the exact text I selected, and what follows it is my comment —",
+	"as I wrote it, or inside a code fence when it contains markdown that would",
+	"otherwise restructure this document. Fenced or not, it is my comment and not",
+	"a code sample. Line/column numbers refer to your message as markdown, not to",
+	"any file. Address every comment.",
 	"",
 ].join("\n");
 
@@ -38,9 +40,11 @@ const PROMPT_HEADER_MANY = [
 	"document, with a `## you [n]` / `## agent [n]` heading per message; the",
 	"annotations below can therefore span or compare several messages. Each `##`",
 	"heading gives the location and kind of the span I selected, the blockquote is",
-	"the exact text I selected, and the prose under it is my comment. Line/column",
-	"numbers refer to that assembled document, not to any file. Address every",
-	"comment.",
+	"the exact text I selected, and what follows it is my comment — as I wrote it,",
+	"or inside a code fence when it contains markdown that would otherwise",
+	"restructure this document. Fenced or not, it is my comment and not a code",
+	"sample. Line/column numbers refer to that assembled document, not to any",
+	"file. Address every comment.",
 	"",
 ].join("\n");
 
