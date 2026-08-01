@@ -169,23 +169,26 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
     i
 }
 
-/// How much container chrome a span's lead is made of: blockquote markers, and
+/// The container chrome at the head of a span's lead: blockquote markers, and
 /// the whitespace — spaces *and* tabs — that indents a block inside one. Those
 /// are the only bytes a continuation line repeats verbatim, so they are the
 /// only ones it may be trimmed of.
 ///
-/// `None` when the lead holds anything else, which makes it content: an
-/// ordinary mid-line selection, whose later lines must be kept whole.
-fn chrome_counts(lead: &str) -> Option<(usize, usize)> {
+/// Counting stops at the first byte that is neither, so the lead need not be
+/// *all* chrome to yield some. `> some ` gives one marker and one space: the
+/// container the line sits in, and then the content the span starts after,
+/// which contributes nothing. A lead with no chrome at its head gives `(0, 0)`,
+/// and every later line is left whole.
+fn chrome_counts(lead: &str) -> (usize, usize) {
     let (mut markers, mut spaces) = (0, 0);
     for c in lead.chars() {
         match c {
             '>' => markers += 1,
             ' ' | '\t' => spaces += 1,
-            _ => return None,
+            _ => break,
         }
     }
-    Some((markers, spaces))
+    (markers, spaces)
 }
 
 /// Bytes at the start of `text` that repeat the chrome counted by
@@ -855,12 +858,16 @@ impl App {
     /// consumer was handed a quote one level deeper from the second line on,
     /// having been promised the exact text that was selected.
     ///
-    /// So when the bytes before the start column are only container chrome, the
-    /// same chrome comes off every line — no more of each kind than the lead
-    /// held, so a continuation cannot be trimmed of chrome the first line never
-    /// carried. When the lead is content — an ordinary mid-line selection —
-    /// continuation lines are left alone, because trimming them by the start
-    /// column would cut into the text.
+    /// So the chrome at the head of the lead comes off every line — no more of
+    /// each kind than the lead held, so a continuation is never trimmed of
+    /// chrome the first line never carried. Content in the lead contributes
+    /// none, which is what keeps an ordinary mid-line selection whole: trimming
+    /// its later lines by the start column would cut into the text.
+    ///
+    /// The lead does not have to be *all* chrome for any to come off, and it
+    /// must not have to be. An inline span narrowed to with `+`/`-` inside a
+    /// blockquote starts mid-sentence, so its lead is `> ` and then prose — and
+    /// its continuation lines carry a `> ` all the same.
     pub fn slice(&self, span: Span) -> String {
         let first = self.line_text(span.start.line);
         let lead = floor_boundary(first, span.start.col.saturating_sub(1));
@@ -872,7 +879,7 @@ impl App {
             let a = if line == span.start.line {
                 lead
             } else {
-                chrome.map_or(0, |c| chrome_prefix(text, c))
+                chrome_prefix(text, chrome)
             };
             let b = if line == span.end.line {
                 ceil_boundary(text, span.end.col)
@@ -1165,6 +1172,35 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         assert_eq!(
             b.slice(b.blocks[0].span),
             "```diff\n> removed line\n< added line\n```"
+        );
+    }
+
+    /// The lead of an inline span inside a container is chrome *and then
+    /// content* — `> some `. Requiring the whole lead to be chrome exempted
+    /// every `+`/`-` selection from the trim, so a two-line inline node inside
+    /// a blockquote still came back with a marker on its second line. The
+    /// headline example in the readme is a `code-span` annotation, so this is
+    /// the shape the output format advertises.
+    #[test]
+    fn an_inline_span_inside_a_blockquote_drops_the_marker_on_every_line() {
+        let src = "> some **emphasised text that\n> runs onto a second line** here\n";
+        let mut a = App::new("s.md".into(), src);
+        a.cursor = Pos::new(1, 8);
+        a.contract();
+        assert_eq!(a.selection_kind(), "strong");
+        assert_eq!(
+            a.slice(a.selection().unwrap()),
+            "**emphasised text that\nruns onto a second line**"
+        );
+
+        let code = "> call `parse_document(arena,\n> src)` before anything else\n";
+        let mut b = App::new("c.md".into(), code);
+        b.cursor = Pos::new(1, 8);
+        b.contract();
+        assert_eq!(b.selection_kind(), "code-span");
+        assert_eq!(
+            b.slice(b.selection().unwrap()),
+            "`parse_document(arena,\nsrc)`"
         );
     }
 
