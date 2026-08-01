@@ -18,6 +18,7 @@
 //!   vim-table-mode — does it by editing the file. marginal cannot: the file is
 //!   the thing under review.
 
+use crate::app::chrome_counts;
 use crate::blocks::Block;
 use crate::wrap::{cells, Piece, Row};
 
@@ -176,18 +177,26 @@ pub fn row(len: usize, pads: &[Pad]) -> Row {
 /// Contiguity alone is not enough, though: a blockquote ends a top-level table
 /// without needing a blank line, so a quoted table on the very next line is
 /// contiguous with the one above it and is not the same table. The rows of one
-/// table share a container prefix; two tables either side of a container
+/// table sit at one container depth; two tables either side of a container
 /// boundary do not.
+///
+/// **Depth, not the text of the prefix.** GFM lets a row wear up to three
+/// spaces of indentation, and lets a quote marker be followed by a space, a tab
+/// or nothing at all — so `| a |` and ` | a |`, or `>| a |` and `> | a |`, are
+/// each two rows of one table that agree on nothing but their marker count.
+/// Comparing the run byte for byte broke a table apart wherever its rows
+/// disagreed about whitespace, and the pieces below the split had no delimiter
+/// row left to align against.
 fn extents(lines: &[String], blocks: &[Block]) -> Vec<(usize, usize)> {
-    let prefix = |l: usize| -> &str {
-        lines.get(l - 1).map_or("", |s| {
-            &s[..s.len() - s.trim_start_matches(['>', ' ']).len()]
-        })
-    };
+    // Whether a tab counts as chrome decides more than it looks: `>\t>` is two
+    // containers, and a scan that stops at the tab calls it one and merges a
+    // doubly quoted table into the singly quoted one above it. `chrome_counts`
+    // is shared with `app.rs` so the two cannot drift on that question.
+    let depth = |l: usize| lines.get(l - 1).map_or(0, |s| chrome_counts(s).0);
     let mut out: Vec<(usize, usize)> = Vec::new();
     for b in blocks.iter().filter(|b| b.kind == "table-row") {
         match out.last_mut() {
-            Some(last) if last.1 + 1 == b.start() && prefix(last.0) == prefix(b.start()) => {
+            Some(last) if last.1 + 1 == b.start() && depth(last.0) == depth(b.start()) => {
                 last.1 = b.end();
             }
             _ => out.push((b.start(), b.end())),
@@ -480,9 +489,19 @@ mod tests {
     /// straight after it and the two merged: `align` found the *outer* table's
     /// delimiter row and padded the quoted rows to the outer grid, giving the
     /// quoted delimiter row space padding instead of its own rule.
+    ///
+    /// The quoted table is never aligned *at all* — `row_cells` reads the `> `
+    /// before the first pipe as a first cell, so `is_delimiter` finds no rule
+    /// row and `align` bails — so there is no inner grid to assert on here. The
+    /// rows are deliberately of unequal width to keep that from looking like
+    /// one: what is pinned is that they come out of the renderer untouched, and
+    /// that `extents` hands `align` two tables rather than one.
     #[test]
     fn a_quoted_table_is_not_merged_into_the_one_above_it() {
-        let src = "| a | bbbb |\n|---|---|\n| ccccc | d |\n> | q | w |\n> |---|---|\n> | e | r |\n";
+        let src =
+            "| a | bbbb |\n|---|---|\n| ccccc | d |\n> | qqqqqq | w |\n> |---|---|\n> | e | r |\n";
+        let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
+        assert_eq!(extents(&lines, &blocks::parse(src)), [(1, 3), (4, 6)]);
         let out = render(src, 40);
         for (i, l) in out.iter().enumerate().skip(3) {
             assert!(
@@ -491,16 +510,79 @@ mod tests {
                 i + 1
             );
         }
-        // The quoted delimiter row keeps a rule, not spaces.
+        // The quoted delimiter row keeps a rule, not the outer grid's spaces.
         assert!(
             !out[4].contains("- "),
             "rule padded with spaces: {:?}",
             out[4]
         );
-        assert!(out[4].contains("---"), "{:?}", out[4]);
-        // Each table lines up within itself.
-        assert_eq!(out[0].chars().count(), out[2].chars().count());
-        assert_eq!(out[3].chars().count(), out[5].chars().count());
+    }
+
+    /// GFM allows a table row up to three spaces of indentation and comrak
+    /// keeps it in the table. `extents` compared the container prefix as text,
+    /// so one space read as a different container: the table came apart into
+    /// `[(1,2), (3,3), (4,4)]`, the two one-line pieces had no delimiter row
+    /// between them, `align` refused both, and the screen showed a header and
+    /// rule padded to each other above two rows left as they lay — worse than
+    /// no split-detection at all.
+    #[test]
+    fn a_row_indented_within_the_gfm_limit_stays_in_its_table() {
+        for n in 0..=3 {
+            let src = format!(
+                "| id | description |\n|---|---|\n{}| 1 | short |\n| 22 | longer |\n",
+                " ".repeat(n)
+            );
+            let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
+            assert_eq!(
+                extents(&lines, &blocks::parse(&src)),
+                [(1, 4)],
+                "{n} spaces split the table"
+            );
+            let out = render(&src, 80);
+            let w = out[0].chars().count();
+            assert!(
+                !out[1].contains("- ") && out[1].ends_with("---|"),
+                "{n} spaces: rule is not a rule: {:?}",
+                out[1]
+            );
+            assert_eq!(out[1].chars().count(), w, "{n} spaces: {out:#?}");
+            assert_eq!(out[3].chars().count(), w, "{n} spaces: {out:#?}");
+            // The indented row is padded to the same grid; the indentation
+            // markdown ignores is still on screen, because nothing here may
+            // delete a byte.
+            assert_eq!(out[2].chars().count(), w + n, "{n} spaces: {out:#?}");
+        }
+    }
+
+    /// Four spaces is an indented code block, which ends the table at the line
+    /// above — the row is not a row and the line after it is a paragraph. The
+    /// fix above turns on comrak's answer rather than on a count of spaces, so
+    /// pin which side of the limit comrak lands on.
+    #[test]
+    fn a_row_indented_past_the_gfm_limit_is_not_in_the_table() {
+        let src = "| id | description |\n|---|---|\n    | 1 | short |\n| 22 | longer |\n";
+        let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
+        let bs = blocks::parse(src);
+        assert!(bs.iter().all(|b| b.kind != "table-row" || b.end() <= 2));
+        assert_eq!(extents(&lines, &bs), [(1, 2)]);
+        let tables = Tables::new(&lines, &bs);
+        assert!((3..=4).all(|l| tables.pads(l, 80).is_none()));
+    }
+
+    /// A quote marker may be followed by a space, a tab or nothing, and all
+    /// three are one container — so the rows either side of such a difference
+    /// are one table. A tab is the case a `['>', ' ']` scan gets backwards: it
+    /// stops there, so `>\t>` counts one marker instead of two and merges a
+    /// doubly quoted table into the singly quoted one above it.
+    #[test]
+    fn quote_markers_are_compared_by_depth_not_by_their_spacing() {
+        let one = ">| q | w |\n> |---|---|\n>\t| e | r |\n>  | t | y |\n";
+        let lines: Vec<String> = one.lines().map(ToString::to_string).collect();
+        assert_eq!(extents(&lines, &blocks::parse(one)), [(1, 4)]);
+
+        let two = "> | q | w |\n> |---|---|\n>\t> | e | r |\n>\t> |---|---|\n";
+        let lines: Vec<String> = two.lines().map(ToString::to_string).collect();
+        assert_eq!(extents(&lines, &blocks::parse(two)), [(1, 2), (3, 4)]);
     }
 
     /// Spaces in the rule would read as a hole in the table's one horizontal

@@ -169,17 +169,21 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
     i
 }
 
-/// The container chrome at the head of a span's lead: blockquote markers, and
-/// the whitespace — spaces *and* tabs — that indents a block inside one. Those
-/// are the only bytes a continuation line repeats verbatim, so they are the
-/// only ones it may be trimmed of.
+/// The container chrome at the head of `lead`: blockquote markers, and the
+/// whitespace — spaces *and* tabs — that indents a block inside one. Those are
+/// the only bytes a continuation line repeats verbatim, so they are the only
+/// ones it may be trimmed of.
 ///
 /// Counting stops at the first byte that is neither, so the lead need not be
 /// *all* chrome to yield some. `> some ` gives one marker and one space: the
 /// container the line sits in, and then the content the span starts after,
 /// which contributes nothing. A lead with no chrome at its head gives `(0, 0)`,
 /// and every later line is left whole.
-fn chrome_counts(lead: &str) -> (usize, usize) {
+///
+/// `table.rs` reads the marker count off a whole source line to tell how deep
+/// a table row sits. Sharing this rather than writing a second scan is what
+/// keeps one file from deciding `>\t` is a container while the other does not.
+pub fn chrome_counts(lead: &str) -> (usize, usize) {
     let (mut markers, mut spaces) = (0, 0);
     for c in lead.chars() {
         match c {
