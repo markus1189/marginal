@@ -110,7 +110,7 @@ pub struct Tables {
 impl Tables {
     pub fn new(lines: &[String], blocks: &[Block]) -> Self {
         let mut out = vec![None; lines.len()];
-        for (from, to) in extents(blocks) {
+        for (from, to) in extents(lines, blocks) {
             // Tabs become one space each before anything measures a column, the
             // same substitution `App::display_line` makes and for the same
             // reason: one byte for one cell keeps byte offsets and screen
@@ -172,11 +172,24 @@ pub fn row(len: usize, pads: &[Pad]) -> Row {
 /// A table's rows are line-contiguous — `blocks.rs` stretches the header row
 /// over the delimiter row precisely so there is no gap — so a break in the
 /// numbering is a break between two tables.
-fn extents(blocks: &[Block]) -> Vec<(usize, usize)> {
+///
+/// Contiguity alone is not enough, though: a blockquote ends a top-level table
+/// without needing a blank line, so a quoted table on the very next line is
+/// contiguous with the one above it and is not the same table. The rows of one
+/// table share a container prefix; two tables either side of a container
+/// boundary do not.
+fn extents(lines: &[String], blocks: &[Block]) -> Vec<(usize, usize)> {
+    let prefix = |l: usize| -> &str {
+        lines.get(l - 1).map_or("", |s| {
+            &s[..s.len() - s.trim_start_matches(['>', ' ']).len()]
+        })
+    };
     let mut out: Vec<(usize, usize)> = Vec::new();
     for b in blocks.iter().filter(|b| b.kind == "table-row") {
         match out.last_mut() {
-            Some(last) if last.1 + 1 == b.start() => last.1 = b.end(),
+            Some(last) if last.1 + 1 == b.start() && prefix(last.0) == prefix(b.start()) => {
+                last.1 = b.end();
+            }
             _ => out.push((b.start(), b.end())),
         }
     }
@@ -459,6 +472,35 @@ mod tests {
             out[1].chars().count(),
             "rule does not match the header: {out:?}"
         );
+    }
+
+    /// `extents` merged on contiguous line numbering alone, and its doc comment
+    /// treated the converse as given. A blockquote ends a top-level table
+    /// without a blank line, so the quoted table's first row lands on the line
+    /// straight after it and the two merged: `align` found the *outer* table's
+    /// delimiter row and padded the quoted rows to the outer grid, giving the
+    /// quoted delimiter row space padding instead of its own rule.
+    #[test]
+    fn a_quoted_table_is_not_merged_into_the_one_above_it() {
+        let src = "| a | bbbb |\n|---|---|\n| ccccc | d |\n> | q | w |\n> |---|---|\n> | e | r |\n";
+        let out = render(src, 40);
+        for (i, l) in out.iter().enumerate().skip(3) {
+            assert!(
+                l.starts_with("> "),
+                "line {} lost its quote marker: {l:?}",
+                i + 1
+            );
+        }
+        // The quoted delimiter row keeps a rule, not spaces.
+        assert!(
+            !out[4].contains("- "),
+            "rule padded with spaces: {:?}",
+            out[4]
+        );
+        assert!(out[4].contains("---"), "{:?}", out[4]);
+        // Each table lines up within itself.
+        assert_eq!(out[0].chars().count(), out[2].chars().count());
+        assert_eq!(out[3].chars().count(), out[5].chars().count());
     }
 
     /// Spaces in the rule would read as a hole in the table's one horizontal
