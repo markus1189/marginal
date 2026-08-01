@@ -248,6 +248,7 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `Enter` (also `c`) | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
+| `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
 | `Esc` | drop the selection |
 | `q`, `C-c` | quit |
 

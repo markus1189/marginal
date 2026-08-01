@@ -881,6 +881,52 @@ impl App {
         }
     }
 
+    /// Every position worth jumping to, in document order.
+    ///
+    /// Annotations are stored in the order they were written (`commit_comment`
+    /// pushes), which is not the order they appear in — so this sorts. Two
+    /// annotations anchored at the same position collapse to one stop; a ring
+    /// that visits the same cell twice reads as a stuck key.
+    fn mark_positions(&self) -> Vec<Pos> {
+        let mut out: Vec<Pos> = self
+            .annotations
+            .iter()
+            .map(|a| Pos::new(a.start_line, a.start_col))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Next (`delta > 0`) or previous mark, wrapping at both ends. Wrapping is
+    /// the point: three annotations should be three presses and back to the
+    /// first, not a ring with a dead end at each edge.
+    pub fn goto_mark(&mut self, delta: isize) {
+        let marks = self.mark_positions();
+        let here = self.cursor;
+        let found = if delta > 0 {
+            marks.iter().find(|&&p| p > here).or_else(|| marks.first())
+        } else {
+            marks
+                .iter()
+                .rev()
+                .find(|&&p| p < here)
+                .or_else(|| marks.last())
+        }
+        .copied();
+        let Some(target) = found else {
+            self.status = "no annotations".into();
+            return;
+        };
+        self.drop_region();
+        self.cursor = target;
+        self.snap();
+        // The count is not decoration: it is how you notice the set is not what
+        // you expected before you have pressed the key twenty times.
+        let idx = marks.iter().position(|&p| p == target).unwrap_or(0) + 1;
+        self.status = format!("annotation {idx}/{}", marks.len());
+    }
+
     fn is_whole_lines(&self, span: Span) -> bool {
         span.start.col == 1 && span.end.col >= self.line_len(span.end.line).max(1)
     }
@@ -2311,6 +2357,65 @@ https://example.dev/a/very/long/path in it as well.
         a.cursor = Pos::new(1, 1);
         a.remove_at_cursor();
         assert_eq!(a.annotations.len(), 1);
+    }
+
+    /// Annotations are pushed in the order they were written, so a ring that
+    /// walked `self.annotations` directly would jump backwards through the
+    /// document whenever you annotated an earlier line last. DOC line 6 is
+    /// annotated first here, line 3 second, precisely to catch that.
+    #[test]
+    fn mark_navigation_runs_in_document_order_not_creation_order() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 1);
+        commit(&mut a, "later line, written first");
+        a.cursor = Pos::new(3, 1);
+        commit(&mut a, "earlier line, written second");
+
+        a.cursor = Pos::new(1, 1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 3);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 6);
+    }
+
+    #[test]
+    fn mark_navigation_wraps_at_both_ends() {
+        let mut a = app();
+        a.cursor = Pos::new(3, 1);
+        commit(&mut a, "one");
+        a.cursor = Pos::new(6, 1);
+        commit(&mut a, "two");
+
+        a.cursor = Pos::new(6, 1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 3, "forward off the end wraps to the first");
+        a.goto_mark(-1);
+        assert_eq!(a.cursor.line, 6, "back off the start wraps to the last");
+    }
+
+    /// The readout is the only way to notice the set is not what you expected.
+    #[test]
+    fn mark_navigation_reports_position_in_the_set() {
+        let mut a = app();
+        a.cursor = Pos::new(3, 1);
+        commit(&mut a, "one");
+        a.cursor = Pos::new(6, 1);
+        commit(&mut a, "two");
+
+        a.cursor = Pos::new(1, 1);
+        a.goto_mark(1);
+        assert_eq!(a.status, "annotation 1/2");
+        a.goto_mark(1);
+        assert_eq!(a.status, "annotation 2/2");
+    }
+
+    #[test]
+    fn mark_navigation_on_an_empty_document_says_so_and_stays_put() {
+        let mut a = app();
+        a.cursor = Pos::new(3, 1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor, Pos::new(3, 1));
+        assert_eq!(a.status, "no annotations");
     }
 
     #[test]

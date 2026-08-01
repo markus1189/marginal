@@ -844,15 +844,22 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// reads the floor off these widths, and for `KEYS` it is the third rung that
 /// decides it — 50 cells, so 80 columns. Widen that rung by one cell and an
 /// 80-column terminal loses the only confirmation `x remove` gives. Under that
-/// budget it documents `w/b` and `v/V` and not `hjkl` or `+/-`: `hjkl` is the
-/// one group in the table with a second binding — the arrow keys — and the
-/// rung below it already goes without, while `v` and `V` answer with `block
-/// selection — J/K to extend` in the status field this rung has just bought,
-/// so the three cells they cost name three more keys than they spell.
+/// budget it documents movement by naming `[/] marks` and not `hjkl`, `w/b`,
+/// `v/V` or `+/-`. Every one of those four moves the cursor somewhere the
+/// reader can already see; `[` and `]` are the only keys that reach an
+/// annotation off screen, which is the whole point of a fringe you work down.
+/// They also answer with `mark 2/5` in the status field this rung has just
+/// bought, so the nine cells they cost name a position the pane could not
+/// otherwise report — the argument that used to buy `v/V` its three cells
+/// here, and the rung below still spends them on `w/b`.
+///
+/// `c comment`, not `Enter comment`, from this rung down: `c` stays bound
+/// (see the dispatch in `main.rs`) and spells the same action four cells
+/// cheaper, which is `[/] marks` nearly half paid for.
 const KEYS: [&str; 6] = [
-    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · Enter comment · x remove · q quit",
-    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · Enter comment · x remove · q quit",
-    "w/b · v/V · z peek · c comment · x remove · q quit",
+    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · [/] marks · Enter comment · x remove · q quit",
+    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · [/] marks · Enter comment · x remove · q quit",
+    "z peek · [/] marks · c comment · x remove · q quit",
     "w/b · z peek · c comment · x remove · q quit",
     "c comment · x remove · q quit",
     "q quit",

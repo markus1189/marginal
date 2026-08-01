@@ -486,6 +486,10 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // first two weeks of muscle memory reach for.
             KeyCode::Enter | KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),
+            // `]`/`[` rather than `n`/`N`: search will want those, and vim
+            // already spells "next/previous change hunk" with brackets.
+            KeyCode::Char(']') => app.goto_mark(1),
+            KeyCode::Char('[') => app.goto_mark(-1),
             KeyCode::Esc => app.sel = Sel::Here,
             _ => {}
         },
