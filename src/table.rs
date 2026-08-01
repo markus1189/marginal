@@ -445,6 +445,22 @@ mod tests {
         assert_ne!(render(RAGGED, need), RAGGED.lines().collect::<Vec<_>>());
     }
 
+    /// `extents` needs the header row to cover the delimiter row to see a table
+    /// at all. `blocks.rs` only stretched it when a next row existed, so a
+    /// header-only table came out one line long, `align` refused it, and it
+    /// rendered ragged at every width.
+    #[test]
+    fn a_header_only_table_is_still_aligned() {
+        let src = "| id | description |\n|---|---|\n";
+        let out = render(src, 40);
+        assert_ne!(out, src.lines().collect::<Vec<_>>(), "left unaligned");
+        assert_eq!(
+            out[0].chars().count(),
+            out[1].chars().count(),
+            "rule does not match the header: {out:?}"
+        );
+    }
+
     /// Spaces in the rule would read as a hole in the table's one horizontal
     /// line, so the delimiter row grows dashes instead.
     #[test]

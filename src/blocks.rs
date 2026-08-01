@@ -211,6 +211,12 @@ fn walk_child<'a>(child: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mu
                     let l = next_line - 1;
                     rs.end = Pos::new(l, line_len(lines, l).max(1));
                 }
+            } else if span.end.line > rs.end.line {
+                // No next row to stretch towards. A header-only table still has
+                // a delimiter row under it, and it is inside the table's own
+                // span even though comrak gives it no node of its own — so the
+                // last row takes it, exactly as any other row would.
+                rs.end = Pos::new(span.end.line, line_len(lines, span.end.line).max(1));
             }
             push(out, "table-row", rs, 0);
         }
@@ -478,6 +484,21 @@ still para.
         assert_eq!((rows[0].start(), rows[0].end()), (14, 15));
         assert_eq!((rows[1].start(), rows[1].end()), (16, 16));
         assert!(!parse(DOC).iter().any(|b| b.kind == "table"));
+    }
+
+    /// The delimiter row rode with the header only when a *next* row existed to
+    /// stretch towards. A GFM table with a header and no body rows therefore
+    /// left `|---|---|` in no unit: the cursor there reported the header's
+    /// span, so a block selection silently omitted the line, and `extents`
+    /// reported a one-line table, which `align` refuses — so it never aligned.
+    #[test]
+    fn a_header_only_table_still_owns_its_delimiter_row() {
+        let src = "| name | description |\n|---|---|\n\n# H\n";
+        assert_eq!(
+            flat(src),
+            vec![("table-row", 1, 2), ("heading", 4, 4)],
+            "delimiter row left uncovered"
+        );
     }
 
     #[test]
