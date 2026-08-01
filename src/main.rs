@@ -43,6 +43,20 @@ fn argv_utf8(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<Strin
     .collect()
 }
 
+/// The value of a flag that takes one. A flag consuming the next token
+/// unconditionally silently ate a following flag as its value: `--result
+/// --label out.json f.md` wrote the whole review to a file named `--label`, and
+/// `--label --result o.json` swallowed the result path so nothing was saved at
+/// all. The `starts_with('-')` guard in the match only ever saw tokens that
+/// reached it, and `ok_or` fired only when the flag was the very last argument.
+fn value(next: Option<String>, missing: &str) -> Result<String, String> {
+    match next {
+        None => Err(missing.to_string()),
+        Some(v) if v.starts_with('-') => Err(format!("{missing}, not {v}")),
+        Some(v) => Ok(v),
+    }
+}
+
 /// `Ok(None)` means help was asked for, which is not a failure.
 fn parse_args() -> Result<Option<Args>, String> {
     parse_argv(argv_utf8(std::env::args_os().skip(1))?)
@@ -59,12 +73,8 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
         match a.as_str() {
             "--dump-blocks" => dump = true,
             "--raw" => pretty = false,
-            "--result" => {
-                result = Some(it.next().ok_or("--result needs a path")?);
-            }
-            "--label" => {
-                label = Some(it.next().ok_or("--label needs a name")?);
-            }
+            "--result" => result = Some(value(it.next(), "--result needs a path")?),
+            "--label" => label = Some(value(it.next(), "--label needs a name")?),
             "-h" | "--help" => return Ok(None),
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
             other => file = Some(other.to_string()),
@@ -388,6 +398,31 @@ mod tests {
 
         let ok = argv_utf8([std::ffi::OsString::from("f.md")].into_iter()).unwrap();
         assert_eq!(ok, vec!["f.md".to_string()]);
+    }
+
+    fn argv(a: &[&str]) -> Result<Option<Args>, String> {
+        parse_argv(a.iter().map(ToString::to_string).collect())
+    }
+
+    /// `--result` and `--label` took the next token whatever it was, so a
+    /// mistyped command line silently did something else: `--result --label
+    /// out.json f.md` wrote the review to a file literally named `--label`, and
+    /// `--label --result o.json` ate the result path so nothing was saved.
+    #[test]
+    fn a_flag_is_never_swallowed_as_another_flags_value() {
+        assert!(argv(&["--result", "--label", "o.json", "f.md"]).is_err());
+        assert!(argv(&["--label", "--result", "o.json", "f.md"]).is_err());
+        assert!(argv(&["--result", "--raw", "f.md"]).is_err());
+        // Still an error when the flag is simply last, as it always was.
+        assert!(argv(&["f.md", "--result"]).is_err());
+
+        // And the ordinary forms keep working.
+        let a = argv(&["--result", "o.json", "--label", "PLAN.md", "f.md"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.result.as_deref(), Some("o.json"));
+        assert_eq!(a.label.as_deref(), Some("PLAN.md"));
+        assert_eq!(a.file, "f.md");
     }
 
     const DOC: &str = "# Steps\n\n- one\n- two\n";
