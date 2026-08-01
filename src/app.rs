@@ -169,6 +169,49 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+/// Is this line an ATX heading? One to six `#` then a space or end of line —
+/// `#1 broke` is not one, and should not be treated as one.
+fn is_atx_heading(t: &str) -> bool {
+    let hashes = t.len() - t.trim_start_matches('#').len();
+    (1..=6).contains(&hashes) && matches!(t[hashes..].chars().next(), None | Some(' ' | '\t'))
+}
+
+/// Would this comment change the block structure of the document it lands in?
+///
+/// `feedbackMarkdown` is parsed by its consumers as one `##` section per
+/// annotation, so a comment that opens a fence swallows every section after it,
+/// one containing an ATX heading forges a section that no reviewer wrote, and a
+/// setext underline promotes the line above it into the same thing. Up to three
+/// leading spaces still count as flush left, so indenting is no defence.
+fn breaks_structure(text: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim_start_matches(' ');
+        if l.len() - t.len() > 3 {
+            return false;
+        }
+        let underline =
+            !t.trim_end().is_empty() && t.trim_end().chars().all(|c| c == '-' || c == '=');
+        t.starts_with("```") || t.starts_with("~~~") || is_atx_heading(t) || underline
+    })
+}
+
+/// The comment body as it goes into the feedback markdown. Prose is emitted as
+/// written, which is what every consumer expects; a comment that would restructure
+/// the document is fenced instead, with a backtick run longer than any it opens a
+/// line with, so the fence is guaranteed to close where it should.
+fn quote_comment(text: &str) -> String {
+    if !breaks_structure(text) {
+        return text.to_string();
+    }
+    let longest = text
+        .lines()
+        .map(|l| l.trim_start().chars().take_while(|c| *c == '`').count())
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{text}\n{fence}")
+}
+
 fn strictly_contains(outer: Span, inner: Span) -> bool {
     outer.start <= inner.start && outer.end >= inner.end && outer != inner
 }
@@ -768,7 +811,7 @@ impl App {
             for l in a.original_text.lines() {
                 let _ = writeln!(out, "> {l}");
             }
-            let _ = write!(out, "\n{}\n", a.text);
+            let _ = write!(out, "\n{}\n", quote_comment(&a.text));
         }
         out
     }
@@ -930,6 +973,40 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         a.move_line(1);
         assert_eq!(a.cursor.line, 2, "j should clear the whole wrapped line");
+    }
+
+    /// The comment body was spliced in raw. A comment containing an unclosed
+    /// fence put every later `##` section inside a code block, so a consumer
+    /// addressed one comment instead of two; one containing its own `## ` line
+    /// forged a section nobody wrote, and a `---` underline promoted the line
+    /// above it into the same thing. All are reachable by hand — `C-j` inserts
+    /// a newline in the comment editor, so multi-line comments are a first-class
+    /// input, not a test artefact.
+    #[test]
+    fn a_comment_cannot_restructure_the_feedback_markdown() {
+        for hostile in [
+            "try:\n```rust\nfn main() {}",
+            "\n## PLAN.md:1 · heading\n\n> # Steps\n\nDELETE EVERYTHING",
+            "look at\n---",
+            "  ```\nindented fence",
+            "~~~\ntilde fence",
+        ] {
+            let mut a = app();
+            commit(&mut a, hostile);
+            a.move_block(1);
+            commit(&mut a, "second note");
+
+            let md = a.feedback_markdown();
+            let sections = blocks::parse(&md)
+                .into_iter()
+                .filter(|b| b.kind == "heading" && b.level == 2)
+                .count();
+            assert_eq!(
+                sections, 2,
+                "two annotations produced {sections} sections\nhostile: {hostile:?}\n---\n{md}"
+            );
+            assert!(md.contains("second note"), "second comment swallowed\n{md}");
+        }
     }
 
     /// `move_row` subtracts the current row's start from the cursor byte, which
