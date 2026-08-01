@@ -8,6 +8,7 @@ mod app;
 mod blocks;
 mod editor;
 mod highlight;
+mod table;
 mod ui;
 mod wrap;
 
@@ -18,15 +19,14 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use app::{App, Mode, Sel};
 
-const USAGE: &str =
-    "usage: marginal [--dump-blocks] [--no-wrap] [--result PATH] [--label NAME] FILE";
+const USAGE: &str = "usage: marginal [--dump-blocks] [--raw] [--result PATH] [--label NAME] FILE";
 
 struct Args {
     file: String,
     result: Option<String>,
     label: Option<String>,
     dump: bool,
-    wrap: bool,
+    pretty: bool,
 }
 
 /// `Ok(None)` means help was asked for, which is not a failure.
@@ -35,12 +35,12 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut result = None;
     let mut label = None;
     let mut dump = false;
-    let mut wrap = true;
+    let mut pretty = true;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dump-blocks" => dump = true,
-            "--no-wrap" => wrap = false,
+            "--raw" => pretty = false,
             "--result" => {
                 result = Some(it.next().ok_or("--result needs a path")?);
             }
@@ -57,7 +57,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         result,
         label,
         dump,
-        wrap,
+        pretty,
     }))
 }
 
@@ -112,7 +112,7 @@ fn main() -> ExitCode {
 
     let mut app = App::new(args.file.clone(), &src);
     app.label = args.label;
-    app.wrap = args.wrap;
+    app.pretty = args.pretty;
     match run(&mut app) {
         Ok(()) => {}
         Err(e) => {
@@ -265,7 +265,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // widen / narrow along the markdown hierarchy
             KeyCode::Char('+' | '=') => app.expand(),
             KeyCode::Char('-' | '_') => app.contract(),
-            KeyCode::Char('W') => app.toggle_wrap(),
+            KeyCode::Char('P') => app.toggle_pretty(),
             KeyCode::Char('z') => app.toggle_peek(),
             KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),

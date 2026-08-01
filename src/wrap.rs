@@ -19,6 +19,49 @@ pub fn cells(s: &str) -> usize {
     Span::raw(s).width()
 }
 
+/// One piece of a rendered row.
+///
+/// A row used to be a single byte range. It is a sequence now because pretty
+/// mode aligns tables by *inserting* padding — the one thing on screen that no
+/// byte of the source accounts for. Everything else is unchanged: the `Src`
+/// pieces of a row still concatenate to a window of the line, in order,
+/// dropping nothing, which is what lets `draw_source` rebase a mark by clipping
+/// it and `cursor_row` find a byte's row by scanning starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece {
+    /// Bytes `[start, end)` of the line, rendered as they are.
+    Src(usize, usize),
+    /// `n` cells of `fill`, from nowhere. Having no byte of its own it has no
+    /// style of its own either, so it names the byte to borrow one from:
+    /// whichever side of the gap the padding belongs to.
+    Pad { n: usize, fill: char, anchor: usize },
+}
+
+/// One screen line. Without pretty mode every row is exactly one `Src`, which
+/// is the degenerate case the wrapper alone produces.
+pub type Row = Vec<Piece>;
+
+/// First source byte the row shows.
+pub fn row_start(row: &Row) -> usize {
+    row.iter()
+        .find_map(|p| match *p {
+            Piece::Src(s, _) => Some(s),
+            Piece::Pad { .. } => None,
+        })
+        .unwrap_or(0)
+}
+
+/// One past the last source byte the row shows.
+pub fn row_end(row: &Row) -> usize {
+    row.iter()
+        .rev()
+        .find_map(|p| match *p {
+            Piece::Src(_, e) => Some(e),
+            Piece::Pad { .. } => None,
+        })
+        .unwrap_or(0)
+}
+
 /// Word-wrap to `width` cells, preserving each source line's own break and its
 /// leading indentation. Hand-rolled rather than `Paragraph::wrap` because the
 /// overlay needs the exact row count to clamp its scroll, and ratatui exposes
@@ -48,18 +91,22 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// The rows one source line occupies at `width` cells — byte ranges into the
-/// line — with the hanging indent its continuation rows are padded by.
+/// The rows one source line occupies at `width` cells, with the hanging indent
+/// its continuation rows are padded by.
 ///
 /// `width == 0` means "do not wrap": one row covering the whole line, which is
-/// what the source view renders when wrapping is off and what keeps every
+/// what the source view renders when pretty mode is off and what keeps every
 /// row-addressed motion working unchanged in that mode.
-pub fn wrap_source(line: &str, width: usize) -> (Vec<(usize, usize)>, usize) {
+pub fn wrap_source(line: &str, width: usize) -> (Vec<Row>, usize) {
     if width == 0 {
-        return (vec![(0, line.len())], 0);
+        return (vec![vec![Piece::Src(0, line.len())]], 0);
     }
     let indent = hang_indent(line).min(width / 2);
-    (wrap_line(line, width, width - indent), indent)
+    let rows = wrap_line(line, width, width - indent)
+        .into_iter()
+        .map(|(s, e)| vec![Piece::Src(s, e)])
+        .collect();
+    (rows, indent)
 }
 
 /// Cells a continuation row is padded by, so a wrapped line keeps the shape of

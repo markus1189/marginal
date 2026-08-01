@@ -17,7 +17,8 @@ use serde::Serialize;
 use crate::blocks::{self, Block, Pos, Span, TreeNode};
 use crate::editor::Editor;
 use crate::highlight::{self, LineMarks};
-use crate::wrap;
+use crate::table::{self, Tables};
+use crate::wrap::{self, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -110,14 +111,25 @@ pub struct App {
     /// Rows the peeked text wraps to at the current width. Published by the
     /// renderer for the same reason `viewport` is: only it knows the geometry.
     pub peek_rows: usize,
-    /// Soft wrap in the source view. Off means the old behaviour: lines run
-    /// past the right edge and a marker says so.
-    pub wrap: bool,
+    /// Render the source legibly rather than literally: soft wrap, and tables
+    /// aligned by padding. Off means the old behaviour — lines run past the
+    /// right edge with a marker to say so, and every cell on screen is a byte
+    /// of the file. That is the mode to turn to when a column looks wrong.
+    ///
+    /// One switch, not two. The question it answers is "am I looking at the
+    /// bytes or at something readable", and a half-pretty third mode would be
+    /// a state nobody asked for.
+    pub pretty: bool,
     /// Cells the body column is wide, published by the renderer. Zero until the
-    /// first frame, and zero is also how `wrap_source` is told not to wrap — so
-    /// every row-addressed motion degrades to line-addressed before any
-    /// geometry is known, which is what the headless tests exercise.
-    pub wrap_width: usize,
+    /// first frame, and zero is also how `wrap_source` is told not to wrap and
+    /// how `Tables::pads` is told not to align — so every row-addressed motion
+    /// degrades to line-addressed before any geometry is known, which is what
+    /// the headless tests exercise.
+    pub body_width: usize,
+    /// Alignment padding per line. Depends on every row of a table but on
+    /// nothing about the terminal, so it is computed once here and the width
+    /// only decides whether to use it.
+    tables: Tables,
     next_id: usize,
 }
 
@@ -168,6 +180,7 @@ impl App {
         let tree = blocks::parse_tree(src);
         let marks = highlight::marks(&tree, src);
         let cursor = blocks.first().map_or(Pos::new(1, 1), |b| b.span.start);
+        let tables = Tables::new(&lines, &blocks);
         Self {
             path,
             label: None,
@@ -186,8 +199,9 @@ impl App {
             peek: false,
             peek_scroll: 0,
             peek_rows: 0,
-            wrap: true,
-            wrap_width: 0,
+            pretty: true,
+            body_width: 0,
+            tables,
             next_id: 1,
         }
     }
@@ -204,22 +218,36 @@ impl App {
         self.line_text(line).replace('\t', " ")
     }
 
-    /// Rows of line `line` as byte ranges into `display_line`, plus the hanging
-    /// indent its continuation rows carry.
-    pub fn line_rows(&self, line: usize) -> (Vec<(usize, usize)>, usize) {
-        let width = if self.wrap { self.wrap_width } else { 0 };
-        wrap::wrap_source(&self.display_line(line), width)
+    /// Rows of line `line` — source bytes and any alignment padding, in screen
+    /// order — plus the hanging indent its continuation rows carry.
+    ///
+    /// A padded table row is one row and never wraps: `Tables::pads` withholds
+    /// the padding for any table whose aligned width does not fit, so the two
+    /// transforms never have to compose on one line.
+    pub fn line_rows(&self, line: usize) -> (Vec<Row>, usize) {
+        let text = self.display_line(line);
+        if self.pretty {
+            if let Some(pads) = self.tables.pads(line, self.body_width) {
+                return (vec![table::row(text.len(), pads)], 0);
+            }
+        }
+        let width = if self.pretty { self.body_width } else { 0 };
+        wrap::wrap_source(&text, width)
     }
 
     pub fn row_count(&self, line: usize) -> usize {
         self.line_rows(line).0.len().max(1)
     }
 
-    /// Which of `line`'s rows holds byte `col - 1`.
+    /// Which of `line`'s rows holds byte `col - 1`. Padding cannot confuse this:
+    /// it never changes the order of the source bytes, so row starts still
+    /// ascend and the last one at or below `b` is the row `b` is in.
     pub fn cursor_row(&self) -> usize {
         let (rows, _) = self.line_rows(self.cursor.line);
         let b = self.cursor.col.saturating_sub(1);
-        rows.iter().rposition(|&(s, _)| s <= b).unwrap_or(0)
+        rows.iter()
+            .rposition(|r| wrap::row_start(r) <= b)
+            .unwrap_or(0)
     }
 
     /// One row up or down from `at`, or `None` at either end of the document.
@@ -268,7 +296,7 @@ impl App {
         self.drop_region();
         let (rows, _) = self.line_rows(self.cursor.line);
         let cur = self.cursor_row();
-        let off = self.cursor.col.saturating_sub(1) - rows[cur].0;
+        let off = self.cursor.col.saturating_sub(1) - wrap::row_start(&rows[cur]);
 
         let here = Anchor {
             line: self.cursor.line,
@@ -278,18 +306,19 @@ impl App {
             return;
         };
         let (target, _) = self.line_rows(to.line);
-        let (s, e) = target[to.row.min(target.len() - 1)];
+        let row = &target[to.row.min(target.len() - 1)];
+        let (s, e) = (wrap::row_start(row), wrap::row_end(row));
         self.cursor.line = to.line;
         self.cursor.col = s + off.min(e.saturating_sub(s)) + 1;
         self.snap();
     }
 
-    pub fn toggle_wrap(&mut self) {
-        self.wrap = !self.wrap;
-        self.status = if self.wrap {
-            "wrap on".into()
+    pub fn toggle_pretty(&mut self) {
+        self.pretty = !self.pretty;
+        self.status = if self.pretty {
+            "pretty on".into()
         } else {
-            "wrap off".into()
+            "pretty off".into()
         };
     }
 
@@ -522,7 +551,7 @@ impl App {
         // `viewport` counts rows, so a page is a page of rows. Paging by lines
         // while wrapping would overshoot by the amplification factor — 1.307x
         // across the corpus, and far more inside a table.
-        if self.wrap && self.wrap_width > 0 {
+        if self.pretty && self.body_width > 0 {
             self.drop_region();
             let here = Anchor {
                 line: self.cursor.line,
@@ -531,7 +560,7 @@ impl App {
             let to = self.walk_rows(here, step, dir > 0);
             let (rows, _) = self.line_rows(to.line);
             self.cursor.line = to.line;
-            self.cursor.col = rows[to.row.min(rows.len() - 1)].0 + 1;
+            self.cursor.col = wrap::row_start(&rows[to.row.min(rows.len() - 1)]) + 1;
             self.snap();
         } else {
             self.move_line(dir * step as isize);
@@ -877,14 +906,14 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn move_row_walks_inside_a_line_while_move_line_steps_over_it() {
         let mut a = App::new("w.md".into(), &wide_doc(3));
-        a.wrap_width = 20;
+        a.body_width = 20;
         let (rows, _) = a.line_rows(1);
         assert!(rows.len() >= 4, "line did not wrap: {} rows", rows.len());
 
         a.cursor = Pos::new(1, 1);
         a.move_row(1);
         assert_eq!(a.cursor.line, 1, "C-n left the line");
-        assert_eq!(a.cursor.col, rows[1].0 + 1);
+        assert_eq!(a.cursor.col, wrap::row_start(&rows[1]) + 1);
         a.move_row(-1);
         assert_eq!((a.cursor.line, a.cursor.col), (1, 1));
 
@@ -897,7 +926,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn paging_counts_rows_not_lines_when_wrapped() {
         let mut a = App::new("w.md".into(), &wide_doc(50));
-        a.wrap_width = 20;
+        a.body_width = 20;
         a.viewport = 20;
         a.cursor = Pos::new(1, 1);
 
@@ -911,7 +940,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         // …and off it does the old thing, exactly.
         let mut b = App::new("w.md".into(), &wide_doc(50));
-        b.wrap = false;
+        b.pretty = false;
         b.viewport = 20;
         b.cursor = Pos::new(1, 1);
         b.page(1, true);
@@ -924,7 +953,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     fn row_walking_terminates_on_a_pathologically_tall_line() {
         let src = format!("short\n{}\nshort\n", "x ".repeat(20_000));
         let mut a = App::new("huge.md".into(), &src);
-        a.wrap_width = 40;
+        a.body_width = 40;
         assert!(a.row_count(2) > 900, "expected a very tall line");
 
         // Off the top of it and back, without walking every row in between.
@@ -934,6 +963,77 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let top = a.walk_rows(Anchor { line: 3, row: 0 }, 5, false);
         assert_eq!(top.line, 2, "walking back should land inside the tall line");
         assert_eq!(top.row, a.row_count(2) - 5);
+    }
+
+    /// The property everything in row space stands on, generalised from wrap's
+    /// ordered-windows test to cover alignment padding.
+    ///
+    /// Padding is inserted *between* source bytes, never over them, so the
+    /// `Src` pieces of a line's rows are still an ascending partition of it:
+    /// every non-space byte lands in exactly one row, at exactly one offset.
+    /// That is what makes `draw_source` able to rebase a mark by clipping, and
+    /// `cursor_row` able to find a byte's row by scanning starts.
+    #[test]
+    fn pretty_rows_concatenate_to_the_source_line() {
+        let src = "\
+# Table
+
+| id | a very long description of the thing | ok |
+|---|:---:|--:|
+| 1 | short | y |
+| 22 | a much longer description than the first one | n |
+|日本|語のテキスト|x|
+
+A paragraph long enough to wrap at any of the widths below, with a
+https://example.dev/a/very/long/path in it as well.
+";
+        let mut a = App::new("t.md".into(), src);
+        for width in [0usize, 12, 39, 60, 200] {
+            a.body_width = width;
+            for line in 1..=a.line_count() {
+                let text = a.display_line(line);
+                let (rows, _) = a.line_rows(line);
+                let mut prev = 0;
+                let mut kept = String::new();
+                for r in &rows {
+                    for p in r {
+                        if let wrap::Piece::Src(s, e) = *p {
+                            assert!(s >= prev, "L{line} w{width}: rows go backwards");
+                            assert!(s <= e && e <= text.len(), "L{line} w{width}: {s}..{e}");
+                            assert!(text.is_char_boundary(s) && text.is_char_boundary(e));
+                            kept.push_str(&text[s..e]);
+                            prev = e;
+                        }
+                    }
+                }
+                assert_eq!(
+                    kept.replace(' ', ""),
+                    text.replace(' ', ""),
+                    "L{line} w{width}: dropped or duplicated text"
+                );
+            }
+        }
+    }
+
+    /// Aligning widens a table, so a padded row that did not fit would have to
+    /// wrap — and the padding is not wrap-aware. `Tables::pads` withholds the
+    /// padding in exactly that case, which is what keeps the two from ever
+    /// having to compose on one line.
+    #[test]
+    fn a_padded_row_is_always_exactly_one_row() {
+        let src = "| id | description | ok |\n|---|---|---|\n| 1 | short | y |\n";
+        let mut a = App::new("t.md".into(), src);
+        for width in 1..=80 {
+            a.body_width = width;
+            for line in 1..=3 {
+                let (rows, _) = a.line_rows(line);
+                let padded = rows
+                    .iter()
+                    .flatten()
+                    .any(|p| matches!(p, wrap::Piece::Pad { .. }));
+                assert!(!padded || rows.len() == 1, "L{line} w{width}: {rows:?}");
+            }
+        }
     }
 
     #[test]

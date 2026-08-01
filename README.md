@@ -24,7 +24,7 @@ nix run . -- PLAN.md
 ## Usage
 
 ```
-marginal FILE.md [--result PATH] [--label NAME] [--no-wrap]
+marginal FILE.md [--result PATH] [--label NAME] [--raw]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
 marginal --help                    # exits 0
 ```
@@ -219,7 +219,7 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `v` | select a range of units — `J`/`K` extends |
 | `V` | select whole lines, ignoring unit boundaries — `j`/`k` extends |
 | `+` / `-` (also `=` / `_`) | widen / narrow along the markdown hierarchy |
-| `W` | soft wrap on / off (on by default; `--no-wrap` starts off) |
+| `P` | pretty on / off — soft wrap and aligned tables (on by default; `--raw` starts off) |
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `c` | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
@@ -249,9 +249,44 @@ surveyed makes the two mutually exclusive.
   line however tall it wraps; `C-n` reaches the middle of one. `V` keeps
   extending by line either way.
 
-`W` turns wrapping off, and `--no-wrap` starts that way. Off, a long line is cut
-at the right edge with a dim `›` in the last column, and three things make that
-survivable rather than a trap:
+### Tables
+
+Markdown table source is not column-aligned, and reading a review diff of one
+that is not is miserable. Pretty mode aligns it on screen by **inserting
+padding** — spaces inside a cell, and dashes in the delimiter row so the rule
+stays a rule. Nothing is moved, hidden or rewritten:
+
+```
+| id | description | ok |            | id |        description        | ok |
+|---|:---:|---|                      |----|:-------------------------:|----|
+| 1 | short | y |            ───►    | 1  |           short           | y  |
+| 22 | a much longer… | n |          | 22 | a much longer…            | n  |
+```
+
+- **The columns are still bytes of the file.** Padding is inserted between
+  bytes rather than over them, so a selection is addressed exactly as before
+  and the JSON cannot tell the difference. `short` above is `L3:7-11` whether
+  it is drawn at column 7 or column 19.
+- **A table that does not fit is left ragged.** Aligning widens a table, and a
+  grid cut in half by a wrap is worse to read than a ragged one — so below the
+  width it needs, a table is left alone and soft-wraps like anything else. An
+  aligned row therefore never wraps.
+- **Rows may disagree about spacing.** `|a|` and `| bb |` in the same table
+  still line up: each of a cell's two gaps grows to what its column needs.
+- **`:---:` is obeyed**, and a column is padded left, right or centred to match.
+- **The padding belongs to the cell.** Select a cell and the whole padded width
+  highlights; select a word inside it and only the word does.
+
+Every other tool that aligns markdown tables — prettier, mdformat,
+vim-table-mode — does it by editing the file. marginal cannot: the file is the
+thing under review.
+
+### Turning it off
+
+`P` turns pretty off, and `--raw` starts that way. Off, every cell on screen is
+a byte of the file — which is the mode to reach for when a column looks wrong.
+A long line is cut at the right edge with a dim `›` in the last column, and
+three things make that survivable rather than a trap:
 
 - **`w`/`b` reach what you cannot see.** The interesting columns on a long line
   are its inline node starts, and there are a handful of them, not two hundred.

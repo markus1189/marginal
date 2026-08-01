@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{Anchor, App, Mode};
-use crate::wrap::{cells, wrap};
+use crate::wrap::{cells, wrap, Piece};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
@@ -117,6 +117,18 @@ fn cursor_byte(app: &App, text: &str) -> usize {
     i
 }
 
+/// The style of the byte at `byte`, by the same later-wins rule `segments`
+/// uses. Alignment padding is in no file and so has no style of its own; it
+/// takes the one from the byte it was inserted after, which is what keeps a
+/// selected cell one continuous block instead of stitching at every column.
+fn style_at(marks: &[(usize, usize, Style)], byte: usize) -> Style {
+    marks
+        .iter()
+        .rev()
+        .find(|&&(a, b, _)| byte >= a && byte < b)
+        .map_or_else(Style::default, |&(_, _, st)| st)
+}
+
 /// Syntax first, then selection, then the cursor: later marks win, so
 /// highlighting never hides where you are or what you have chosen.
 fn line_marks(
@@ -183,7 +195,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
     // Published before anything reads row space: `line_rows` wraps to this, so
     // the anchor, the cursor row and the paging step are all computed against
     // the width actually on screen this frame.
-    app.wrap_width = body_w;
+    app.body_width = body_w;
     keep_cursor_visible(app, scroll, viewport);
 
     let mut gutter: Vec<Line> = Vec::with_capacity(viewport);
@@ -210,7 +222,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         let pad = " ".repeat(indent);
         let first_row = if lineno == scroll.line { scroll.row } else { 0 };
 
-        for (k, &(s, e)) in rows.iter().enumerate().skip(first_row) {
+        for (k, pieces) in rows.iter().enumerate().skip(first_row) {
             if idx == viewport {
                 break;
             }
@@ -253,20 +265,35 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 ),
             ]));
 
-            // Marks are byte ranges into the whole line; a row is a byte window
-            // into it. Clip to the window, then shift into it — the partition
-            // property of `wrap_line` is what makes this exact.
-            let row_marks: Vec<(usize, usize, Style)> = marks
-                .iter()
-                .filter(|&&(a, b, _)| b > s && a < e)
-                .map(|&(a, b, st)| (a.max(s) - s, b.min(e) - s, st))
-                .collect();
             let mut spans = if k == 0 || pad.is_empty() {
                 Vec::new()
             } else {
                 vec![Span::raw(pad.clone())]
             };
-            spans.extend(segments(&text[s..e], &row_marks, Style::default()));
+            // Alignment padding is the only thing here that is not in the file,
+            // and it is inserted between bytes rather than over them — so the
+            // source pieces are still windows into the line and marks still
+            // rebase by clipping.
+            for piece in pieces {
+                match *piece {
+                    Piece::Src(s, e) => {
+                        // Marks are byte ranges into the whole line; a piece is
+                        // a byte window into it. Clip to the window, then shift
+                        // into it — the partition property is what makes this
+                        // exact.
+                        let row_marks: Vec<(usize, usize, Style)> = marks
+                            .iter()
+                            .filter(|&&(a, b, _)| b > s && a < e)
+                            .map(|&(a, b, st)| (a.max(s) - s, b.min(e) - s, st))
+                            .collect();
+                        spans.extend(segments(&text[s..e], &row_marks, Style::default()));
+                    }
+                    Piece::Pad { n, fill, anchor } => spans.push(Span::styled(
+                        fill.to_string().repeat(n),
+                        style_at(&marks, anchor),
+                    )),
+                }
+            }
             if spans.is_empty() && on_cursor_line {
                 spans.push(Span::styled(" ", cur_style));
             }
@@ -871,7 +898,7 @@ mod tests {
     #[test]
     fn a_line_that_runs_past_the_edge_says_so() {
         let mut app = App::new("long.md".into(), &long_doc());
-        app.wrap = false;
+        app.pretty = false;
         let buf = render_buf(&mut app, 60, 12);
         let row: String = (0..buf.area.width).map(|x| buf[(x, 3)].symbol()).collect();
         assert!(row.contains("   3"), "expected line 3 on row 3: {row}");
@@ -890,7 +917,7 @@ mod tests {
     #[test]
     fn the_cursor_is_never_silently_off_screen() {
         let mut app = App::new("long.md".into(), &long_doc());
-        app.wrap = false;
+        app.pretty = false;
         app.cursor = Pos::new(3, 1);
         app.goto_line_end();
         let buf = render_buf(&mut app, 60, 12);
@@ -1039,9 +1066,113 @@ mod tests {
 
         render(&mut app, 60, 16);
         let wrapped = serde_json::to_string(&app.result()).unwrap();
-        app.wrap = false;
+        app.pretty = false;
         render(&mut app, 60, 16);
         assert_eq!(wrapped, serde_json::to_string(&app.result()).unwrap());
+    }
+
+    const TABLE_DOC: &str = "\
+| id | description | ok |
+|---|:---:|---|
+| 1 | short | y |
+| 22 | a much longer description | n |
+";
+
+    /// Aligning a table puts cells on the screen that no byte of the file
+    /// accounts for. Columns are still bytes of the *source*, so the same
+    /// selection must emit the same JSON with pretty on and off — and the
+    /// selection to prove it on is one inside a padded cell, which is where a
+    /// pad-aware column would be off by exactly the padding.
+    #[test]
+    fn alignment_does_not_reach_the_output_contract() {
+        let mut app = App::new("t.md".into(), TABLE_DOC);
+        // `-` narrows onto the cell under the cursor — the shortest one in the
+        // widest column, so the one carrying the most padding.
+        app.cursor = Pos::new(3, 7);
+        app.contract();
+        app.begin_comment();
+        app.editor.set("note");
+        app.commit_comment();
+        assert_eq!(app.annotations[0].original_text, " short ");
+
+        render(&mut app, 60, 16);
+        let pretty = serde_json::to_string(&app.result()).unwrap();
+        app.pretty = false;
+        render(&mut app, 60, 16);
+        assert_eq!(pretty, serde_json::to_string(&app.result()).unwrap());
+    }
+
+    /// Cells of line 3 carrying the selection or the cursor. The cursor sits
+    /// inside the selection and paints its own colour, so it counts as part of
+    /// it.
+    fn highlighted(app: &mut App) -> Vec<u16> {
+        let buf = render_buf(app, 60, 16);
+        (0..buf.area.width)
+            .filter(|&x| {
+                matches!(
+                    buf[(x, 3)].style().bg,
+                    Some(Color::Indexed(238) | Color::Yellow)
+                )
+            })
+            .collect()
+    }
+
+    /// Both found by running it in a real tty, both the same mistake: padding
+    /// has no style of its own, so it has to borrow one, and *which* byte it
+    /// borrows from is not something the renderer can work out locally.
+    ///
+    /// Taking the byte before it left the gap in front of a centred cell
+    /// wearing the pipe's style — a selected cell highlighted on its right half
+    /// only. Taking the byte after the content swept the closing gap into a
+    /// selection *inside* the cell, so annotating one word lit up the whole
+    /// column. Both gaps belong to the cell, and so anchor to its two ends.
+    #[test]
+    fn padding_is_highlighted_with_its_cell_and_only_with_its_cell() {
+        let mut app = App::new("t.md".into(), TABLE_DOC);
+        app.cursor = Pos::new(3, 8);
+
+        app.contract();
+        assert_eq!(app.selection_kind(), "table-cell");
+        let lit = highlighted(&mut app);
+        assert_eq!(
+            usize::from(lit[lit.len() - 1] - lit[0]) + 1,
+            lit.len(),
+            "highlight has a hole: {lit:?}"
+        );
+        assert_eq!(lit.len(), 27, "not the whole padded cell: {lit:?}");
+
+        // One step in, onto the word itself: the gaps are the cell's, not the
+        // word's, so the highlight is the word.
+        app.contract();
+        assert_eq!(app.selection_kind(), "text");
+        assert_eq!(highlighted(&mut app).len(), "short".len());
+    }
+
+    /// The whole point, on a real screen: the pipes land in one column.
+    #[test]
+    fn an_aligned_table_reaches_the_screen() {
+        let mut app = App::new("t.md".into(), TABLE_DOC);
+        let screen = render(&mut app, 60, 16);
+        // Character positions, not byte offsets: the gutter's selection bar is
+        // three bytes wide and one cell, so bytes would say the rows disagree.
+        let bars: Vec<Vec<usize>> = screen
+            .lines()
+            .filter(|l| l.matches('|').count() > 2)
+            .map(|l| {
+                l.chars()
+                    .enumerate()
+                    .filter(|&(_, c)| c == '|')
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(bars.len(), 4, "{screen}");
+        assert!(bars.windows(2).all(|w| w[0] == w[1]), "{screen}");
+
+        // …and off, the screen is byte for byte the source again.
+        app.pretty = false;
+        let raw = render(&mut app, 60, 16);
+        assert!(raw.contains("| 1 | short | y |"), "{raw}");
     }
 
     /// Found by running it: the overlay is inset, so the markers landed in the
@@ -1049,7 +1180,7 @@ mod tests {
     #[test]
     fn peek_suppresses_the_truncation_markers_underneath_it() {
         let mut app = App::new("long.md".into(), &long_doc());
-        app.wrap = false;
+        app.pretty = false;
         app.cursor = Pos::new(3, 1);
         assert!(render(&mut app, 60, 16).contains('›'));
         app.toggle_peek();
