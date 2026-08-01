@@ -66,8 +66,19 @@ fn list_marker_len(line: &str, from: usize) -> usize {
     while b.get(i) == Some(&b' ') {
         i += 1;
     }
-    // task checkbox
-    if b.get(i) == Some(&b'[') && b.get(i + 2) == Some(&b']') {
+    // Task checkbox. The middle byte has to be a real task marker: without that
+    // test any one-character bracket run matched, so `- [a] text` -- a shortcut
+    // reference label, which produces no link node to override it -- was tagged
+    // as list chrome up to the closing bracket.
+    //
+    // Byte-safe: `[`, the marker and `]` are all ASCII, and no byte of a
+    // multi-byte sequence is ever below 0x80, so `i += 3` cannot land
+    // mid-character.
+    if b.get(i) == Some(&b'[')
+        && b.get(i + 1)
+            .is_some_and(|c| matches!(c, b' ' | b'x' | b'X'))
+        && b.get(i + 2) == Some(&b']')
+    {
         i += 3;
         while b.get(i) == Some(&b' ') {
             i += 1;
@@ -186,6 +197,22 @@ mod tests {
     fn task_checkbox_counts_as_part_of_the_marker() {
         let src = "- [ ] Add validation\n";
         assert!(tags(src, 1).contains(&(0, 6, "list-marker")));
+        for done in ["- [x] Done\n", "- [X] Done\n"] {
+            assert!(tags(done, 1).contains(&(0, 6, "list-marker")), "{done:?}");
+        }
+    }
+
+    /// The rule asked only for a bracket pair with one byte between, never that
+    /// the byte was a task marker — so a shortcut reference label was swallowed
+    /// as list chrome. `- [a](b)` survived only because the later `link` mark
+    /// happened to win; an unresolved shortcut reference produces no link node,
+    /// so nothing overrode it.
+    #[test]
+    fn a_one_character_link_label_is_not_a_checkbox() {
+        assert_eq!(tags("- [a] text\n", 1), vec![(0, 2, "list-marker")]);
+        // A two-character label was already rejected, which is what showed the
+        // rule was matching on length rather than on content.
+        assert_eq!(tags("- [ab] text\n", 1), vec![(0, 2, "list-marker")]);
     }
 
     #[test]
