@@ -233,6 +233,17 @@ fn handle_key(app: &mut App, k: KeyEvent) {
     let code = k.code;
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
     let alt = k.modifiers.contains(KeyModifiers::ALT);
+    // Every modifier this program does not bind, tested at once rather than
+    // named one at a time. SHIFT is not a chord: crossterm sets it on every
+    // uppercase char, and `J`, `K`, `G`, `V` and `P` are real bindings. CONTROL
+    // is bound below, and a CONTROL chord keeps its meaning however much else is
+    // held down — `Esc` then `C-c` arrives as CONTROL|ALT, and that is precisely
+    // what someone types when they are trying to get out. What is left is ALT
+    // alone plus SUPER, HYPER and META: unreachable while ratatui pushes no
+    // Kitty enhancement flags, but a denylist of two bits let all three through
+    // to the unmodified bindings, so `Super-x` removed an annotation exactly as
+    // `M-x` did.
+    let unbound = !ctrl && !(k.modifiers - KeyModifiers::SHIFT).is_empty();
 
     match app.mode {
         // Readline bindings, as bash has trained everyone to expect.
@@ -275,11 +286,20 @@ fn handle_key(app: &mut App, k: KeyEvent) {
                 KeyCode::Down => e.history_next(),
 
                 // Anything else with a modifier is a chord we do not bind, not
-                // text to insert.
-                KeyCode::Char(c) if !ctrl && !alt => e.insert(c),
+                // text to insert. `unbound` covers ALT and the exotic three;
+                // SHIFT has to stay allowed or no capital letter could be typed.
+                KeyCode::Char(c) if !ctrl && !unbound => e.insert(c),
                 _ => {}
             }
         }
+        // The emergency exit, bound once for every path through Normal mode. In
+        // raw mode C-c arrives as a keystroke and no SIGINT is ever raised, so
+        // without this line C-c leaves you trapped — and it has to survive the
+        // guard below, because the user who is already trying to bail out types
+        // `Esc` then `C-c`, which crossterm hands over as CONTROL|ALT. Sitting
+        // behind the peek arm as well as behind the ALT guard, it was reachable
+        // from neither.
+        Mode::Normal if ctrl && code == KeyCode::Char('c') => app.quit = true,
         // Normal mode binds no ALT chord, and the arms below match on `code`
         // alone — so without this guard `M-x` reached the plain `x` arm and
         // removed an annotation, with no undo and no confirmation, while `M-q`
@@ -287,14 +307,16 @@ fn handle_key(app: &mut App, k: KeyEvent) {
         // with a modifier is a chord we do not bind"); this is the same rule for
         // the other two modes. Emacs bindings make both chords reflex, and
         // crossterm decodes a quick `Esc` then a key as that key's ALT chord.
-        Mode::Normal if alt => {}
+        Mode::Normal if unbound => {}
         // The peek overlay swallows the movement keys: while it is up, j/k
-        // scroll the overlay rather than the cursor underneath it.
+        // scroll the overlay rather than the cursor underneath it. Every binding
+        // here is the unmodified key and says so: the overlay used to close on
+        // `C-q` and `C-z` and scroll on `C-j`/`C-k`, which is the same "a chord
+        // we do not bind reached its unmodified action" bug as `M-x`.
         Mode::Normal if app.peek => match code {
-            KeyCode::Char('z' | 'q') | KeyCode::Esc => app.toggle_peek(),
-            KeyCode::Char('c') if ctrl => app.quit = true,
-            KeyCode::Char('j') | KeyCode::Down => app.scroll_peek(1),
-            KeyCode::Char('k') | KeyCode::Up => app.scroll_peek(-1),
+            KeyCode::Char('z' | 'q') | KeyCode::Esc if !ctrl => app.toggle_peek(),
+            KeyCode::Char('j') | KeyCode::Down if !ctrl => app.scroll_peek(1),
+            KeyCode::Char('k') | KeyCode::Up if !ctrl => app.scroll_peek(-1),
             _ => {}
         },
         // Paging. C-f/C-b keep two lines of overlap, as vim does.
@@ -308,9 +330,6 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // reach the middle of one. Not `gj`/`gk`: `g` is already first line.
             KeyCode::Char('n') => app.move_row(1),
             KeyCode::Char('p') => app.move_row(-1),
-            // In raw mode this arrives as a keystroke and no SIGINT is ever
-            // raised, so without this line C-c leaves you trapped.
-            KeyCode::Char('c') => app.quit = true,
             _ => {}
         },
         Mode::Normal => match code {
@@ -456,6 +475,157 @@ mod tests {
         assert!(app.quit, "plain q stopped working");
     }
 
+    fn annotated() -> App {
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        app.editor.set("keep me");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 1, "setup failed");
+        app
+    }
+
+    fn peeking() -> App {
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('z', KeyModifiers::NONE));
+        assert!(app.peek, "setup failed");
+        app.peek_rows = 10;
+        app
+    }
+
+    /// The ALT guard was a denylist of two bits sitting in front of the CONTROL
+    /// arm, so it got both ends wrong. `C-c` is the only way out of raw mode —
+    /// no SIGINT is raised — and the sequence someone types once they are
+    /// already trying to bail out is `Esc` then `C-c`, which crossterm decodes
+    /// as CONTROL|ALT: swallowed, in Normal mode and behind the peek overlay
+    /// alike. `crossterm::KeyModifiers` has six bits, and this sweeps all 64
+    /// combinations rather than the two the guard happened to name.
+    #[test]
+    fn the_emergency_exit_survives_every_modifier_in_every_mode() {
+        for bits in 0..64u8 {
+            let m = KeyModifiers::from_bits_truncate(bits);
+            if !m.contains(KeyModifiers::CONTROL) {
+                continue;
+            }
+
+            let mut app = App::new("t.md".into(), DOC);
+            handle_key(&mut app, key('c', m));
+            assert!(app.quit, "normal mode: C-c with {m:?} did not quit");
+
+            let mut app = peeking();
+            handle_key(&mut app, key('c', m));
+            assert!(app.quit, "peek overlay: C-c with {m:?} did not quit");
+
+            // In Input mode C-c is cancel, not quit — the escape hatch out of
+            // the comment editor, and equally unreachable if a stray modifier
+            // can turn it into an ordinary keystroke.
+            let mut app = App::new("t.md".into(), DOC);
+            handle_key(&mut app, key('c', KeyModifiers::NONE));
+            assert_eq!(app.mode, Mode::Input, "setup failed");
+            app.editor.set("draft");
+            handle_key(&mut app, key('c', m));
+            assert_eq!(
+                app.mode,
+                Mode::Normal,
+                "input mode: C-c with {m:?} did not cancel"
+            );
+        }
+    }
+
+    /// The class the ALT guard only half closed: it named ALT and CONTROL, which
+    /// leaves SUPER, HYPER and META falling through to the unmodified bindings —
+    /// `Super-x` removed an annotation exactly as `M-x` did. Nothing can produce
+    /// those today (ratatui pushes no Kitty enhancement flags), and nothing warns
+    /// the day something does. SHIFT is the one modifier that must ride along:
+    /// crossterm sets it on every uppercase char, so a guard that swallowed it
+    /// would take `J`, `K`, `G`, `V` and `P` with it.
+    #[test]
+    fn only_shift_rides_along_with_a_normal_mode_binding() {
+        for bits in 0..64u8 {
+            let m = KeyModifiers::from_bits_truncate(bits);
+            let bare = (m - KeyModifiers::SHIFT).is_empty();
+
+            let mut app = annotated();
+            handle_key(&mut app, key('x', m));
+            assert_eq!(
+                app.annotations.is_empty(),
+                bare,
+                "x with {m:?} reached remove_at_cursor"
+            );
+
+            let mut app = App::new("t.md".into(), DOC);
+            handle_key(&mut app, key('q', m));
+            assert_eq!(app.quit, bare, "q with {m:?}");
+
+            let mut app = App::new("t.md".into(), DOC);
+            handle_key(&mut app, key('c', m));
+            if m.contains(KeyModifiers::CONTROL) {
+                assert!(app.quit, "C-c with {m:?} is the exit");
+            } else {
+                assert_eq!(app.mode == Mode::Input, bare, "c with {m:?}");
+            }
+        }
+
+        // …and the capitals, which only arrive with SHIFT set, still act.
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('J', KeyModifiers::SHIFT));
+        assert!(app.cursor.line > 1, "S-J stopped moving a block");
+        let pretty = app.pretty;
+        handle_key(&mut app, key('P', KeyModifiers::SHIFT));
+        assert_ne!(app.pretty, pretty, "S-P stopped toggling pretty");
+        handle_key(&mut app, key('V', KeyModifiers::SHIFT));
+        assert!(
+            matches!(app.sel, Sel::Lines { .. }),
+            "S-V stopped selecting lines"
+        );
+    }
+
+    /// Input mode named the same two bits: "anything else with a modifier is a
+    /// chord we do not bind" was spelled `!ctrl && !alt`, so `Super-Z` typed a
+    /// `Z` into the comment. Same sweep, same rule — only SHIFT rides along,
+    /// because that is how a capital letter arrives in the first place.
+    #[test]
+    fn input_mode_inserts_only_an_unmodified_character() {
+        for bits in 0..64u8 {
+            let m = KeyModifiers::from_bits_truncate(bits);
+            let mut app = App::new("t.md".into(), DOC);
+            handle_key(&mut app, key('c', KeyModifiers::NONE));
+            assert_eq!(app.mode, Mode::Input, "setup failed");
+            handle_key(&mut app, key('Z', m));
+            assert_eq!(
+                app.editor.text() == "Z",
+                (m - KeyModifiers::SHIFT).is_empty(),
+                "Z with {m:?}"
+            );
+        }
+    }
+
+    /// A CONTROL chord means the same thing however much else is held down, so
+    /// `Esc` then `C-d` — CONTROL|ALT, the way an Emacs-trained hand pages — has
+    /// to page. The ALT guard sat in front of the CONTROL arm and ate all six.
+    #[test]
+    fn a_ctrl_chord_keeps_its_meaning_when_alt_rides_along() {
+        let doc: String = (1..=60).map(|i| format!("line {i}\n\n")).collect();
+        for c in ['d', 'u', 'f', 'b', 'n', 'p'] {
+            let mut moved = Vec::new();
+            for m in [
+                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ] {
+                let mut app = App::new("t.md".into(), &doc);
+                app.viewport = 10;
+                app.move_line(40);
+                let start = app.cursor.line;
+                handle_key(&mut app, key(c, m));
+                assert_ne!(app.cursor.line, start, "C-{c} with {m:?} did nothing");
+                moved.push(app.cursor.line);
+            }
+            assert_eq!(
+                moved[0], moved[1],
+                "C-M-{c} landed somewhere else than C-{c}"
+            );
+        }
+    }
+
     /// The peek overlay matches on `code` alone too.
     #[test]
     fn the_peek_overlay_binds_no_alt_chord() {
@@ -467,5 +637,42 @@ mod tests {
         assert!(!app.quit);
         handle_key(&mut app, key('q', KeyModifiers::NONE));
         assert!(!app.peek, "plain q stopped closing the overlay");
+    }
+
+    /// …and the same was true of its CONTROL chords, which the ALT-only guard
+    /// never covered: `C-q` and `C-z` closed the overlay and `C-j`/`C-k`
+    /// scrolled it, because every arm matched on `code` alone. `C-c` stays
+    /// bound — it is the emergency exit — and the plain keys stay bound, so the
+    /// overlay is never a room with no door.
+    #[test]
+    fn the_peek_overlay_binds_no_ctrl_chord_but_the_exit() {
+        for c in ['q', 'z'] {
+            let mut app = peeking();
+            handle_key(&mut app, key(c, KeyModifiers::CONTROL));
+            assert!(app.peek, "C-{c} closed the overlay");
+            assert!(!app.quit, "C-{c} quit");
+        }
+
+        for (c, code) in [('j', KeyCode::Down), ('k', KeyCode::Up)] {
+            let mut app = peeking();
+            app.peek_scroll = 3;
+            handle_key(&mut app, key(c, KeyModifiers::CONTROL));
+            assert_eq!(app.peek_scroll, 3, "C-{c} scrolled the overlay");
+            handle_key(&mut app, KeyEvent::new(code, KeyModifiers::CONTROL));
+            assert_eq!(app.peek_scroll, 3, "C-{code:?} scrolled the overlay");
+        }
+
+        // The overlay still scrolls and still closes on the unmodified keys.
+        let mut app = peeking();
+        handle_key(&mut app, key('j', KeyModifiers::NONE));
+        assert_eq!(app.peek_scroll, 1, "plain j stopped scrolling");
+        handle_key(&mut app, key('k', KeyModifiers::NONE));
+        assert_eq!(app.peek_scroll, 0, "plain k stopped scrolling");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.peek, "Esc stopped closing the overlay");
+
+        let mut app = peeking();
+        handle_key(&mut app, key('z', KeyModifiers::NONE));
+        assert!(!app.peek, "plain z stopped closing the overlay");
     }
 }
