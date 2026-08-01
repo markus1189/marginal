@@ -29,14 +29,32 @@ struct Args {
     pretty: bool,
 }
 
+/// Argv as UTF-8, or the argument that is not.
+///
+/// `std::env::args()` unwraps each argument and panics on one that is not valid
+/// UTF-8, which exits 101 with a panic message where the documented contract is
+/// 0, 1 or 2. Linux filenames are arbitrary byte strings, so an ordinary shell
+/// glob over a directory holding a Latin-1 name is enough to reach it.
+fn argv_utf8(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    args.map(|a| {
+        a.into_string()
+            .map_err(|bad| format!("argument is not valid UTF-8: {}", bad.to_string_lossy()))
+    })
+    .collect()
+}
+
 /// `Ok(None)` means help was asked for, which is not a failure.
 fn parse_args() -> Result<Option<Args>, String> {
+    parse_argv(argv_utf8(std::env::args_os().skip(1))?)
+}
+
+fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut file = None;
     let mut result = None;
     let mut label = None;
     let mut dump = false;
     let mut pretty = true;
-    let mut it = std::env::args().skip(1);
+    let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dump-blocks" => dump = true,
@@ -353,6 +371,23 @@ mod tests {
         assert!(preflight(good.to_str().unwrap()).is_ok());
         assert_eq!(std::fs::read_to_string(&good).unwrap(), "keep");
         let _ = std::fs::remove_file(&good);
+    }
+
+    /// `std::env::args()` panics on an argument that is not valid UTF-8, exiting
+    /// 101 with a panic message where README documents 0/1/2 and STATUS.md lists
+    /// "unreadable file -> exits 2" among the hardened edges. A Linux filename is
+    /// an arbitrary byte string, so a shell glob over a directory holding a
+    /// Latin-1 name reaches it with a file that is perfectly readable.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_is_an_error_not_a_panic() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let bad = std::ffi::OsString::from_vec(vec![0xff, b'b', b'a', b'd']);
+        let err = argv_utf8([bad].into_iter()).unwrap_err();
+        assert!(err.contains("not valid UTF-8"), "{err}");
+
+        let ok = argv_utf8([std::ffi::OsString::from("f.md")].into_iter()).unwrap();
+        assert_eq!(ok, vec!["f.md".to_string()]);
     }
 
     const DOC: &str = "# Steps\n\n- one\n- two\n";
