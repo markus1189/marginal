@@ -61,6 +61,27 @@ fn parse_args() -> Result<Option<Args>, String> {
     }))
 }
 
+/// Can `path` be written? Asked *before* the session rather than after it: a
+/// bad `--result` used to surface only on exit, by which point the reviewer had
+/// done all the work and there was nowhere left to put it.
+///
+/// An existing file is opened without truncating, and one created to probe the
+/// directory is removed again — README's contract is that the result file's
+/// absence means the TUI never ran, and an empty file left by a pre-flight would
+/// make that read false.
+fn preflight(path: &str) -> io::Result<()> {
+    let existed = std::path::Path::new(path).exists();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if !existed {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(Some(a)) => a,
@@ -110,6 +131,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if let Some(path) = &args.result {
+        if let Err(e) = preflight(path) {
+            eprintln!("marginal: cannot write {path}: {e}");
+            return ExitCode::from(2);
+        }
+    }
+
     let mut app = App::new(args.file.clone(), &src);
     app.label = args.label;
     app.pretty = args.pretty;
@@ -121,17 +149,24 @@ fn main() -> ExitCode {
         }
     }
 
+    let mut write_failed = false;
     if let Some(path) = &args.result {
         let json = serde_json::to_string_pretty(&app.result()).expect("serialize");
         if let Err(e) = std::fs::write(path, json) {
             eprintln!("marginal: cannot write {path}: {e}");
-            return ExitCode::from(2);
+            write_failed = true;
         }
     }
 
+    // Printed even when the write failed, because that is exactly when it is
+    // the last copy of the annotations. Returning early here used to take the
+    // whole session with it.
     let feedback = app.feedback_markdown();
     if !feedback.is_empty() {
         print!("{feedback}");
+    }
+    if write_failed {
+        return ExitCode::from(2);
     }
 
     if app.annotations.is_empty() {
@@ -272,5 +307,43 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Esc => app.sel = Sel::Here,
             _ => {}
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("marginal-{}-{name}", std::process::id()));
+        p
+    }
+
+    /// The `--result` path was only ever tried after the session, so an
+    /// unwritable one was discovered when every annotation was already made and
+    /// the early `return` skipped the feedback markdown that was the only other
+    /// copy of them.
+    #[test]
+    fn preflight_rejects_an_unwritable_path_without_leaving_a_file() {
+        let bad = tmp("no-such-dir/out.json");
+        assert!(
+            preflight(bad.to_str().unwrap()).is_err(),
+            "accepted {bad:?}"
+        );
+
+        let good = tmp("out.json");
+        let _ = std::fs::remove_file(&good);
+        assert!(preflight(good.to_str().unwrap()).is_ok());
+        assert!(
+            !good.exists(),
+            "pre-flight left a file behind, so its absence no longer means the TUI never ran"
+        );
+
+        // An existing result file is checked for writability, not emptied.
+        std::fs::write(&good, "keep").unwrap();
+        assert!(preflight(good.to_str().unwrap()).is_ok());
+        assert_eq!(std::fs::read_to_string(&good).unwrap(), "keep");
+        let _ = std::fs::remove_file(&good);
     }
 }
