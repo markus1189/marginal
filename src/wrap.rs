@@ -280,7 +280,11 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                 if w > 0 && w + sw > limit {
                     brk!(prev);
                 }
-                if sw > limit {
+                // `w + sw`, not `sw`: the `brk!` above is a no-op when nothing
+                // has been placed, so `w` still holds the indentation it kept.
+                // Testing the segment alone let `sw <= limit < w + sw` fall to
+                // the `else` and pack `indent + sw` cells into a `limit` pane.
+                if w + sw > limit {
                     let mut j = prev;
                     let mut buf = [0u8; 4];
                     for ch in line[prev..bp].chars() {
@@ -432,17 +436,53 @@ mod tests {
     /// than the cursor byte.
     #[test]
     fn an_over_wide_first_word_keeps_the_lines_indentation() {
-        let line = "        https://example.com/some/long/path";
-        for width in [20usize, 34, 42, 48] {
-            let rows = wrap_line(line, width, width);
-            assert_eq!(rows[0].0, 0, "uncovered indent at {width}: {rows:?}");
+        // Every byte lands in a row, and every row fits its own pane: `first`
+        // for row 0, `rest` below it.
+        let fits = |line: &str, first: usize, rest: usize| {
+            let rows = wrap_line(line, first, rest);
+            assert_eq!(
+                rows[0].0, 0,
+                "uncovered indent, {line:?} at {first}: {rows:?}"
+            );
             let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
-            assert_eq!(kept, line, "dropped bytes at {width}");
-            for &(s, e) in &rows {
-                assert!(cells(&line[s..e]) <= width, "over width: {:?}", &line[s..e]);
+            assert_eq!(kept, line, "dropped bytes, {line:?} at {first}");
+            for (i, &(s, e)) in rows.iter().enumerate() {
+                let limit = if i == 0 { first } else { rest };
+                assert!(
+                    cells(&line[s..e]) <= limit,
+                    "over width, {line:?} at {first}/{rest}: row {i} is {:?}",
+                    &line[s..e]
+                );
             }
+        };
+
+        let line = "        https://example.com/some/long/path";
+        // 9 to 13 is the window the wider widths hide. The break that kept the
+        // eight cells of indentation carries them in `w`, and `https:` is six
+        // cells: the segment fits the pane on its own, the sum does not. Below
+        // 9 the indentation spills into rows of its own and stops being
+        // carried, so only this band exercises the sum.
+        for width in [9usize, 10, 11, 12, 13, 20, 34, 42, 48] {
+            fits(line, width, width);
         }
         assert!(wrap(line, 48)[0].starts_with("        "), "lost the indent");
+
+        // A word with no break point of its own: the hard cut has to charge the
+        // carried indentation too, or it puts thirteen cells in an eight pane.
+        fits("     abcdefgh", 8, 8);
+        // And it charges cells, not characters: the wide char that will not fit
+        // behind `  x` starts a row instead of overflowing one.
+        fits("  x本", 3, 2);
+    }
+
+    /// The price of charging the carried indentation: when not even the first
+    /// character fits behind it, the indentation goes out on a row of its own —
+    /// the row `brk!` calls "not worth a row". It is still worth more than the
+    /// alternatives, which are an over-wide row or bytes in no row at all, and
+    /// the spill loop already emits rows of this shape for a wide indent.
+    #[test]
+    fn indentation_that_cannot_share_with_even_one_character_takes_a_row() {
+        assert_eq!(wrap_line("  本", 3, 3), [(0, 2), (2, 5)]);
     }
 
     /// Indentation too wide to share a row still has to land in one.
