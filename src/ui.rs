@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{Anchor, App, Mode};
-use crate::wrap::{cells, wrap, Piece};
+use crate::wrap::{cells, wrap, Piece, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
@@ -129,12 +129,49 @@ fn style_at(marks: &[(usize, usize, Style)], byte: usize) -> Style {
         .map_or_else(Style::default, |&(_, _, st)| st)
 }
 
+/// The nearest byte the rows actually render, at or before `b`, falling forward
+/// when nothing precedes it.
+///
+/// Rows are windows into the line but not a cover of it: `wrap_line` leaves the
+/// space it broke at, and any trailing run of spaces, outside every row so they
+/// overhang the edge instead of taking a row of their own. A mark on one of
+/// those bytes clips against every piece and survives on none. For syntax that
+/// is invisible and harmless — the byte is a space. For the cursor it means no
+/// cell on the screen carries the cursor style at all, and neither overflow
+/// safety net fires, because the row is neither empty nor over-width.
+fn snap_to_rendered(rows: &[Row], text: &str, b: usize) -> usize {
+    let srcs = || {
+        rows.iter().flat_map(|r| r.iter()).filter_map(|p| match *p {
+            Piece::Src(s, e) => Some((s, e)),
+            Piece::Pad { .. } => None,
+        })
+    };
+    if srcs().any(|(s, e)| s <= b && b < e) {
+        return b;
+    }
+    if let Some(end) = srcs().filter(|&(_, e)| e <= b).map(|(_, e)| e).max() {
+        // `end` is one past the last rendered byte; step back onto its character
+        // so the cursor shows on the last thing the row draws.
+        let mut i = end.saturating_sub(1);
+        while i > 0 && !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        return i;
+    }
+    srcs()
+        .filter(|&(s, _)| s > b)
+        .map(|(s, _)| s)
+        .min()
+        .unwrap_or(b)
+}
+
 /// Syntax first, then selection, then the cursor: later marks win, so
 /// highlighting never hides where you are or what you have chosen.
 fn line_marks(
     app: &App,
     lineno: usize,
     text: &str,
+    rows: &[Row],
     sel_style: Style,
     cur_style: Style,
 ) -> Vec<(usize, usize, Style)> {
@@ -152,7 +189,7 @@ fn line_marks(
         marks.push((a, b, sel_style));
     }
     if lineno == app.cursor.line {
-        let c0 = cursor_byte(app, text);
+        let c0 = snap_to_rendered(rows, text, cursor_byte(app, text));
         let c1 = text[c0..]
             .char_indices()
             .nth(1)
@@ -217,8 +254,8 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
         let selected_here = app.line_selected(lineno);
         let n = app.annotations_on(lineno);
-        let marks = line_marks(app, lineno, &text, sel_style, cur_style);
         let (rows, indent) = app.line_rows(lineno);
+        let marks = line_marks(app, lineno, &text, &rows, sel_style, cur_style);
         let pad = " ".repeat(indent);
         let first_row = if lineno == scroll.line { scroll.row } else { 0 };
 
@@ -930,6 +967,30 @@ mod tests {
         let x = buf.area.width - 2;
         assert_eq!(buf[(x, 3)].symbol(), "›");
         assert_eq!(buf[(x, 3)].style().bg, Some(Color::Yellow));
+    }
+
+    /// The wrapped half of the same invariant. Rows are windows into the line
+    /// but not a cover of it: the space a line breaks at, and any trailing run
+    /// of spaces, sit outside every row so they overhang rather than take a row
+    /// of their own. A cursor mark on one of those bytes clipped against every
+    /// piece and survived on none, so no cell on screen carried the cursor —
+    /// and neither overflow net fires, because the row is neither empty nor
+    /// over-width. A markdown hard break is the everyday way to land there.
+    #[test]
+    fn the_cursor_survives_every_column_of_a_wrapped_line() {
+        let doc = "aaaa bbbb cccc dddd eeee ffff gggg hhhh\nline one  \n";
+        for (line, text) in doc.lines().enumerate() {
+            for col in 1..=text.len() {
+                let mut app = App::new("w.md".into(), doc);
+                app.cursor = Pos::new(line + 1, col);
+                let buf = render_buf(&mut app, 40, 10);
+                assert!(
+                    has_cursor(&buf),
+                    "cursor vanished at L{}:{col} of {text:?}",
+                    line + 1
+                );
+            }
+        }
     }
 
     #[test]
