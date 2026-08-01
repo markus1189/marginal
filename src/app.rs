@@ -169,6 +169,46 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+/// How much container chrome a span's lead is made of: blockquote markers, and
+/// the whitespace — spaces *and* tabs — that indents a block inside one. Those
+/// are the only bytes a continuation line repeats verbatim, so they are the
+/// only ones it may be trimmed of.
+///
+/// `None` when the lead holds anything else, which makes it content: an
+/// ordinary mid-line selection, whose later lines must be kept whole.
+fn chrome_counts(lead: &str) -> Option<(usize, usize)> {
+    let (mut markers, mut spaces) = (0, 0);
+    for c in lead.chars() {
+        match c {
+            '>' => markers += 1,
+            ' ' | '\t' => spaces += 1,
+            _ => return None,
+        }
+    }
+    Some((markers, spaces))
+}
+
+/// Bytes at the start of `text` that repeat the chrome counted by
+/// [`chrome_counts`], taking no more of either kind than the lead itself held.
+///
+/// The per-kind cap is the whole point. An unbounded trim over the same
+/// alphabet would take a `>` off a line whose lead was only spaces — turning an
+/// indented diff fence into a hunk missing half its markers — and would eat the
+/// inner `>` of a diff quoted inside a blockquote. The total cap it also
+/// implies is what leaves a deeper continuation its relative indentation.
+fn chrome_prefix(text: &str, (mut markers, mut spaces): (usize, usize)) -> usize {
+    let mut n = 0;
+    for c in text.chars() {
+        match c {
+            '>' if markers > 0 => markers -= 1,
+            ' ' | '\t' if spaces > 0 => spaces -= 1,
+            _ => break,
+        }
+        n += c.len_utf8();
+    }
+    n
+}
+
 /// Is this line an ATX heading? One to six `#` then a space or end of line —
 /// `#1 broke` is not one, and should not be treated as one.
 fn is_atx_heading(t: &str) -> bool {
@@ -816,27 +856,23 @@ impl App {
     /// having been promised the exact text that was selected.
     ///
     /// So when the bytes before the start column are only container chrome, the
-    /// same chrome comes off every line. When they are content — an ordinary
-    /// mid-line selection — continuation lines are left alone, because trimming
-    /// them by the start column would cut into the text.
+    /// same chrome comes off every line — no more of each kind than the lead
+    /// held, so a continuation cannot be trimmed of chrome the first line never
+    /// carried. When the lead is content — an ordinary mid-line selection —
+    /// continuation lines are left alone, because trimming them by the start
+    /// column would cut into the text.
     pub fn slice(&self, span: Span) -> String {
-        let lead = {
-            let first = self.line_text(span.start.line);
-            floor_boundary(first, span.start.col.saturating_sub(1))
-        };
-        let chrome = self.line_text(span.start.line)[..lead]
-            .chars()
-            .all(|c| c == '>' || c == ' ');
+        let first = self.line_text(span.start.line);
+        let lead = floor_boundary(first, span.start.col.saturating_sub(1));
+        let chrome = chrome_counts(&first[..lead]);
 
         let mut out = Vec::new();
         for line in span.start.line..=span.end.line {
             let text = self.line_text(line);
             let a = if line == span.start.line {
                 lead
-            } else if chrome {
-                (text.len() - text.trim_start_matches(['>', ' ']).len()).min(lead)
             } else {
-                0
+                chrome.map_or(0, |c| chrome_prefix(text, c))
             };
             let b = if line == span.end.line {
                 ceil_boundary(text, span.end.col)
@@ -1082,19 +1118,100 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         commit(&mut b, "why?");
         let q = &b.annotations[0].original_text;
         assert!(!q.lines().any(|l| l.starts_with("    ")), "{q:?}");
+
+        // A tab after the marker is chrome too. It is not in the alphabet the
+        // first version trimmed with, so the uneven depth survived verbatim.
+        let tabbed = ">\tline one\n>\tline two\n";
+        let c = App::new("t.md".into(), tabbed);
+        assert_eq!(c.slice(c.blocks[0].span), "line one\nline two");
     }
 
     /// The other half: a genuine mid-line selection must not have its
     /// continuation lines trimmed by the start column, which would cut content.
+    ///
+    /// The second line is indented on purpose. With a flush-left one the test
+    /// pinned nothing: an unbounded chrome trim had nothing to take from it, so
+    /// the guard that stops the trim could be deleted outright and the suite
+    /// stayed green.
     #[test]
     fn a_mid_line_span_keeps_every_byte_of_its_later_lines() {
-        let src = "alpha beta gamma\ndelta epsilon zeta\n";
+        let src = "alpha beta gamma\n  delta epsilon zeta\n";
         let a = App::new("m.md".into(), src);
         let span = Span {
             start: Pos::new(1, 7),
-            end: Pos::new(2, 18),
+            end: Pos::new(2, 20),
         };
-        assert_eq!(a.slice(span), "beta gamma\ndelta epsilon zeta");
+        assert_eq!(a.slice(span), "beta gamma\n  delta epsilon zeta");
+    }
+
+    /// The chrome trim was bounded by the *length* of the lead but not by what
+    /// the lead contained, so a lead of pure spaces still authorised removing a
+    /// `>`. An indented fence is not a container at all, and a diff inside one
+    /// came out with half its markers gone — in `originalText`, which is what
+    /// the consumer is told was selected.
+    #[test]
+    fn an_indented_fence_keeps_the_markers_of_the_diff_inside_it() {
+        let src = "  ```diff\n> removed line\n< added line\n  ```\n";
+        let a = App::new("d.md".into(), src);
+        assert_eq!(
+            a.slice(a.blocks[0].span),
+            "```diff\n> removed line\n< added line\n```"
+        );
+
+        // The same shape one level in: inside a blockquote the outer `>` is
+        // chrome and the inner one is not, and only one of each may go.
+        let quoted = "> ```diff\n> > removed line\n> < added line\n> ```\n";
+        let b = App::new("q.md".into(), quoted);
+        assert_eq!(
+            b.slice(b.blocks[0].span),
+            "```diff\n> removed line\n< added line\n```"
+        );
+    }
+
+    /// Every span starting in column 1 has an empty lead, so no chrome can be
+    /// counted and no continuation line can be trimmed: the whole feature is
+    /// invisible to it. Held over blocks and hierarchy nodes alike, across
+    /// fixtures carrying every container shape the trim knows about — the same
+    /// property that was checked span by span against the previous
+    /// implementation over the repo's own markdown.
+    #[test]
+    fn a_span_starting_in_column_one_keeps_every_byte_it_covers() {
+        fn walk(n: &TreeNode, out: &mut Vec<Span>) {
+            out.push(n.span);
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+
+        let srcs = [
+            DOC,
+            "> Note: this only reproduces\n> under load, which is why CI\n> never saw it.\n",
+            "- outer\n  - a nested item that\n    runs onto a second line\n",
+            "  ```diff\n> removed line\n< added line\n  ```\n",
+            ">\tline one\n>\tline two\n",
+            "para with `a span` and\n  an indented second line\n",
+        ];
+        for src in srcs {
+            let a = App::new("p.md".into(), src);
+            let mut spans: Vec<Span> = a.blocks.iter().map(|b| b.span).collect();
+            walk(&a.tree, &mut spans);
+            for span in spans {
+                if span.start.col != 1 {
+                    continue;
+                }
+                let mut want = Vec::new();
+                for line in span.start.line..=span.end.line {
+                    let text = a.line_text(line);
+                    let b = if line == span.end.line {
+                        ceil_boundary(text, span.end.col)
+                    } else {
+                        text.len()
+                    };
+                    want.push(text[..b].to_string());
+                }
+                assert_eq!(a.slice(span), want.join("\n"), "{span:?} in {src:?}");
+            }
+        }
     }
 
     /// One structural block of a generated feedback document.
