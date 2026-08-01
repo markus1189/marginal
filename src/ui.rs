@@ -289,6 +289,7 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
         let selected_here = app.line_selected(lineno);
         let n = app.annotations_on(lineno);
+        let open_question = app.open_question_on(lineno);
         let (rows, indent) = app.line_rows(lineno);
         let marks = line_marks(app, lineno, &text, &rows, sel_style, cur_style);
         let pad = " ".repeat(indent);
@@ -317,10 +318,23 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 ),
                 // The dot used to trail the text, which made it the first thing
                 // truncated — an annotation you could not see you had made.
+                //
+                // One cell, two states: a question you have not answered shows
+                // `?` until you comment on it, at which point it becomes the
+                // dot. The fringe is a worklist that drains. A third glyph
+                // would need a third gutter column, taken off the body width of
+                // every line — and both of these are single-width, which the
+                // fixed two-cell layout depends on. Head row only, for the same
+                // reason the number is: repeated down a wrapped line it would
+                // read as several questions.
                 Span::styled(
-                    if n > 0 && head { "●" } else { " " },
+                    match (head, n > 0, open_question) {
+                        (true, true, _) => "●",
+                        (true, false, true) => "?",
+                        _ => " ",
+                    },
                     Style::default()
-                        .fg(Color::Magenta)
+                        .fg(if n > 0 { Color::Magenta } else { Color::Cyan })
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -1509,6 +1523,57 @@ mod tests {
         // again without touching a line of the footer's arithmetic.
         assert!(footer_at(|_| {}, &KEYS, 80).1, "no status at 80 columns");
         assert!(footer_at(|_| {}, &KEYS, 140).1, "no status at 140 columns");
+    }
+
+    // ---- the question mark in the gutter -----------------------------------
+
+    const QDOC: &str = "# Review\n\nShould I add validation?\n\nThe parser is fine.\n";
+
+    /// The gutter cell between the line number and the selection bar. Column
+    /// index is `lineno_w`, and `lineno_w` has a floor of `LINENO_MIN`.
+    fn gutter_mark(buf: &ratatui::buffer::Buffer, row: u16) -> String {
+        // +1 for the border ratatui draws around the body pane.
+        buf[(1 + u16::try_from(LINENO_MIN).unwrap(), row)]
+            .symbol()
+            .to_string()
+    }
+
+    /// One cell, two states — and the transition between them is the feature:
+    /// the fringe is a worklist that drains as you answer.
+    #[test]
+    fn an_unanswered_question_shows_in_the_gutter_and_becomes_a_dot_when_answered() {
+        let mut app = App::new("REVIEW.md".into(), QDOC);
+        // Row 0 is the border, so row N is source line N. Height 20, not 12:
+        // the annotations pane is a fixed six rows, and at 12 the body pane is
+        // three lines tall and row 5 is that pane's border rather than line 5.
+        let buf = render_buf(&mut app, 80, 20);
+        assert_eq!(gutter_mark(&buf, 3), "?", "line 3 asks something");
+        assert_eq!(gutter_mark(&buf, 5), " ", "line 5 does not");
+
+        app.cursor = crate::blocks::Pos::new(3, 1);
+        app.begin_comment();
+        app.editor.set("yes");
+        app.commit_comment();
+
+        let buf = render_buf(&mut app, 80, 20);
+        assert_eq!(gutter_mark(&buf, 3), "●", "answered — now an annotation");
+    }
+
+    /// Both glyphs must be single-width, or the fixed two-cell gutter stops
+    /// lining up with the body column beside it.
+    #[test]
+    fn the_gutter_question_mark_does_not_shift_the_body_column() {
+        let mut plain = App::new("R.md".into(), "The parser is fine.\n");
+        let mut asking = App::new("R.md".into(), "Is the parser fine?\n");
+        let (a, b) = (
+            render_buf(&mut plain, 80, 8),
+            render_buf(&mut asking, 80, 8),
+        );
+        let col = |buf: &ratatui::buffer::Buffer| {
+            (0..buf.area.width)
+                .position(|x| buf[(x, 1)].symbol() == "T" || buf[(x, 1)].symbol() == "I")
+        };
+        assert_eq!(col(&a), col(&b), "body text starts in the same column");
     }
 
     /// The full hint line is ~105 columns; in a 95-column pane it was cut

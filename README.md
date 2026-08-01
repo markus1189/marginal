@@ -249,6 +249,30 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `Enter` (also `c`) | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
+
+A **mark** is an annotation you have written, or a question the document asks
+that you have not answered yet. The gutter cell between the line number and the
+selection bar shows which:
+
+| cell | meaning |
+|---|---|
+| `?` cyan | an unanswered question |
+| `●` magenta | an annotation — including one you just wrote on a question |
+
+Commenting on a question turns its `?` into `●` and drops it from the ring, so
+the fringe is a worklist that drains as you work down the message. The status
+field reports where you are in the ring — `question 2/5` — which is also how you
+notice the detector has found more than you expected.
+
+A question is a `?` followed by whitespace or end-of-line, optionally through a
+run of closing punctuation, and not inside a code block, code span or raw HTML.
+So `Is it (really?) so?` is two, and `docs.rs/?q=1`, `ls *.rs?` and a `?:` in a
+fenced block are none. Note that this is the inverse of `?\b`, which matches a
+`?` followed by a word character — precisely the cases worth excluding.
+
+Questions are derived from the source, not authored by you: they never appear in
+`--result` JSON, and a document full of them with no comments is still an
+`approved` decision.
 | `Esc` | drop the selection |
 | `q`, `C-c` | quit |
 

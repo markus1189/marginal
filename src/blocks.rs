@@ -756,6 +756,62 @@ fn fold_inline(
     best
 }
 
+// ---------------------------------------------------------------------------
+// Questions
+// ---------------------------------------------------------------------------
+
+/// Kinds whose interior is not prose. A `?` inside one is punctuation in some
+/// other language — a glob, a regex, a ternary, a query string — and stopping
+/// on it is how a jump key loses the reader's trust.
+fn is_verbatim(kind: &str) -> bool {
+    matches!(kind, "code" | "code-span" | "html" | "html-inline")
+}
+
+fn verbatim_spans(n: &TreeNode, out: &mut Vec<Span>) {
+    if is_verbatim(n.kind) {
+        out.push(n.span);
+        return;
+    }
+    for c in &n.children {
+        verbatim_spans(c, out);
+    }
+}
+
+/// Characters allowed between a `?` and the end of the sentence. `Is it?)` and
+/// `*Really?*` are questions; the run has to end at whitespace all the same.
+const CLOSERS: [char; 12] = [')', ']', '}', '"', '\'', '»', '”', '’', '*', '_', '~', '`'];
+
+/// Every `?` that ends a sentence, in document order.
+///
+/// The rule is `?` followed by whitespace or end-of-line, optionally through a
+/// run of closing punctuation — deliberately *not* `?\b`, which matches a `?`
+/// followed by a word character and so selects `example.com?q=1`, the exact
+/// case worth excluding. Verbatim spans are skipped outright.
+///
+/// Takes the already-parsed tree rather than re-parsing, as `highlight::marks`
+/// does: one comrak pass per document, no second parser to disagree with the
+/// first.
+pub fn questions(root: &TreeNode, src: &str) -> Vec<Pos> {
+    let mut skip = Vec::new();
+    verbatim_spans(root, &mut skip);
+
+    let mut out = Vec::new();
+    for (i, text) in src.lines().enumerate() {
+        // '?' is one byte, so `b + 1` is always a character boundary.
+        for (b, _) in text.char_indices().filter(|&(_, c)| c == '?') {
+            let pos = Pos::new(i + 1, b + 1);
+            if skip.iter().any(|s: &Span| s.contains(pos)) {
+                continue;
+            }
+            let tail = text[b + 1..].trim_start_matches(CLOSERS);
+            if tail.is_empty() || tail.starts_with(char::is_whitespace) {
+                out.push(pos);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1397,5 +1453,72 @@ still para.
         let t = parse_tree("---\n");
         assert_eq!(next_inline(&t, Pos::new(1, 1)), None);
         assert_eq!(prev_inline(&t, Pos::new(9, 9)), None);
+    }
+
+    // ---- questions ---------------------------------------------------------
+
+    const QDOC: &str = "\
+Should I add validation?
+
+Two on one line? Or not? Yes.
+
+A glob `ls *.rs?` is quiet, and https://docs.rs/?q=1 too.
+
+```sh
+test -f x && echo ?
+```
+
+Is it worth it (really?) and \"is it?\" too.
+
+Really??
+";
+
+    fn qlines(src: &str) -> Vec<usize> {
+        questions(&parse_tree(src), src)
+            .iter()
+            .map(|p| p.line)
+            .collect()
+    }
+
+    /// One fixture, every class at once — the false positives are the reason
+    /// this feature is worth having rather than a plain scan for `?`.
+    #[test]
+    fn questions_are_sentence_terminators_not_every_question_mark() {
+        assert_eq!(qlines(QDOC), vec![1, 3, 3, 11, 11, 13]);
+    }
+
+    #[test]
+    fn a_question_mark_inside_a_code_span_or_block_is_not_a_question() {
+        assert!(!qlines(QDOC).contains(&5), "code span on line 5");
+        assert!(!qlines(QDOC).contains(&8), "fenced block on line 8");
+    }
+
+    /// `?\\b` — the obvious first guess — matches exactly this and nothing that
+    /// belongs, which is why the rule is the inverse.
+    #[test]
+    fn a_query_string_is_not_a_question() {
+        assert!(qlines("See https://docs.rs/?q=1 for more.\n").is_empty());
+    }
+
+    #[test]
+    fn closing_punctuation_may_sit_between_the_mark_and_the_space() {
+        assert_eq!(qlines("Is it (really?) so?\n"), vec![1, 1]);
+        assert_eq!(qlines("She asked \"why?\" twice.\n"), vec![1]);
+        assert_eq!(qlines("*Really?* he said.\n"), vec![1]);
+    }
+
+    /// Only the last mark of a run terminates the sentence, so `??` is one
+    /// stop, not two on the same word.
+    #[test]
+    fn a_run_of_question_marks_yields_one_stop() {
+        let q = questions(&parse_tree("Really??\n"), "Really??\n");
+        assert_eq!(q, vec![Pos::new(1, 8)]);
+    }
+
+    #[test]
+    fn columns_are_byte_offsets_so_umlauts_do_not_shift_them() {
+        let src = "Wieso Ünicode?\n";
+        let q = questions(&parse_tree(src), src);
+        assert_eq!(q, vec![Pos::new(1, src.find('?').unwrap() + 1)]);
     }
 }

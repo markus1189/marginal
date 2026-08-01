@@ -93,6 +93,10 @@ pub struct App {
     pub tree: TreeNode,
     /// Syntax highlighting marks, one entry per source line. Computed once.
     pub marks: Vec<LineMarks>,
+    /// Sentence-terminating `?` positions. Derived from the source, so computed
+    /// once alongside `marks` — and deliberately absent from the result JSON,
+    /// which records what a human said, not what the document asked.
+    pub questions: Vec<Pos>,
     pub cursor: Pos,
     pub sel: Sel,
     pub annotations: Vec<Annotation>,
@@ -321,6 +325,9 @@ impl App {
         let blocks = blocks::parse(src);
         let tree = blocks::parse_tree(src);
         let marks = highlight::marks(&tree, src);
+        // The source never changes, so this is scanned once and never
+        // invalidated. Only the answered/unanswered split is dynamic.
+        let questions = blocks::questions(&tree, src);
         let cursor = blocks.first().map_or(Pos::new(1, 1), |b| b.span.start);
         let tables = Tables::new(&lines, &blocks);
         Self {
@@ -330,6 +337,7 @@ impl App {
             blocks,
             tree,
             marks,
+            questions,
             cursor,
             sel: Sel::Here,
             annotations: Vec::new(),
@@ -881,41 +889,64 @@ impl App {
         }
     }
 
-    /// Every position worth jumping to, in document order.
+    /// Is there a question on this line that has not been answered?
+    ///
+    /// An annotation anywhere on the line answers it: the comment you wrote is
+    /// the response, and it already occupies that place in the ring. Two
+    /// questions on one line are answered together — rare enough to accept,
+    /// and one comment usually addresses both.
+    pub fn open_question_on(&self, line: usize) -> bool {
+        self.annotations_on(line) == 0 && self.questions.iter().any(|q| q.line == line)
+    }
+
+    /// Every position worth jumping to, in document order, each labelled with
+    /// what it is so the status line can say.
     ///
     /// Annotations are stored in the order they were written (`commit_comment`
-    /// pushes), which is not the order they appear in — so this sorts. Two
-    /// annotations anchored at the same position collapse to one stop; a ring
-    /// that visits the same cell twice reads as a stuck key.
-    fn mark_positions(&self) -> Vec<Pos> {
-        let mut out: Vec<Pos> = self
+    /// pushes), which is not the order they appear in — so this sorts. Positions
+    /// collapse to one stop; a ring that visits the same cell twice reads as a
+    /// stuck key.
+    fn mark_positions(&self) -> Vec<(Pos, &'static str)> {
+        let mut out: Vec<(Pos, &'static str)> = self
             .annotations
             .iter()
-            .map(|a| Pos::new(a.start_line, a.start_col))
+            .map(|a| (Pos::new(a.start_line, a.start_col), "annotation"))
+            .chain(
+                self.questions
+                    .iter()
+                    .filter(|q| self.open_question_on(q.line))
+                    .map(|&q| (q, "question")),
+            )
             .collect();
-        out.sort_unstable();
-        out.dedup();
+        out.sort_unstable_by_key(|&(p, _)| p);
+        out.dedup_by_key(|&mut (p, _)| p);
         out
     }
 
     /// Next (`delta > 0`) or previous mark, wrapping at both ends. Wrapping is
-    /// the point: three annotations should be three presses and back to the
-    /// first, not a ring with a dead end at each edge.
+    /// the point: three marks should be three presses and back to the first,
+    /// not a ring with a dead end at each edge.
+    ///
+    /// The ring shrinks as you work — answering a question replaces it with the
+    /// annotation you wrote, in the same place.
     pub fn goto_mark(&mut self, delta: isize) {
         let marks = self.mark_positions();
         let here = self.cursor;
         let found = if delta > 0 {
-            marks.iter().find(|&&p| p > here).or_else(|| marks.first())
+            marks
+                .iter()
+                .find(|&&(p, _)| p > here)
+                .or_else(|| marks.first())
         } else {
             marks
                 .iter()
                 .rev()
-                .find(|&&p| p < here)
+                .find(|&&(p, _)| p < here)
                 .or_else(|| marks.last())
         }
         .copied();
-        let Some(target) = found else {
-            self.status = "no annotations".into();
+        let Some((target, kind)) = found else {
+            self.status = "no marks".into();
             return;
         };
         self.drop_region();
@@ -923,8 +954,8 @@ impl App {
         self.snap();
         // The count is not decoration: it is how you notice the set is not what
         // you expected before you have pressed the key twenty times.
-        let idx = marks.iter().position(|&p| p == target).unwrap_or(0) + 1;
-        self.status = format!("annotation {idx}/{}", marks.len());
+        let idx = marks.iter().position(|&(p, _)| p == target).unwrap_or(0) + 1;
+        self.status = format!("{kind} {idx}/{}", marks.len());
     }
 
     fn is_whole_lines(&self, span: Span) -> bool {
@@ -2415,7 +2446,74 @@ https://example.dev/a/very/long/path in it as well.
         a.cursor = Pos::new(3, 1);
         a.goto_mark(1);
         assert_eq!(a.cursor, Pos::new(3, 1));
-        assert_eq!(a.status, "no annotations");
+        assert_eq!(a.status, "no marks");
+    }
+
+    // ---- questions in the ring ---------------------------------------------
+
+    /// Line 3 and line 7 ask something; line 7's *first* `?` is inside a code
+    /// span and must not count, so this fixture also checks that the detector
+    /// is wired to the same tree the rest of the app uses.
+    const QDOC: &str = "\
+# Review
+
+Should I add validation?
+
+The parser looks fine.
+
+Is `?` in a code span quiet?
+";
+
+    fn qapp() -> App {
+        App::new("REVIEW.md".into(), QDOC)
+    }
+
+    #[test]
+    fn open_questions_are_the_lines_that_ask_something() {
+        let a = qapp();
+        assert!(a.open_question_on(3));
+        assert!(a.open_question_on(7));
+        assert!(!a.open_question_on(5), "a statement is not a question");
+        assert!(!a.open_question_on(1));
+    }
+
+    #[test]
+    fn the_ring_walks_questions_before_anything_is_annotated() {
+        let mut a = qapp();
+        a.cursor = Pos::new(1, 1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 3);
+        assert_eq!(a.status, "question 1/2");
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 7);
+        assert_eq!(a.status, "question 2/2");
+    }
+
+    /// The whole point of the merged ring: answering a question does not add a
+    /// second stop on the same line, it converts the one that was there.
+    #[test]
+    fn answering_a_question_replaces_it_in_the_ring_rather_than_adding_to_it() {
+        let mut a = qapp();
+        a.cursor = Pos::new(3, 1);
+        commit(&mut a, "yes — see the ticket");
+        assert!(!a.open_question_on(3), "answered, so no longer open");
+
+        a.cursor = Pos::new(1, 1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 3);
+        assert_eq!(a.status, "annotation 1/2", "still two stops, not three");
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 7);
+        assert_eq!(a.status, "question 2/2");
+    }
+
+    /// Derived from the source, not authored by the reader — so a document full
+    /// of questions and no comments is still an approval.
+    #[test]
+    fn questions_alone_do_not_flag_the_result() {
+        let a = qapp();
+        assert_eq!(a.result().decision, "approved");
+        assert!(a.result().annotations.is_empty());
     }
 
     #[test]
