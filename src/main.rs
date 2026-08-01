@@ -204,11 +204,11 @@ fn run(app: &mut App) -> io::Result<()> {
 fn handle_key(app: &mut App, k: KeyEvent) {
     let code = k.code;
     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
 
     match app.mode {
         // Readline bindings, as bash has trained everyone to expect.
         Mode::Input => {
-            let alt = k.modifiers.contains(KeyModifiers::ALT);
             let e = &mut app.editor;
             match code {
                 KeyCode::Enter => app.commit_comment(),
@@ -252,6 +252,14 @@ fn handle_key(app: &mut App, k: KeyEvent) {
                 _ => {}
             }
         }
+        // Normal mode binds no ALT chord, and the arms below match on `code`
+        // alone — so without this guard `M-x` reached the plain `x` arm and
+        // removed an annotation, with no undo and no confirmation, while `M-q`
+        // quit. Input mode already guarded the other direction ("anything else
+        // with a modifier is a chord we do not bind"); this is the same rule for
+        // the other two modes. Emacs bindings make both chords reflex, and
+        // crossterm decodes a quick `Esc` then a key as that key's ALT chord.
+        Mode::Normal if alt => {}
         // The peek overlay swallows the movement keys: while it is up, j/k
         // scroll the overlay rather than the cursor underneath it.
         Mode::Normal if app.peek => match code {
@@ -345,5 +353,49 @@ mod tests {
         assert!(preflight(good.to_str().unwrap()).is_ok());
         assert_eq!(std::fs::read_to_string(&good).unwrap(), "keep");
         let _ = std::fs::remove_file(&good);
+    }
+
+    const DOC: &str = "# Steps\n\n- one\n- two\n";
+
+    fn key(c: char, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), m)
+    }
+
+    /// `ctrl` was bound at function scope but `alt` only inside the `Mode::Input`
+    /// arm, and the peek and Normal arms match on `code` alone. So every ALT
+    /// chord fell through to its unmodified binding: `M-x` removed an annotation
+    /// with no undo and no confirmation, and `M-q` quit.
+    #[test]
+    fn normal_mode_binds_no_alt_chord() {
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        app.editor.set("keep me");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 1, "setup failed");
+
+        handle_key(&mut app, key('x', KeyModifiers::ALT));
+        assert_eq!(app.annotations.len(), 1, "M-x removed an annotation");
+
+        handle_key(&mut app, key('q', KeyModifiers::ALT));
+        assert!(!app.quit, "M-q quit");
+
+        // The unmodified keys still work, so the guard is not a blanket mute.
+        handle_key(&mut app, key('x', KeyModifiers::NONE));
+        assert!(app.annotations.is_empty(), "plain x stopped working");
+        handle_key(&mut app, key('q', KeyModifiers::NONE));
+        assert!(app.quit, "plain q stopped working");
+    }
+
+    /// The peek overlay matches on `code` alone too.
+    #[test]
+    fn the_peek_overlay_binds_no_alt_chord() {
+        let mut app = App::new("t.md".into(), DOC);
+        handle_key(&mut app, key('z', KeyModifiers::NONE));
+        assert!(app.peek, "setup failed");
+        handle_key(&mut app, key('q', KeyModifiers::ALT));
+        assert!(app.peek, "M-q closed the overlay");
+        assert!(!app.quit);
+        handle_key(&mut app, key('q', KeyModifiers::NONE));
+        assert!(!app.peek, "plain q stopped closing the overlay");
     }
 }
