@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Mode};
+use crate::wrap::wrap;
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
     // The comment box grows with the comment, up to a point.
@@ -386,53 +387,6 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         ),
         area,
     );
-}
-
-/// Display width of `s` in terminal cells.
-fn cells(s: &str) -> usize {
-    Span::raw(s).width()
-}
-
-/// Word-wrap to `width` cells, preserving each source line's own break and its
-/// leading indentation. Hand-rolled rather than `Paragraph::wrap` because the
-/// overlay needs the exact row count to clamp its scroll, and ratatui exposes
-/// no stable way to ask; `Wrap { trim: true }` also eats the indentation that
-/// makes nested markdown readable.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for line in text.split('\n') {
-        let mut row = String::new();
-        let mut w = 0usize;
-        for word in line.split_inclusive(' ') {
-            let ww = cells(word);
-            if w > 0 && w + ww > width {
-                out.push(std::mem::take(&mut row));
-                w = 0;
-            }
-            if ww > width {
-                // A single word wider than the pane — a URL, usually. It still
-                // has to go somewhere, so cut it on character boundaries.
-                let mut buf = [0u8; 4];
-                for ch in word.chars() {
-                    let cw = cells(ch.encode_utf8(&mut buf));
-                    if w + cw > width {
-                        out.push(std::mem::take(&mut row));
-                        w = 0;
-                    }
-                    row.push(ch);
-                    w += cw;
-                }
-            } else {
-                row.push_str(word);
-                w += ww;
-            }
-        }
-        out.push(row);
-    }
-    out
 }
 
 /// Centre a rect inside `area`, inset by `dx`/`dy` on each side.
@@ -980,41 +934,6 @@ mod tests {
         app.toggle_peek();
         assert!(!app.peek);
         render(&mut app, 60, 12);
-    }
-
-    #[test]
-    fn wrap_preserves_every_character_and_the_indentation() {
-        for width in [1usize, 3, 12, 40] {
-            let text = "    - a nested item with several words\nand a second line";
-            let rows = wrap(text, width);
-            let rebuilt: String = rows.join("").replace(' ', "");
-            assert_eq!(rebuilt, text.replace([' ', '\n'], ""), "width {width}");
-            assert!(
-                rows[0].starts_with(' ') || width < 4,
-                "lost indent at {width}"
-            );
-            for r in &rows {
-                assert!(cells(r) <= width || width == 0, "row over width: {r:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn wrap_hard_cuts_a_word_wider_than_the_pane() {
-        let rows = wrap("see https://example.dev/a/very/long/path/indeed here", 12);
-        assert!(rows.len() > 3, "{rows:?}");
-        for r in &rows {
-            assert!(cells(r) <= 12, "{r:?}");
-        }
-    }
-
-    #[test]
-    fn wrap_survives_multibyte_and_a_zero_width_pane() {
-        assert!(wrap("Prüfen köde — ✓ fertig", 0).is_empty());
-        let rows = wrap("Prüfen köde — ✓ fertig", 7);
-        for r in &rows {
-            assert!(cells(r) <= 7, "{r:?}");
-        }
     }
 
     /// The editor advertises `C-j newline`, and the pane used to render a

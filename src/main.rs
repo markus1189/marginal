@@ -9,6 +9,7 @@ mod blocks;
 mod editor;
 mod highlight;
 mod ui;
+mod wrap;
 
 use std::io;
 use std::process::ExitCode;
