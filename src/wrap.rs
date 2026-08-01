@@ -48,6 +48,20 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// The rows one source line occupies at `width` cells — byte ranges into the
+/// line — with the hanging indent its continuation rows are padded by.
+///
+/// `width == 0` means "do not wrap": one row covering the whole line, which is
+/// what the source view renders when wrapping is off and what keeps every
+/// row-addressed motion working unchanged in that mode.
+pub fn wrap_source(line: &str, width: usize) -> (Vec<(usize, usize)>, usize) {
+    if width == 0 {
+        return (vec![(0, line.len())], 0);
+    }
+    let indent = hang_indent(line).min(width / 2);
+    (wrap_line(line, width, width - indent), indent)
+}
+
 /// Cells a continuation row is padded by, so a wrapped line keeps the shape of
 /// the construct it belongs to: the source indentation, plus the width of a
 /// list marker or blockquote prefix so text lines up under text rather than

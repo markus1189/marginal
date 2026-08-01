@@ -13,10 +13,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Mode};
-use crate::wrap::wrap;
+use crate::app::{Anchor, App, Mode};
+use crate::wrap::{cells, wrap};
 
-pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut usize) {
+pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
     #[expect(
         clippy::cast_possible_truncation,
@@ -152,10 +152,9 @@ fn line_marks(
     marks
 }
 
-fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
+fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
     let viewport = area.height.saturating_sub(2) as usize;
     app.viewport = viewport;
-    keep_cursor_visible(app, scroll, viewport);
 
     let current = app.current_block();
     let sel_style = Style::default().bg(Color::Indexed(238)).fg(Color::White);
@@ -181,74 +180,109 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut usize) {
     let (gutter_area, body_area) = (cols[0], cols[1]);
     let body_w = usize::from(body_area.width);
 
+    // Published before anything reads row space: `line_rows` wraps to this, so
+    // the anchor, the cursor row and the paging step are all computed against
+    // the width actually on screen this frame.
+    app.wrap_width = body_w;
+    keep_cursor_visible(app, scroll, viewport);
+
     let mut gutter: Vec<Line> = Vec::with_capacity(viewport);
     let mut body: Vec<Line> = Vec::with_capacity(viewport);
     // Rows whose line runs past the right edge, and the colour to say so in.
+    // Always empty while wrapping: nothing runs past the edge.
     let mut overflow: Vec<(usize, Style)> = Vec::new();
 
-    for idx in 0..viewport {
-        let lineno = *scroll + idx + 1;
-        if lineno > app.lines.len() {
-            break;
-        }
+    let mut lineno = scroll.line;
+    let mut idx = 0usize;
+    while idx < viewport && lineno <= app.lines.len() {
         // One space per tab, not a tab stop. ratatui drops control characters
         // outright, so a tab used to vanish and shift every column after it left
         // by one. A single space is one byte for one cell, which keeps the byte
         // column the screen shows identical to the byte column that goes in the
         // JSON — worth more here than visually correct indentation.
-        let text = app.line_text(lineno).replace('\t', " ");
+        let text = app.display_line(lineno);
         let on_cursor_line = lineno == app.cursor.line;
         let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
         let selected_here = app.line_selected(lineno);
         let n = app.annotations_on(lineno);
-
-        gutter.push(Line::from(vec![
-            Span::styled(
-                format!("{lineno:>lineno_w$}"),
-                Style::default().fg(if on_cursor_line {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-            // The dot used to trail the text, which made it the first thing
-            // truncated — an annotation you could not see you had made.
-            Span::styled(
-                if n > 0 { "●" } else { " " },
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if in_current || selected_here {
-                    "▍"
-                } else {
-                    " "
-                },
-                Style::default().fg(if selected_here {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-        ]));
-
         let marks = line_marks(app, lineno, &text, sel_style, cur_style);
-        let mut spans = segments(&text, &marks, Style::default());
-        if spans.is_empty() && on_cursor_line {
-            spans.push(Span::styled(" ", cur_style));
+        let (rows, indent) = app.line_rows(lineno);
+        let pad = " ".repeat(indent);
+        let first_row = if lineno == scroll.line { scroll.row } else { 0 };
+
+        for (k, &(s, e)) in rows.iter().enumerate().skip(first_row) {
+            if idx == viewport {
+                break;
+            }
+            // The number and the dot mark the line, so they go on its first row
+            // only — repeated, they would read as separate lines. The selection
+            // bar marks every row: the line is still selected halfway down it.
+            let head = k == 0;
+            gutter.push(Line::from(vec![
+                Span::styled(
+                    if head {
+                        format!("{lineno:>lineno_w$}")
+                    } else {
+                        " ".repeat(lineno_w)
+                    },
+                    Style::default().fg(if on_cursor_line {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                // The dot used to trail the text, which made it the first thing
+                // truncated — an annotation you could not see you had made.
+                Span::styled(
+                    if n > 0 && head { "●" } else { " " },
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if in_current || selected_here {
+                        "▍"
+                    } else {
+                        " "
+                    },
+                    Style::default().fg(if selected_here {
+                        Color::Yellow
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+            ]));
+
+            // Marks are byte ranges into the whole line; a row is a byte window
+            // into it. Clip to the window, then shift into it — the partition
+            // property of `wrap_line` is what makes this exact.
+            let row_marks: Vec<(usize, usize, Style)> = marks
+                .iter()
+                .filter(|&&(a, b, _)| b > s && a < e)
+                .map(|&(a, b, st)| (a.max(s) - s, b.min(e) - s, st))
+                .collect();
+            let mut spans = if k == 0 || pad.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::raw(pad.clone())]
+            };
+            spans.extend(segments(&text[s..e], &row_marks, Style::default()));
+            if spans.is_empty() && on_cursor_line {
+                spans.push(Span::styled(" ", cur_style));
+            }
+            let row = Line::from(spans);
+            if row.width() > body_w {
+                // A cursor past the edge leaves no cursor cell on screen at all.
+                // The marker takes the cursor's colour in that case, so the screen
+                // still says where you are — `w`/`b`, `0` and `z` get you back to it.
+                let hidden = on_cursor_line && cells(&text[..cursor_byte(app, &text)]) >= body_w;
+                let dim = Style::default().fg(Color::DarkGray);
+                overflow.push((idx, if hidden { cur_style } else { dim }));
+            }
+            body.push(row);
+            idx += 1;
         }
-        let row = Line::from(spans);
-        if row.width() > body_w {
-            // A cursor past the edge leaves no cursor cell on screen at all.
-            // The marker takes the cursor's colour in that case, so the screen
-            // still says where you are — `w`/`b`, `0` and `z` get you back to it.
-            let hidden =
-                on_cursor_line && Span::raw(&text[..cursor_byte(app, &text)]).width() >= body_w;
-            let dim = Style::default().fg(Color::DarkGray);
-            overflow.push((idx, if hidden { cur_style } else { dim }));
-        }
-        body.push(row);
+        lineno += 1;
     }
 
     f.render_widget(Paragraph::new(gutter), gutter_area);
@@ -314,18 +348,53 @@ fn shorten_path(path: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-fn keep_cursor_visible(app: &App, scroll: &mut usize, viewport: usize) {
+/// Scroll so the cursor's *row* is on screen. Every path is O(viewport): the
+/// anchor is walked, never indexed, so no part of this is proportional to the
+/// document or to the height of the line the cursor happens to be on.
+fn keep_cursor_visible(app: &App, scroll: &mut Anchor, viewport: usize) {
     if viewport == 0 {
         return;
     }
-    let cursor0 = app.cursor.line.saturating_sub(1);
-    if cursor0 < *scroll {
-        *scroll = cursor0;
-    } else if cursor0 >= *scroll + viewport {
-        *scroll = cursor0 + 1 - viewport;
+    let cur = Anchor {
+        line: app.cursor.line,
+        row: app.cursor_row(),
+    };
+
+    if (cur.line, cur.row) < (scroll.line, scroll.row) {
+        // Above the fold: the cursor's row becomes the top row.
+        *scroll = cur;
+    } else if cur.line >= scroll.line + viewport {
+        // Far below. Counting rows down from the old anchor could be a million
+        // of them after `G`; walking back up from the cursor is bounded.
+        *scroll = app.walk_rows(cur, viewport - 1, false);
+    } else {
+        // Near enough to count, but a single tall line between the two can
+        // still be thousands of rows — so stop counting once it cannot matter.
+        let mut n = 0usize;
+        let mut a = *scroll;
+        while a != cur && n <= viewport {
+            match app.step_row(a, true) {
+                Some(next) => a = next,
+                None => break,
+            }
+            n += 1;
+        }
+        if n >= viewport {
+            *scroll = app.walk_rows(cur, viewport - 1, false);
+        }
     }
-    let max_scroll = app.lines.len().saturating_sub(viewport);
-    *scroll = (*scroll).min(max_scroll);
+
+    // No blank rows under the last line: the top can go no further than a
+    // viewport short of the document's final row.
+    let end = app.line_count();
+    let last = Anchor {
+        line: end,
+        row: app.row_count(end) - 1,
+    };
+    let max_top = app.walk_rows(last, viewport - 1, false);
+    if (scroll.line, scroll.row) > (max_top.line, max_top.row) {
+        *scroll = max_top;
+    }
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
@@ -574,7 +643,7 @@ mod tests {
     /// vanishing cursor went unnoticed.
     fn render_buf(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        let mut scroll = 0usize;
+        let mut scroll = Anchor::default();
         term.draw(|f| draw(f, app, &mut scroll)).unwrap();
         term.backend().buffer().clone()
     }
@@ -588,7 +657,7 @@ mod tests {
 
     fn render(app: &mut App, w: u16, h: u16) -> String {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        let mut scroll = 0usize;
+        let mut scroll = Anchor::default();
         term.draw(|f| draw(f, app, &mut scroll)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..buf.area.height)
@@ -802,6 +871,7 @@ mod tests {
     #[test]
     fn a_line_that_runs_past_the_edge_says_so() {
         let mut app = App::new("long.md".into(), &long_doc());
+        app.wrap = false;
         let buf = render_buf(&mut app, 60, 12);
         let row: String = (0..buf.area.width).map(|x| buf[(x, 3)].symbol()).collect();
         assert!(row.contains("   3"), "expected line 3 on row 3: {row}");
@@ -820,6 +890,7 @@ mod tests {
     #[test]
     fn the_cursor_is_never_silently_off_screen() {
         let mut app = App::new("long.md".into(), &long_doc());
+        app.wrap = false;
         app.cursor = Pos::new(3, 1);
         app.goto_line_end();
         let buf = render_buf(&mut app, 60, 12);
@@ -900,11 +971,85 @@ mod tests {
         assert!(app.peek_rows > 1, "text should have wrapped");
     }
 
+    #[test]
+    fn a_long_line_wraps_onto_the_rows_below_it() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        let screen = render(&mut app, 60, 16);
+        assert!(!screen.contains('›'), "nothing runs off the edge: {screen}");
+        assert!(
+            screen.contains("at the end."),
+            "the tail of the line should be on screen: {screen}"
+        );
+    }
+
+    /// A repeated line number reads as a repeated line. The number and the
+    /// annotation dot mark the line, so they belong to its first row only.
+    #[test]
+    fn the_gutter_numbers_a_line_once_however_many_rows_it_takes() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        let screen = render(&mut app, 60, 16);
+        let field = |l: &str| l.chars().skip(1).take(4).collect::<String>();
+        let numbered = screen.lines().filter(|l| field(l) == "   3").count();
+        assert_eq!(numbered, 1, "line 3 numbered {numbered} times: {screen}");
+        // …and it did take more than one row, or this proves nothing.
+        assert!(app.row_count(3) > 1, "line 3 did not wrap");
+    }
+
+    /// With truncation the cursor past the edge was carried by the `›` marker.
+    /// Wrapped, there is no edge to be past: it is drawn where it is.
+    #[test]
+    fn the_cursor_at_the_end_of_a_wrapped_line_is_drawn_on_its_own_row() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.goto_line_end();
+        assert!(has_cursor(&render_buf(&mut app, 60, 16)));
+        assert!(!render(&mut app, 60, 16).contains('›'));
+    }
+
+    /// Marks are byte ranges into a line and rows are byte windows into it, so
+    /// rebasing one onto the other is where a wrapped selection would silently
+    /// drift. The selected line is highlighted on every row it occupies.
+    #[test]
+    fn a_selection_stays_highlighted_across_the_rows_it_wraps_to() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.toggle_lines();
+        let buf = render_buf(&mut app, 60, 16);
+        let sel = Color::Indexed(238);
+        let rows = (0..buf.area.height)
+            .filter(|&y| (0..buf.area.width).any(|x| buf[(x, y)].style().bg == Some(sel)))
+            .count();
+        assert!(
+            rows >= app.row_count(3) - 1,
+            "selection covered {rows} rows of {}",
+            app.row_count(3)
+        );
+    }
+
+    /// Wrapping is a rendering decision. The JSON is computed from the source
+    /// and must not notice.
+    #[test]
+    fn wrapping_does_not_reach_the_output_contract() {
+        let mut app = App::new("long.md".into(), &long_doc());
+        app.cursor = Pos::new(3, 1);
+        app.toggle_lines();
+        app.begin_comment();
+        app.editor.set("note");
+        app.commit_comment();
+
+        render(&mut app, 60, 16);
+        let wrapped = serde_json::to_string(&app.result()).unwrap();
+        app.wrap = false;
+        render(&mut app, 60, 16);
+        assert_eq!(wrapped, serde_json::to_string(&app.result()).unwrap());
+    }
+
     /// Found by running it: the overlay is inset, so the markers landed in the
     /// strip of source still visible beside it — a `›` with no line attached.
     #[test]
     fn peek_suppresses_the_truncation_markers_underneath_it() {
         let mut app = App::new("long.md".into(), &long_doc());
+        app.wrap = false;
         app.cursor = Pos::new(3, 1);
         assert!(render(&mut app, 60, 16).contains('›'));
         app.toggle_peek();

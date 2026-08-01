@@ -18,13 +18,15 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use app::{App, Mode, Sel};
 
-const USAGE: &str = "usage: marginal [--dump-blocks] [--result PATH] [--label NAME] FILE";
+const USAGE: &str =
+    "usage: marginal [--dump-blocks] [--no-wrap] [--result PATH] [--label NAME] FILE";
 
 struct Args {
     file: String,
     result: Option<String>,
     label: Option<String>,
     dump: bool,
+    wrap: bool,
 }
 
 /// `Ok(None)` means help was asked for, which is not a failure.
@@ -33,10 +35,12 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut result = None;
     let mut label = None;
     let mut dump = false;
+    let mut wrap = true;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dump-blocks" => dump = true,
+            "--no-wrap" => wrap = false,
             "--result" => {
                 result = Some(it.next().ok_or("--result needs a path")?);
             }
@@ -53,6 +57,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         result,
         label,
         dump,
+        wrap,
     }))
 }
 
@@ -107,6 +112,7 @@ fn main() -> ExitCode {
 
     let mut app = App::new(args.file.clone(), &src);
     app.label = args.label;
+    app.wrap = args.wrap;
     match run(&mut app) {
         Ok(()) => {}
         Err(e) => {
@@ -142,7 +148,7 @@ fn run(app: &mut App) -> io::Result<()> {
         ));
     }
     let mut terminal = ratatui::init();
-    let mut scroll = 0usize;
+    let mut scroll = app::Anchor::default();
     let outcome = loop {
         if let Err(e) = terminal.draw(|f| ui::draw(f, app, &mut scroll)) {
             break Err(e);
@@ -226,6 +232,11 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('u') => app.page(-1, true),
             KeyCode::Char('f') => app.page(1, false),
             KeyCode::Char('b') => app.page(-1, false),
+            // Display-row motion. `j`/`k` move a source line, which is one
+            // keypress out of a line that wraps to thousands of rows; these
+            // reach the middle of one. Not `gj`/`gk`: `g` is already first line.
+            KeyCode::Char('n') => app.move_row(1),
+            KeyCode::Char('p') => app.move_row(-1),
             // In raw mode this arrives as a keystroke and no SIGINT is ever
             // raised, so without this line C-c leaves you trapped.
             KeyCode::Char('c') => app.quit = true,
@@ -254,6 +265,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // widen / narrow along the markdown hierarchy
             KeyCode::Char('+' | '=') => app.expand(),
             KeyCode::Char('-' | '_') => app.contract(),
+            KeyCode::Char('W') => app.toggle_wrap(),
             KeyCode::Char('z') => app.toggle_peek(),
             KeyCode::Char('c') => app.begin_comment(),
             KeyCode::Char('x') => app.remove_at_cursor(),

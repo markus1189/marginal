@@ -24,7 +24,7 @@ nix run . -- PLAN.md
 ## Usage
 
 ```
-marginal FILE.md [--result PATH] [--label NAME]
+marginal FILE.md [--result PATH] [--label NAME] [--no-wrap]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
 marginal --help                    # exits 0
 ```
@@ -215,9 +215,11 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `J` / `K` | move by navigation unit |
 | `w` / `b` | move by **inline node** — the next/previous code span, link, emphasis or text run |
 | `g` / `G` | first / last line |
+| `C-n` / `C-p` | move by **screen row** — reaches the middle of a line that wraps to many rows |
 | `v` | select a range of units — `J`/`K` extends |
 | `V` | select whole lines, ignoring unit boundaries — `j`/`k` extends |
 | `+` / `-` (also `=` / `_`) | widen / narrow along the markdown hierarchy |
+| `W` | soft wrap on / off (on by default; `--no-wrap` starts off) |
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `c` | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
@@ -229,9 +231,27 @@ bound explicitly. Without that binding there is no way out but `q`.
 
 ### Lines wider than the pane
 
-The view does not scroll sideways and does not wrap; a line longer than the pane
-is cut at the right edge, and a dim `›` in the last column says so. Three things
-make that survivable rather than a trap:
+The view soft-wraps: a line longer than the pane continues on the rows below it.
+The view still does not scroll sideways, and never will — every implementation
+surveyed makes the two mutually exclusive.
+
+- **One line, one number.** The line number and the annotation dot sit on a
+  line's first row only; a repeated number would read as a repeated line. The
+  selection bar marks every row, because the line is still selected halfway
+  down it.
+- **Continuation rows line up under the text.** A wrapped list item continues
+  under its own text rather than under the bullet, and a blockquote keeps its
+  indent — otherwise the rest of an item reads as a new top-level one. The
+  padding is display only: the byte columns in the JSON never see it.
+- **An over-wide word breaks at its own separators.** A URL breaks after a `/`,
+  not mid-token. CJK, which has no spaces at all, breaks between characters.
+- **`j`/`k` move a source line, `C-n`/`C-p` a screen row.** One `j` clears a
+  line however tall it wraps; `C-n` reaches the middle of one. `V` keeps
+  extending by line either way.
+
+`W` turns wrapping off, and `--no-wrap` starts that way. Off, a long line is cut
+at the right edge with a dim `›` in the last column, and three things make that
+survivable rather than a trap:
 
 - **`w`/`b` reach what you cannot see.** The interesting columns on a long line
   are its inline node starts, and there are a handful of them, not two hundred.
@@ -240,9 +260,12 @@ make that survivable rather than a trap:
 - **The cursor is never silently gone.** When it sits past the right edge the
   `›` on that row takes the cursor's own colour, and the title carries
   `L{line}:{col}` regardless.
-- **`z` shows the whole thing.** The peek overlay wraps the current selection —
-  read-only, so the one-source-line-per-screen-row mapping the rest of the
-  program rests on is never in question.
+- **`z` shows the whole thing.** The peek overlay wraps the current selection,
+  read-only, whichever mode the source view is in.
+
+Wrapping is a rendering decision and reaches nothing else: `(line, col)` in the
+JSON and the feedback markdown are computed from the source, and a test asserts
+the output is byte-identical with wrapping on and off.
 
 The gutter is a separate column, so the line number, the annotation dot and the
 selection bar cannot be pushed off screen by anything the body does.

@@ -72,16 +72,44 @@ Put it behind a cargo feature so the lean build stays the default.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
 - **horizontal scrolling** — deliberately, now. See below.
-- **soft wrap.** The obvious alternative, and the real fix for prose. It costs
-  an explicit rendered-row → `(line, byte offset)` map, because `lineno =
-  scroll + idx + 1` in `draw_source` stops being invertible. Worth doing behind
-  a toggle if the peek overlay turns out not to be enough; `keep_cursor_visible`
-  then works unchanged, on rows instead of lines, and there is still only one
-  scrolling axis. (tui-textarea has refused word wrap for three years for
-  exactly this reason: *"it assumes height is equal to number of lines"*.)
 - the annotations pane is a fixed six rows and does not scroll; the comment
   editor caps at eight rows and does not scroll either, so the caret vanishes
   in a longer comment.
+
+## Soft wrap
+
+Built, on by default; `W` toggles it and `--no-wrap` starts without it. The
+peek overlay was not enough — it answers "what did I select", not "what does
+this line say", and prose is the common case.
+
+`lineno = scroll + idx + 1` in `draw_source` is gone. The viewport top is an
+`Anchor { line, row }` and only the visible rows are ever wrapped, so a width
+change costs nothing and the 2,476-row line below costs nothing until the
+cursor is inside it. `keep_cursor_visible` works on rows, as predicted, and
+every path through it is O(viewport): the anchor is walked, never indexed.
+
+The primitive is `wrap::wrap_line`, which reports **byte ranges** rather than
+strings. Syntax and selection marks are byte ranges within a line and a row is
+a byte window into it, so rebasing is a clip and a subtraction — and a test
+asserts the rows are an ascending partition that drops no non-space byte, which
+is what makes that exact. `docs/wrapping.md` has the design and the rejected
+alternatives.
+
+Deviations from that design, both simplifications found while building:
+
+- **Paging moves the cursor, not the anchor.** The design proposed inverting
+  the cursor-first relationship; walking the cursor by rows and letting
+  `keep_cursor_visible` follow is simpler and left
+  `paging_moves_by_half_and_whole_viewports` untouched.
+- **`j`/`k` stayed line-wise**, with `C-n`/`C-p` for screen rows. `V` extends a
+  line selection with `j`/`k`, so display-row `j` would have made it stop
+  tracking silently. It also means a pathological line is never a trap — one
+  keypress leaves it however tall it is — so no per-line row cap was needed.
+
+Measured over the `~/Stuff` corpus at a body width of 87: wrapping costs
+**1.307x** more rows than lines, 16.1% of lines wrap at all, and the worst
+single line takes 2,476 rows. The amplification is cheap; that one line is what
+rules out keeping `scroll` a line index.
 
 ## Why long lines are not solved by scrolling sideways
 

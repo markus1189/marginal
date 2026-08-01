@@ -17,6 +17,7 @@ use serde::Serialize;
 use crate::blocks::{self, Block, Pos, Span, TreeNode};
 use crate::editor::Editor;
 use crate::highlight::{self, LineMarks};
+use crate::wrap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -109,7 +110,33 @@ pub struct App {
     /// Rows the peeked text wraps to at the current width. Published by the
     /// renderer for the same reason `viewport` is: only it knows the geometry.
     pub peek_rows: usize,
+    /// Soft wrap in the source view. Off means the old behaviour: lines run
+    /// past the right edge and a marker says so.
+    pub wrap: bool,
+    /// Cells the body column is wide, published by the renderer. Zero until the
+    /// first frame, and zero is also how `wrap_source` is told not to wrap — so
+    /// every row-addressed motion degrades to line-addressed before any
+    /// geometry is known, which is what the headless tests exercise.
+    pub wrap_width: usize,
     next_id: usize,
+}
+
+/// Top of the source viewport: a line, and how many of its wrapped rows sit
+/// above the fold. `row` is 0 for any line short enough not to wrap.
+///
+/// An anchor rather than a document-wide row index: only the visible rows are
+/// ever wrapped, so a width change costs nothing and the 2,476-row line in the
+/// corpus costs nothing until you are inside it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Anchor {
+    pub line: usize,
+    pub row: usize,
+}
+
+impl Default for Anchor {
+    fn default() -> Self {
+        Self { line: 1, row: 0 }
+    }
 }
 
 /// Largest byte index `<= i` that starts a character.
@@ -159,8 +186,111 @@ impl App {
             peek: false,
             peek_scroll: 0,
             peek_rows: 0,
+            wrap: true,
+            wrap_width: 0,
             next_id: 1,
         }
+    }
+
+    // ---- row space ------------------------------------------------------
+    //
+    // A "row" is one screen line. With wrapping off it is a source line and
+    // every function here is the identity; with it on, one source line is one
+    // or more rows and the mapping runs through `wrap_source`.
+
+    /// The line as the screen shows it. Tabs become one space each so a byte
+    /// offset stays a cell offset — see the note in `draw_source`.
+    pub fn display_line(&self, line: usize) -> String {
+        self.line_text(line).replace('\t', " ")
+    }
+
+    /// Rows of line `line` as byte ranges into `display_line`, plus the hanging
+    /// indent its continuation rows carry.
+    pub fn line_rows(&self, line: usize) -> (Vec<(usize, usize)>, usize) {
+        let width = if self.wrap { self.wrap_width } else { 0 };
+        wrap::wrap_source(&self.display_line(line), width)
+    }
+
+    pub fn row_count(&self, line: usize) -> usize {
+        self.line_rows(line).0.len().max(1)
+    }
+
+    /// Which of `line`'s rows holds byte `col - 1`.
+    pub fn cursor_row(&self) -> usize {
+        let (rows, _) = self.line_rows(self.cursor.line);
+        let b = self.cursor.col.saturating_sub(1);
+        rows.iter().rposition(|&(s, _)| s <= b).unwrap_or(0)
+    }
+
+    /// One row up or down from `at`, or `None` at either end of the document.
+    /// Walking, not indexing: nothing here is O(document).
+    pub fn step_row(&self, at: Anchor, down: bool) -> Option<Anchor> {
+        if down {
+            if at.row + 1 < self.row_count(at.line) {
+                return Some(Anchor {
+                    line: at.line,
+                    row: at.row + 1,
+                });
+            }
+            (at.line < self.line_count()).then(|| Anchor {
+                line: at.line + 1,
+                row: 0,
+            })
+        } else if at.row > 0 {
+            Some(Anchor {
+                line: at.line,
+                row: at.row - 1,
+            })
+        } else {
+            (at.line > 1).then(|| Anchor {
+                line: at.line - 1,
+                row: self.row_count(at.line - 1) - 1,
+            })
+        }
+    }
+
+    /// `n` rows from `at`, stopping at the document edge.
+    pub fn walk_rows(&self, at: Anchor, n: usize, down: bool) -> Anchor {
+        let mut a = at;
+        for _ in 0..n {
+            match self.step_row(a, down) {
+                Some(next) => a = next,
+                None => break,
+            }
+        }
+        a
+    }
+
+    /// Move the cursor one display row, keeping its offset within the row where
+    /// the target is long enough. Line-wise `j`/`k` cannot reach the middle of a
+    /// line that wraps to thousands of rows; this can.
+    pub fn move_row(&mut self, dir: isize) {
+        self.drop_region();
+        let (rows, _) = self.line_rows(self.cursor.line);
+        let cur = self.cursor_row();
+        let off = self.cursor.col.saturating_sub(1) - rows[cur].0;
+
+        let here = Anchor {
+            line: self.cursor.line,
+            row: cur,
+        };
+        let Some(to) = self.step_row(here, dir > 0) else {
+            return;
+        };
+        let (target, _) = self.line_rows(to.line);
+        let (s, e) = target[to.row.min(target.len() - 1)];
+        self.cursor.line = to.line;
+        self.cursor.col = s + off.min(e.saturating_sub(s)) + 1;
+        self.snap();
+    }
+
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+        self.status = if self.wrap {
+            "wrap on".into()
+        } else {
+            "wrap off".into()
+        };
     }
 
     pub fn line_count(&self) -> usize {
@@ -389,7 +519,23 @@ impl App {
         } else {
             v.saturating_sub(2).max(1)
         };
-        self.move_line(dir * step as isize);
+        // `viewport` counts rows, so a page is a page of rows. Paging by lines
+        // while wrapping would overshoot by the amplification factor — 1.307x
+        // across the corpus, and far more inside a table.
+        if self.wrap && self.wrap_width > 0 {
+            self.drop_region();
+            let here = Anchor {
+                line: self.cursor.line,
+                row: self.cursor_row(),
+            };
+            let to = self.walk_rows(here, step, dir > 0);
+            let (rows, _) = self.line_rows(to.line);
+            self.cursor.line = to.line;
+            self.cursor.col = rows[to.row.min(rows.len() - 1)].0 + 1;
+            self.snap();
+        } else {
+            self.move_line(dir * step as isize);
+        }
     }
 
     pub fn goto_first(&mut self) {
@@ -716,6 +862,78 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         assert_eq!(a.cursor.line, 19);
         a.page(-1, false); // C-b
         assert_eq!(a.cursor.line, 1);
+    }
+
+    /// 100 columns per line, so every line wraps at any sane pane width.
+    fn wide_doc(lines: usize) -> String {
+        (0..lines)
+            .map(|_| format!("{}\n", "word ".repeat(20)))
+            .collect()
+    }
+
+    /// `j` moves a source line however tall it is; `C-n` moves one screen row,
+    /// which is the only way to put the cursor in the middle of a line that
+    /// wraps to more rows than the viewport has.
+    #[test]
+    fn move_row_walks_inside_a_line_while_move_line_steps_over_it() {
+        let mut a = App::new("w.md".into(), &wide_doc(3));
+        a.wrap_width = 20;
+        let (rows, _) = a.line_rows(1);
+        assert!(rows.len() >= 4, "line did not wrap: {} rows", rows.len());
+
+        a.cursor = Pos::new(1, 1);
+        a.move_row(1);
+        assert_eq!(a.cursor.line, 1, "C-n left the line");
+        assert_eq!(a.cursor.col, rows[1].0 + 1);
+        a.move_row(-1);
+        assert_eq!((a.cursor.line, a.cursor.col), (1, 1));
+
+        a.move_line(1);
+        assert_eq!(a.cursor.line, 2, "j should clear the whole wrapped line");
+    }
+
+    /// `viewport` counts rows, so paging must too — paging by lines while
+    /// wrapping overshoots by however far the lines wrap.
+    #[test]
+    fn paging_counts_rows_not_lines_when_wrapped() {
+        let mut a = App::new("w.md".into(), &wide_doc(50));
+        a.wrap_width = 20;
+        a.viewport = 20;
+        a.cursor = Pos::new(1, 1);
+
+        a.page(1, true); // half a viewport: 10 rows, not 10 lines
+        assert!(a.cursor.line > 1, "paging stalled");
+        assert!(
+            a.cursor.line <= 3,
+            "paged by lines, not rows: landed on line {}",
+            a.cursor.line
+        );
+
+        // …and off it does the old thing, exactly.
+        let mut b = App::new("w.md".into(), &wide_doc(50));
+        b.wrap = false;
+        b.viewport = 20;
+        b.cursor = Pos::new(1, 1);
+        b.page(1, true);
+        assert_eq!(b.cursor.line, 11);
+    }
+
+    /// The walk is over rows, so a line taller than the document is long must
+    /// not make it proportional to that height.
+    #[test]
+    fn row_walking_terminates_on_a_pathologically_tall_line() {
+        let src = format!("short\n{}\nshort\n", "x ".repeat(20_000));
+        let mut a = App::new("huge.md".into(), &src);
+        a.wrap_width = 40;
+        assert!(a.row_count(2) > 900, "expected a very tall line");
+
+        // Off the top of it and back, without walking every row in between.
+        a.cursor = Pos::new(2, 1);
+        a.move_line(1);
+        assert_eq!(a.cursor.line, 3);
+        let top = a.walk_rows(Anchor { line: 3, row: 0 }, 5, false);
+        assert_eq!(top.line, 2, "walking back should land inside the tall line");
+        assert_eq!(top.row, a.row_count(2) - 5);
     }
 
     #[test]
