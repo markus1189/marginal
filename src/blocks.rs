@@ -103,7 +103,10 @@ pub struct TreeNode {
     pub children: Vec<Self>,
 }
 
-fn options() -> Options<'static> {
+/// The parser configuration every view of a document goes through. Shared with
+/// `app`'s tests, which re-parse generated feedback markdown and must see it the
+/// way the rest of the crate does rather than through a second set of options.
+pub fn options() -> Options<'static> {
     let mut o = Options::default();
     o.extension.table = true;
     o.extension.tasklist = true;
