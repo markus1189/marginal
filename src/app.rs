@@ -757,12 +757,35 @@ impl App {
     }
 
     /// The exact source text a span covers.
+    ///
+    /// A span beginning inside a container — a blockquote, an indented list item
+    /// — starts *after* that container's marker, because that is where comrak
+    /// puts the block. Continuation lines have no such column and started at
+    /// byte 0, so the first line came out stripped of its `> ` while every line
+    /// after it kept one; `feedback_markdown` re-quotes line by line, and the
+    /// consumer was handed a quote one level deeper from the second line on,
+    /// having been promised the exact text that was selected.
+    ///
+    /// So when the bytes before the start column are only container chrome, the
+    /// same chrome comes off every line. When they are content — an ordinary
+    /// mid-line selection — continuation lines are left alone, because trimming
+    /// them by the start column would cut into the text.
     pub fn slice(&self, span: Span) -> String {
+        let lead = {
+            let first = self.line_text(span.start.line);
+            floor_boundary(first, span.start.col.saturating_sub(1))
+        };
+        let chrome = self.line_text(span.start.line)[..lead]
+            .chars()
+            .all(|c| c == '>' || c == ' ');
+
         let mut out = Vec::new();
         for line in span.start.line..=span.end.line {
             let text = self.line_text(line);
             let a = if line == span.start.line {
-                floor_boundary(text, span.start.col.saturating_sub(1))
+                lead
+            } else if chrome {
+                (text.len() - text.trim_start_matches(['>', ' ']).len()).min(lead)
             } else {
                 0
             };
@@ -973,6 +996,56 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         a.move_line(1);
         assert_eq!(a.cursor.line, 2, "j should clear the whole wrapped line");
+    }
+
+    /// `slice` started the first line at the span's start column but every line
+    /// after it at byte 0. A block inside a container starts after that
+    /// container's marker, so line one lost its `> ` and the rest kept theirs —
+    /// and `feedback_markdown`, which quotes line by line, then handed the
+    /// consumer a block quoted one level deeper from the second line on.
+    #[test]
+    fn a_multi_line_span_in_a_container_is_quoted_at_one_depth() {
+        let src = "> Note: this only reproduces\n> under load, which is why CI\n> never saw it.\n";
+        let mut a = App::new("q.md".into(), src);
+        commit(&mut a, "why?");
+
+        let quoted = &a.annotations[0].original_text;
+        assert!(
+            quoted.lines().all(|l| !l.starts_with('>')),
+            "container marker survived on some lines: {quoted:?}"
+        );
+
+        let md = a.feedback_markdown();
+        let depths: Vec<usize> = md
+            .lines()
+            .filter(|l| l.starts_with('>'))
+            .map(|l| l.chars().take_while(|c| *c == '>' || *c == ' ').count())
+            .collect();
+        assert!(
+            depths.windows(2).all(|w| w[0] == w[1]),
+            "uneven quote depth {depths:?} in\n{md}"
+        );
+
+        // An indented list item is the same shape with spaces instead of `>`.
+        let nested = "- outer\n  - a nested item that\n    runs onto a second line\n";
+        let mut b = App::new("n.md".into(), nested);
+        b.cursor = Pos::new(2, 3);
+        commit(&mut b, "why?");
+        let q = &b.annotations[0].original_text;
+        assert!(!q.lines().any(|l| l.starts_with("    ")), "{q:?}");
+    }
+
+    /// The other half: a genuine mid-line selection must not have its
+    /// continuation lines trimmed by the start column, which would cut content.
+    #[test]
+    fn a_mid_line_span_keeps_every_byte_of_its_later_lines() {
+        let src = "alpha beta gamma\ndelta epsilon zeta\n";
+        let a = App::new("m.md".into(), src);
+        let span = Span {
+            start: Pos::new(1, 7),
+            end: Pos::new(2, 18),
+        };
+        assert_eq!(a.slice(span), "beta gamma\ndelta epsilon zeta");
     }
 
     /// The comment body was spliced in raw. A comment containing an unclosed
