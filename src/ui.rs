@@ -680,16 +680,6 @@ const STATUS_W: u16 = 28;
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let width = usize::from(area.width);
-    // The status field is a luxury; the key hints are the only documentation
-    // on screen. Below the width where both fit, the status goes.
-    let bare = KEYS[KEYS.len() - 1].chars().count();
-    let status_w = if width >= usize::from(STATUS_W) + bare + 2 {
-        STATUS_W
-    } else {
-        0
-    };
-    // One column for the leading space.
-    let room = width.saturating_sub(usize::from(status_w) + 1);
     let table: &[&str] = if app.mode == Mode::Input {
         &INPUT_KEYS
     } else if app.peek {
@@ -697,11 +687,30 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         &KEYS
     };
+
+    // The status field is a luxury; the key hints are the only documentation on
+    // screen, so the richest rung that fits picks itself first and the status is
+    // kept only if there is still room beside it.
+    //
+    // Deciding the status first — and against the *barest* rung, `q quit` —
+    // made the footer non-monotonic in width: from 36 to 57 columns the
+    // 28-column status field was affordable next to `q quit` and so was always
+    // taken, forcing the barest rung even though dropping the status would have
+    // fitted two rungs more. Widening the terminal from 35 to 36 columns
+    // therefore *removed* the key hints.
+    //
+    // One column for the leading space, one more so the keys never abut the
+    // status field.
     let keys = table
         .iter()
         .copied()
-        .find(|k| k.chars().count() <= room)
+        .find(|k| cells(k) < width)
         .unwrap_or("q");
+    let status_w = if width >= cells(keys) + usize::from(STATUS_W) + 2 {
+        STATUS_W
+    } else {
+        0
+    };
 
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(status_w)]).split(area);
     f.render_widget(
@@ -939,6 +948,37 @@ mod tests {
         assert_eq!(shorten_path("/a/b/c/long.md", 0), "…");
         // multibyte must not be sliced apart
         assert_eq!(shorten_path("/tmp/Prüfen/köde.md", 8), "…köde.md");
+    }
+
+    /// Widening the pane must never take hints away. The status field was
+    /// decided first and against the *barest* rung, so from 36 to 57 columns
+    /// the 28-column field was always affordable next to `q quit` and therefore
+    /// always taken — forcing the barest rung even though dropping it would
+    /// have fitted two rungs more. Going from 35 to 36 columns removed
+    /// `c comment · x remove` from the screen.
+    #[test]
+    fn the_footer_never_loses_hints_as_the_pane_widens() {
+        let rung = |w: u16| -> usize {
+            let mut app = App::new("PLAN.md".into(), DOC);
+            let screen = render(&mut app, w, 12);
+            let footer = screen.lines().last().unwrap_or_default().to_string();
+            // `position` finds the richest rung the line contains, since every
+            // barer one is a suffix of it.
+            KEYS.iter()
+                .position(|k| footer.contains(k))
+                .unwrap_or(KEYS.len())
+        };
+        let mut prev = KEYS.len();
+        for w in 8u16..=140 {
+            let i = rung(w);
+            assert!(
+                i <= prev,
+                "width {w} shows a barer rung than width {}",
+                w - 1
+            );
+            prev = i;
+        }
+        assert!(rung(36) <= rung(35), "35 -> 36 columns lost hints");
     }
 
     /// The full hint line is ~105 columns; in a 95-column pane it was cut
