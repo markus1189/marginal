@@ -101,9 +101,17 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
         // so they win, and before the children so real content still wins.
         match child.kind {
             "heading" => {
+                // From the heading's own start, not from byte 0. A heading is
+                // not always flush left — up to three leading spaces are still
+                // one, and headings inside blockquotes and list items are
+                // ordinary markdown — and measuring the `#` run from byte 0
+                // yielded 0 for every one of them, so `add` dropped the mark and
+                // the marker rendered in the heading's own colour. The adjacent
+                // list-item arm already does exactly this.
                 let l = lines.get(span.start.line - 1).copied().unwrap_or("");
-                let n = heading_marker_len(l);
-                add(out, span.start.line, 0, n, "heading-marker");
+                let from = span.start.col - 1;
+                let n = l.get(from..).map_or(0, heading_marker_len);
+                add(out, span.start.line, from, from + n, "heading-marker");
             }
             "list-item" => {
                 let l = lines.get(span.start.line - 1).copied().unwrap_or("");
@@ -144,6 +152,28 @@ mod tests {
         let m = tags(src, 1);
         assert!(m.contains(&(0, 13, "heading")));
         assert!(m.contains(&(0, 3, "heading-marker")));
+    }
+
+    /// The marker was measured from byte 0 of the line and emitted there, so
+    /// any heading not literally starting with `#` produced a run of length 0
+    /// and `add` dropped the mark — the `#` then rendered in the heading's own
+    /// colour rather than the dimmer marker one. Up to three leading spaces
+    /// still make a heading, and headings inside blockquotes and list items are
+    /// ordinary markdown.
+    #[test]
+    fn a_heading_that_is_not_flush_left_still_has_a_marker() {
+        for (src, from, to) in [
+            ("## Steps\n", 0, 3),
+            ("  # Indented\n", 2, 4),
+            ("> # Quoted\n", 2, 4),
+            ("- # In a list item\n", 2, 4),
+        ] {
+            assert!(
+                tags(src, 1).contains(&(from, to, "heading-marker")),
+                "no marker for {src:?}: {:?}",
+                tags(src, 1)
+            );
+        }
     }
 
     #[test]
