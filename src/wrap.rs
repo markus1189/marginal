@@ -159,6 +159,23 @@ fn units(line: &str) -> Vec<(usize, usize, usize)> {
     out
 }
 
+/// Byte length of the longest prefix of `s` that fits in `limit` cells. Always
+/// a char boundary: it is accumulated a character at a time, never by slicing at
+/// a computed byte.
+fn prefix_cells(s: &str, limit: usize) -> usize {
+    let mut buf = [0u8; 4];
+    let (mut n, mut w) = (0usize, 0usize);
+    for ch in s.chars() {
+        let cw = cells(ch.encode_utf8(&mut buf));
+        if w + cw > limit {
+            break;
+        }
+        w += cw;
+        n += ch.len_utf8();
+    }
+    n
+}
+
 /// Byte offsets inside `word` where a break is acceptable without a space:
 /// after a URL or path separator, and between two adjacent wide characters,
 /// which is the only break CJK offers since it is written without spaces.
@@ -206,16 +223,40 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
 
     let mut rows: Vec<(usize, usize)> = Vec::new();
     let (mut start, mut cur_end, mut w, mut limit) = (0usize, 0usize, 0usize, first);
-    // A break with nothing placed yet would emit a row of pure indentation.
     macro_rules! brk {
         ($at:expr) => {
             if cur_end > start {
                 rows.push((start, cur_end));
                 limit = rest;
+                start = $at;
+                cur_end = $at;
+                w = 0;
+            } else {
+                // Nothing placed yet. Only the leading-indentation unit has zero
+                // width, so `start..$at` is this line's indentation. A row of
+                // pure indentation is not worth a row — but moving `start` past
+                // those bytes leaves them outside every row, and the source view
+                // rebases a mark by clipping it into a row's window, so an
+                // uncovered byte is a mark that renders nowhere and a cursor
+                // that cannot be found. Keep them at the head of the row that
+                // follows instead, and count their cells so it still fits.
+                // Indentation wide enough to fill the pane on its own cannot
+                // share, so it spills into rows of its own first; only the
+                // remainder rides along with the content.
+                let mut p = start;
+                while cells(&line[p..$at]) >= limit {
+                    let n = prefix_cells(&line[p..$at], limit);
+                    if n == 0 {
+                        break;
+                    }
+                    rows.push((p, p + n));
+                    limit = rest;
+                    p += n;
+                }
+                start = p;
+                cur_end = p;
+                w = cells(&line[p..$at]);
             }
-            start = $at;
-            cur_end = $at;
-            w = 0;
         };
     }
 
@@ -224,7 +265,9 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
         if w > 0 && w + ww > limit {
             brk!(s);
         }
-        if ww > limit {
+        // `w` is not always 0 here: a break that kept the indentation carries its
+        // cells forward, and the split below has to account for them.
+        if w + ww > limit {
             // Wider than the pane on its own. Prefer its own break points; only
             // cut mid-token when even those leave something too wide.
             let mut prev = s;
@@ -354,6 +397,8 @@ mod tests {
         ] {
             for width in [1usize, 4, 12, 40] {
                 let rows = wrap_line(line, width, width);
+                // Every byte before the first row's start is a byte in no row.
+                assert_eq!(rows[0].0, 0, "uncovered head in {line:?} at {width}");
                 let mut prev = 0;
                 for &(s, e) in &rows {
                     assert!(s <= e && e <= line.len(), "{line:?} {width} {s}..{e}");
@@ -376,6 +421,40 @@ mod tests {
                     "dropped text in {line:?} at {width}"
                 );
             }
+        }
+    }
+
+    /// A break with nothing placed yet used to move `start` past the line's
+    /// leading indentation without emitting a row for it, so those bytes were in
+    /// no row at all. Three things read that gap: the pretty view drew a nested
+    /// continuation flush against the gutter, `draw_source` rebased a mark on
+    /// those bytes onto nothing, and `move_row` subtracted a row start larger
+    /// than the cursor byte.
+    #[test]
+    fn an_over_wide_first_word_keeps_the_lines_indentation() {
+        let line = "        https://example.com/some/long/path";
+        for width in [20usize, 34, 42, 48] {
+            let rows = wrap_line(line, width, width);
+            assert_eq!(rows[0].0, 0, "uncovered indent at {width}: {rows:?}");
+            let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
+            assert_eq!(kept, line, "dropped bytes at {width}");
+            for &(s, e) in &rows {
+                assert!(cells(&line[s..e]) <= width, "over width: {:?}", &line[s..e]);
+            }
+        }
+        assert!(wrap(line, 48)[0].starts_with("        "), "lost the indent");
+    }
+
+    /// Indentation too wide to share a row still has to land in one.
+    #[test]
+    fn indentation_wider_than_the_pane_spills_into_its_own_rows() {
+        let line = "          x";
+        let rows = wrap_line(line, 4, 4);
+        assert_eq!(rows[0].0, 0);
+        let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
+        assert_eq!(kept, line);
+        for &(s, e) in &rows {
+            assert!(cells(&line[s..e]) <= 4, "over width: {:?}", &line[s..e]);
         }
     }
 
