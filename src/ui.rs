@@ -407,20 +407,39 @@ fn source_title(app: &App, width: u16) -> String {
         app.blocks.len(),
         app.annotations.len(),
     );
-    let budget = usize::from(width).saturating_sub(rest.chars().count() + 3);
+    let budget = usize::from(width).saturating_sub(cells(&rest) + 3);
     format!("{rest}{} ", shorten_path(app.display_name(), budget))
 }
 
 /// Keep the tail of an over-long path — the file name is what identifies it,
 /// the directory prefix is what makes it too long.
+///
+/// `max` is terminal cells, so the path is measured in cells too. Counting
+/// characters under-counts a wide-character path by one per wide character, and
+/// the title then overran the border and was truncated by ratatui from the
+/// *right* — cutting away the file name this function exists to keep, with no
+/// ellipsis to say it had happened.
 fn shorten_path(path: &str, max: usize) -> String {
-    let n = path.chars().count();
-    if n <= max {
+    if cells(path) <= max {
         return path.to_string();
     }
-    // One column goes to the ellipsis that marks the cut.
-    let tail: String = path.chars().skip(n + 1 - max.max(1)).collect();
-    format!("…{tail}")
+    // One column goes to the ellipsis that marks the cut, and below two columns
+    // the ellipsis is all there is room to say.
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let budget = max - 1;
+    let mut buf = [0u8; 4];
+    let (mut w, mut start) = (0usize, path.len());
+    for (i, ch) in path.char_indices().rev() {
+        let cw = cells(ch.encode_utf8(&mut buf));
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        start = i;
+    }
+    format!("…{}", &path[start..])
 }
 
 /// Scroll so the cursor's *row* is on screen. Every path is O(viewport): the
@@ -978,6 +997,37 @@ mod tests {
         let x = buf.area.width - 2;
         assert_eq!(buf[(x, 3)].symbol(), "›");
         assert_eq!(buf[(x, 3)].style().bg, Some(Color::Yellow));
+    }
+
+    /// `width` is terminal cells but the budget and the cut counted characters,
+    /// so a wide-character path was under-counted by one per wide character. The
+    /// title overran the border and ratatui truncated it from the right, taking
+    /// the file name and extension — the very thing `shorten_path` keeps — with
+    /// no ellipsis to show it had happened.
+    #[test]
+    fn the_title_fits_the_border_on_a_wide_character_path() {
+        // The cut itself, in cells rather than characters.
+        assert_eq!(shorten_path("日本語日本語日本.md", 9), "…日本.md");
+        assert_eq!(shorten_path("仕様/設計メモ.md", 20), "仕様/設計メモ.md");
+        assert!(cells(&shorten_path("日本語日本語日本.md", 9)) <= 9);
+
+        // And the whole title, at widths where the fixed prefix fits at all.
+        for name in [
+            "日本語日本語日本語日本語日本語日本語.md",
+            "docs/仕様/設計メモ-第二版.md",
+            "a-perfectly-ordinary-but-quite-long-file-name.md",
+        ] {
+            for w in [80u16, 100, 120] {
+                let app = App::new(name.into(), DOC);
+                let title = source_title(&app, w);
+                assert!(
+                    cells(&title) <= usize::from(w),
+                    "title overruns {w} cells ({}): {title:?}",
+                    cells(&title)
+                );
+                assert!(title.ends_with(".md "), "lost the file name: {title:?}");
+            }
+        }
     }
 
     /// The wrapped half of the same invariant. Rows are windows into the line
