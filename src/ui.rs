@@ -797,7 +797,7 @@ fn draw_peek(f: &mut Frame, area: Rect, app: &mut App) {
 fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Line> = if app.annotations.is_empty() {
         vec![Line::from(Span::styled(
-            "  no annotations yet — v/V select, +/- widen or narrow, c comment",
+            "  no annotations yet — v/V select, +/- widen or narrow, Enter comment",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
@@ -860,12 +860,12 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// 80-column terminal loses the only confirmation `x remove` gives. Under that
 /// budget it documents movement by naming `[/] marks` and not `hjkl`, `w/b`,
 /// `v/V` or `+/-`. Every one of those four moves the cursor somewhere the
-/// reader can already see; `[` and `]` are the only keys that reach an
-/// annotation off screen, which is the whole point of a fringe you work down.
-/// They also answer with `mark 2/5` in the status field this rung has just
-/// bought, so the nine cells they cost name a position the pane could not
-/// otherwise report — the argument that used to buy `v/V` its three cells
-/// here, and the rung below still spends them on `w/b`.
+/// reader can already see; `[` and `]` are the only keys that reach a mark
+/// off screen, which is the whole point of a fringe you work down. They also
+/// answer with `question 2/5` in the status field this rung has just bought,
+/// so the nine cells they cost name a position the pane could not otherwise
+/// report — the argument that used to buy `v/V` its three cells here, and the
+/// rung below still spends them on `w/b`.
 ///
 /// `c comment`, not `Enter comment`, from this rung down: `c` stays bound
 /// (see the dispatch in `main.rs`) and spells the same action four cells
@@ -1047,7 +1047,7 @@ mod tests {
         assert!(screen.contains("   1 ▍# Steps"));
         assert!(screen.contains("   3  - [ ] Add validation to the login form"));
         assert!(screen.contains("no annotations yet"));
-        assert!(screen.contains("c comment"));
+        assert!(screen.contains("Enter comment"));
         assert!(screen.contains("q quit"));
     }
 
@@ -1586,6 +1586,23 @@ mod tests {
             assert!(
                 screen.contains("q quit"),
                 "width {w} lost the quit key:\n{screen}"
+            );
+        }
+    }
+
+    /// The footer is the only documentation on screen, so a binding that never
+    /// appears at the widths the tool is actually used at may as well not
+    /// exist. Adding `[/] marks` to only the three widest variants left it
+    /// invisible at 80 and 90 — found by driving a real 90-column pane, not by
+    /// any test, which is why this one exists.
+    #[test]
+    fn the_mark_keys_are_documented_at_every_usable_width() {
+        for w in [120u16, 95, 90, 80] {
+            let mut app = App::new("PLAN.md".into(), DOC);
+            let screen = render(&mut app, w, 12);
+            assert!(
+                screen.contains("[/] marks"),
+                "width {w} hid the mark keys:\n{screen}"
             );
         }
     }

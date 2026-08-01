@@ -249,6 +249,8 @@ which is what the agent actually reads; `2` is every failure, jq's included.
 | `Enter` (also `c`) | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
+| `Esc` | drop the selection |
+| `q`, `C-c` | quit |
 
 A **mark** is an annotation you have written, or a question the document asks
 that you have not answered yet. The gutter cell between the line number and the
@@ -273,8 +275,6 @@ fenced block are none. Note that this is the inverse of `?\b`, which matches a
 Questions are derived from the source, not authored by you: they never appear in
 `--result` JSON, and a document full of them with no comments is still an
 `approved` decision.
-| `Esc` | drop the selection |
-| `q`, `C-c` | quit |
 
 Raw mode delivers `C-c` as a keystroke and no `SIGINT` is ever raised, so it is
 bound explicitly. Without that binding there is no way out but `q`.
