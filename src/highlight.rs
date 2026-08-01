@@ -34,7 +34,11 @@ fn tag_of(kind: &str) -> Option<&'static str> {
     })
 }
 
-/// Byte length of a heading's leading `#` run plus the space after it.
+/// Byte length of an ATX heading's leading `#` run plus the spaces after it.
+///
+/// Only sound for a heading comrak parsed as ATX, where the run at the
+/// heading's own start column *is* the marker. Asking the same question of a
+/// setext heading measures its text.
 fn heading_marker_len(line: &str) -> usize {
     let hashes = line.bytes().take_while(|b| *b == b'#').count();
     if hashes == 0 {
@@ -111,7 +115,13 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
         // Markers get their own, dimmer tag. Pushed after the node's own mark
         // so they win, and before the children so real content still wins.
         match child.kind {
-            "heading" => {
+            // ATX only. A setext heading is underlined, not opened, so its first
+            // line is ordinary text — and a `#` run measured there is part of
+            // that text: `#hashtag` over `===` had its `#` dimmed as chrome, and
+            // `####### seven` (too many hashes to be ATX at all) lost eight
+            // bytes. comrak already knows which of the two it parsed; the `#`
+            // run alone cannot tell them apart.
+            "heading" if !child.setext => {
                 // From the heading's own start, not from byte 0. A heading is
                 // not always flush left — up to three leading spaces are still
                 // one, and headings inside blockquotes and list items are
@@ -150,19 +160,33 @@ mod tests {
     use super::*;
     use crate::blocks::parse_tree;
 
-    fn tags(src: &str, line: usize) -> Vec<(usize, usize, &'static str)> {
+    fn tags(src: &str, line: usize) -> LineMarks {
         marks(&parse_tree(src), src)
             .get(line - 1)
             .cloned()
             .unwrap_or_default()
     }
 
+    /// Every case in a table, against the *whole* mark list for its first line.
+    /// Whole, because `contains` cannot see a mark that should not be there —
+    /// which is what a marker run over ordinary text is. Every case, because a
+    /// bug in this file is usually a class, and one run should show all of it
+    /// rather than the first member.
+    fn every_case(cases: &[(&str, LineMarks)]) {
+        let bad: Vec<String> = cases
+            .iter()
+            .filter(|(src, want)| tags(src, 1) != *want)
+            .map(|(src, want)| format!("{src:?}\n    want {want:?}\n     got {:?}", tags(src, 1)))
+            .collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
     #[test]
     fn heading_is_tagged_and_its_hashes_are_separate() {
-        let src = "## Steps here\n";
-        let m = tags(src, 1);
-        assert!(m.contains(&(0, 13, "heading")));
-        assert!(m.contains(&(0, 3, "heading-marker")));
+        assert_eq!(
+            tags("## Steps here\n", 1),
+            vec![(0, 13, "heading"), (0, 3, "heading-marker")]
+        );
     }
 
     /// The marker was measured from byte 0 of the line and emitted there, so
@@ -171,20 +195,78 @@ mod tests {
     /// colour rather than the dimmer marker one. Up to three leading spaces
     /// still make a heading, and headings inside blockquotes and list items are
     /// ordinary markdown.
+    ///
+    /// Whole mark lists, not `contains`: the indent boundary is only half
+    /// checked if a fourth space may quietly keep producing heading marks on
+    /// what is by then an indented code block.
     #[test]
     fn a_heading_that_is_not_flush_left_still_has_a_marker() {
-        for (src, from, to) in [
-            ("## Steps\n", 0, 3),
-            ("  # Indented\n", 2, 4),
-            ("> # Quoted\n", 2, 4),
-            ("- # In a list item\n", 2, 4),
-        ] {
-            assert!(
-                tags(src, 1).contains(&(from, to, "heading-marker")),
-                "no marker for {src:?}: {:?}",
-                tags(src, 1)
-            );
-        }
+        every_case(&[
+            (
+                "## Steps\n",
+                vec![(0, 8, "heading"), (0, 3, "heading-marker")],
+            ),
+            (
+                "  # Indented\n",
+                vec![(2, 12, "heading"), (2, 4, "heading-marker")],
+            ),
+            (
+                "   # three spaces\n",
+                vec![(3, 17, "heading"), (3, 5, "heading-marker")],
+            ),
+            // Four is one too many: an indented code block, and nothing about
+            // it is a heading.
+            ("    # four spaces\n", vec![(4, 17, "code")]),
+            (
+                "> # Quoted\n",
+                vec![
+                    (0, 10, "quote"),
+                    (2, 10, "heading"),
+                    (2, 4, "heading-marker"),
+                ],
+            ),
+            (
+                "- # In a list item\n",
+                vec![
+                    (0, 2, "list-marker"),
+                    (2, 18, "heading"),
+                    (2, 4, "heading-marker"),
+                ],
+            ),
+        ]);
+    }
+
+    /// A setext heading is *underlined*, not opened, so its first line is
+    /// ordinary text — and the `#` run was measured there all the same. The
+    /// marker mark then covered real words: `#hashtag` lost its `#` to the
+    /// dimmer marker colour mid-word, and `####### seven` — seven hashes, too
+    /// many to open an ATX heading at all — lost eight bytes. comrak reports
+    /// which of the two forms it parsed; the `#` run alone cannot tell them
+    /// apart, since a valid ATX opener can never begin a setext heading's text.
+    ///
+    /// `contains` could not have caught this: the defect is a mark that should
+    /// not be there, and every mark the old assertions asked for was present.
+    #[test]
+    fn a_setext_heading_has_no_hashes_to_dim() {
+        every_case(&[
+            ("Setext\n===\n", vec![(0, 6, "heading")]),
+            // Flush left misbehaved before the marker was ever moved off byte
+            // 0 — the container cases only widened the class.
+            ("#hashtag\n===\n", vec![(0, 8, "heading")]),
+            ("  #not-atx\n  ---\n", vec![(2, 10, "heading")]),
+            (
+                "> #hashtag\n> ===\n",
+                vec![(0, 10, "quote"), (2, 10, "heading")],
+            ),
+            (
+                "> ####### seven\n> ===\n",
+                vec![(0, 15, "quote"), (2, 15, "heading")],
+            ),
+            (
+                "- #hashtag\n  ===\n",
+                vec![(0, 2, "list-marker"), (2, 10, "heading")],
+            ),
+        ]);
     }
 
     #[test]

@@ -100,6 +100,12 @@ impl Block {
 pub struct TreeNode {
     pub kind: &'static str,
     pub span: Span,
+    /// True only for a setext heading — one underlined with `===` or `---`
+    /// rather than opened by a `#` run, so its first line is ordinary text with
+    /// no marker on it. `kind` cannot carry this: `kind_of` also labels the
+    /// navigation units, and those labels reach `--dump-blocks`, the annotation
+    /// JSON and the status line.
+    pub setext: bool,
     pub children: Vec<Self>,
 }
 
@@ -324,6 +330,7 @@ fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str]) -> Vec<TreeNode> {
             Some(kind) => out.push(TreeNode {
                 kind,
                 span,
+                setext: matches!(&value, NodeValue::Heading(h) if h.setext),
                 children: kids,
             }),
             // Soft/hard breaks and similar: splice their children in rather
@@ -346,6 +353,7 @@ pub fn parse_tree(src: &str) -> TreeNode {
             start: Pos::new(1, 1),
             end: Pos::new(total, line_len(&lines, total).max(1)),
         },
+        setext: false,
         children: walk_tree(root, &lines),
     }
 }
