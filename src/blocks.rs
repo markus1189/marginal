@@ -174,73 +174,89 @@ const fn is_list(v: &NodeValue) -> bool {
 
 fn walk_flat<'a>(node: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut Vec<Block>) {
     for child in node.children() {
-        let value = child.data.borrow().value.clone();
-        let span = norm(child.data.borrow().sourcepos, lines);
-
-        // Containers that are navigated *through*, not annotated as a unit. The
-        // container itself stays reachable via expand-selection.
-        if is_list(&value)
-            || matches!(
-                value,
-                NodeValue::BlockQuote | NodeValue::FootnoteDefinition(_)
-            )
-        {
-            walk_flat(child, lines, depth, out);
-            continue;
-        }
-
-        // A table navigates by row. comrak emits no node for the delimiter row,
-        // so stretch each row to just before the next one; that keeps the block
-        // list gapless and puts `|---|---|` inside the header row, which is
-        // where a reader expects it.
-        if matches!(value, NodeValue::Table(_)) {
-            let rows: Vec<_> = child.children().collect();
-            for (j, row) in rows.iter().enumerate() {
-                let mut rs = norm(row.data.borrow().sourcepos, lines);
-                if let Some(next) = rows.get(j + 1) {
-                    let next_line = norm(next.data.borrow().sourcepos, lines).start.line;
-                    if next_line > rs.end.line + 1 {
-                        let l = next_line - 1;
-                        rs.end = Pos::new(l, line_len(lines, l).max(1));
-                    }
-                }
-                push(out, "table-row", rs, 0);
-            }
-            continue;
-        }
-
-        let Some(kind) = kind_of(&value) else {
-            continue;
-        };
-
-        if kind == "list-item" {
-            // The item's range spans its nested sublist; trim it so item and
-            // sublist never overlap, then descend into the sublist only.
-            let nested = child
-                .children()
-                .find(|c| is_list(&c.data.borrow().value))
-                .map(|c| norm(c.data.borrow().sourcepos, lines).start.line);
-
-            let mut s = span;
-            if let Some(ns) = nested {
-                let l = ns.saturating_sub(1).max(s.start.line);
-                s.end = Pos::new(l, line_len(lines, l).max(1));
-            }
-            push(out, kind, s, depth);
-            for grandchild in child.children() {
-                if is_list(&grandchild.data.borrow().value) {
-                    walk_flat(grandchild, lines, depth + 1, out);
-                }
-            }
-            continue;
-        }
-
-        let level = match &value {
-            NodeValue::Heading(h) => h.level as usize,
-            _ => 0,
-        };
-        push(out, kind, span, level);
+        walk_child(child, lines, depth, out);
     }
+}
+
+/// One child of a container, as navigation units. Split out of `walk_flat` so a
+/// list item can put the blocks that follow its sublist through the same rules,
+/// rather than a second, thinner copy of them.
+fn walk_child<'a>(child: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut Vec<Block>) {
+    let value = child.data.borrow().value.clone();
+    let span = norm(child.data.borrow().sourcepos, lines);
+
+    // Containers that are navigated *through*, not annotated as a unit. The
+    // container itself stays reachable via expand-selection.
+    if is_list(&value)
+        || matches!(
+            value,
+            NodeValue::BlockQuote | NodeValue::FootnoteDefinition(_)
+        )
+    {
+        walk_flat(child, lines, depth, out);
+        return;
+    }
+
+    // A table navigates by row. comrak emits no node for the delimiter row,
+    // so stretch each row to just before the next one; that keeps the block
+    // list gapless and puts `|---|---|` inside the header row, which is
+    // where a reader expects it.
+    if matches!(value, NodeValue::Table(_)) {
+        let rows: Vec<_> = child.children().collect();
+        for (j, row) in rows.iter().enumerate() {
+            let mut rs = norm(row.data.borrow().sourcepos, lines);
+            if let Some(next) = rows.get(j + 1) {
+                let next_line = norm(next.data.borrow().sourcepos, lines).start.line;
+                if next_line > rs.end.line + 1 {
+                    let l = next_line - 1;
+                    rs.end = Pos::new(l, line_len(lines, l).max(1));
+                }
+            }
+            push(out, "table-row", rs, 0);
+        }
+        return;
+    }
+
+    let Some(kind) = kind_of(&value) else {
+        return;
+    };
+
+    if kind == "list-item" {
+        // The item's range spans its nested sublist; trim it so item and
+        // sublist never overlap, then walk the children in order. Descending
+        // into sublists *only* used to drop everything after one: a follow-up
+        // paragraph, a code fence or a second table inside the same item is
+        // neither within the trimmed span nor reached by the recursion, so it
+        // belonged to no unit at all. `block_at` then resolved a cursor on
+        // those lines to the last unit above it -- the sublist's final leaf --
+        // and the annotation was written against that block's lines and text.
+        let nested = child
+            .children()
+            .find(|c| is_list(&c.data.borrow().value))
+            .map(|c| norm(c.data.borrow().sourcepos, lines).start.line);
+
+        let mut s = span;
+        if let Some(ns) = nested {
+            let l = ns.saturating_sub(1).max(s.start.line);
+            s.end = Pos::new(l, line_len(lines, l).max(1));
+        }
+        push(out, kind, s, depth);
+        for grandchild in child.children() {
+            if is_list(&grandchild.data.borrow().value) {
+                walk_flat(grandchild, lines, depth + 1, out);
+            } else if norm(grandchild.data.borrow().sourcepos, lines).start.line > s.end.line {
+                // Content the trimmed span no longer covers.
+                walk_child(grandchild, lines, depth, out);
+            }
+        }
+        return;
+    }
+
+    let level = match &value {
+        NodeValue::Heading(h) => h.level as usize,
+        _ => 0,
+    };
+    push(out, kind, span, level);
 }
 
 fn push(out: &mut Vec<Block>, kind: &'static str, span: Span, level: usize) {
@@ -486,6 +502,32 @@ still para.
                     w[0],
                     w[1]
                 );
+            }
+        }
+    }
+
+    /// Non-overlap was asserted; gapless never was, and the fixtures above
+    /// could not have caught it — none has a block *after* a nested sublist,
+    /// which is the one shape `walk_flat` dropped. An uncovered line is worse
+    /// than unreachable: `block_at` falls back to the last unit above it, so a
+    /// comment typed there is filed against a different block's lines and text.
+    #[test]
+    fn navigation_units_cover_every_non_blank_line_exactly_once() {
+        for src in [
+            DOC,
+            "> quote\n\n| a |\n|---|\n| 1 |\n",
+            "- a\n  - b\n    - c\n",
+            "1. Bump the version\n   - Cargo.toml\n   - flake.nix\n\n   Remember the lock file.\n\n2. Tag and push\n",
+            "- item\n\n  - sub\n\n  ```\n  code\n  ```\n",
+            "- item\n  - sub\n\n  tail para\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
+        ] {
+            let bs = parse(src);
+            for (i, line) in src.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let n = bs.iter().filter(|b| b.contains_line(i + 1)).count();
+                assert_eq!(n, 1, "line {} {line:?} is in {n} units of {src:?}", i + 1);
             }
         }
     }
