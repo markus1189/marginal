@@ -111,14 +111,18 @@ impl Editor {
 
     // ---- movement -------------------------------------------------------
 
+    // Movement does not end history browsing. `browsing` is documented as
+    // "`None` while editing", and moving the cursor is not editing — the four
+    // motions below never cleared it, and these two agreeing with them is what
+    // keeps the stashed draft reachable. Clearing it here stranded the draft:
+    // `history_next` returns early without a `browsing` index, and the next
+    // `history_prev` overwrote the stash with whatever was on display.
     pub fn left(&mut self) {
         self.cursor = self.prev(self.cursor);
-        self.browsing_off();
     }
 
     pub fn right(&mut self) {
         self.cursor = self.next(self.cursor);
-        self.browsing_off();
     }
 
     /// `C-a`
@@ -464,6 +468,35 @@ mod tests {
         assert_eq!(e.text(), "second");
         e.history_next(); // back to what was being typed
         assert_eq!(e.text(), "draft");
+    }
+
+    /// `left`/`right` cancelled browsing; `home`, `end`, `word_left` and
+    /// `word_right` did not. Since `history_next` returns early without a
+    /// `browsing` index, one `C-f` while browsing made the stashed draft
+    /// unreachable by any key, and the next `C-p` overwrote the stash with
+    /// whatever was on display — so the draft was gone for good. These are the
+    /// keys sitting immediately next to the recall keys.
+    #[test]
+    fn a_cursor_motion_does_not_throw_away_the_stashed_draft() {
+        for motion in [
+            Editor::left,
+            Editor::right,
+            Editor::home,
+            Editor::end,
+            Editor::word_left,
+            Editor::word_right,
+        ] {
+            let mut e = Editor::default();
+            e.set("old comment");
+            e.submit();
+
+            e.set("my new draft");
+            e.history_prev();
+            assert_eq!(e.text(), "old comment");
+            motion(&mut e);
+            e.history_next();
+            assert_eq!(e.text(), "my new draft", "draft lost by a cursor motion");
+        }
     }
 
     #[test]
