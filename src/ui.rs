@@ -598,6 +598,17 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         inner_w,
     );
 
+    // The same argument one axis over, and the axis the box loses rows on for
+    // two independent reasons: `draw` caps its height at eight rows, and
+    // `Layout::vertical` squeezes it below even that when the pane is short —
+    // seven rows already do not fit an eighteen-row terminal. Either way
+    // `rows()` outruns `area`, and the row that goes missing is the last one,
+    // which is the one being typed on. `area.height` rather than the cap,
+    // because only the area knows which of the two did the cutting.
+    let inner_h = area.height.saturating_sub(2);
+    let vscroll = u16::try_from(crow.saturating_sub(usize::from(inner_h.saturating_sub(1))))
+        .unwrap_or(u16::MAX);
+
     let rows: Vec<Line> = app
         .editor
         .rows()
@@ -637,7 +648,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     f.render_widget(
-        Paragraph::new(rows).scroll((0, hscroll)).block(
+        Paragraph::new(rows).scroll((vscroll, hscroll)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
@@ -1209,6 +1220,76 @@ mod tests {
                 assert_eq!(sym, g, "caret cut mid-cluster at width {w} on {g:?}");
             }
         }
+    }
+
+    /// A comment of `n` rows, each row a word no other row contains, with the
+    /// caret left at the end of the last one — where typing would put it.
+    fn comment_of_rows(n: usize) -> String {
+        (1..=n)
+            .map(|i| format!("row{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The comment box clipped vertically without scrolling: `draw` caps its
+    /// height at eight rows, and `Layout::vertical` takes more off it than that
+    /// on a short pane — seven rows of comment do not fit an eighteen-row
+    /// terminal. Both cut the *last* row, which is the one being typed on, so
+    /// the caret, the text under it and any marker went missing together.
+    ///
+    /// The sweep starts at nine rows of terminal because below that the box has
+    /// no content row at all — the annotations pane keeps its six whatever else
+    /// is starved — which is a layout-priority defect and not this one.
+    #[test]
+    fn the_row_being_typed_on_is_visible_however_many_rows_the_comment_has() {
+        for h in 9u16..=30 {
+            for n in 1usize..=12 {
+                let mut app = App::new("PLAN.md".into(), DOC);
+                app.begin_comment();
+                app.editor.set(&comment_of_rows(n));
+                let buf = render_buf(&mut app, 40, h);
+                let (_, y, _) = caret_cell(&buf)
+                    .unwrap_or_else(|| panic!("no caret cell at {h} rows, {n} rows of comment"));
+                let line: String = (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                assert!(
+                    line.contains(&format!("row{n}")),
+                    "the caret is not on the row being typed on at {h} rows, {n} rows of comment: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// Scrolling down must not cost the rows above it: the box shows a window
+    /// ending on the row being typed on, not just that row.
+    #[test]
+    fn a_scrolled_comment_box_still_fills_itself_with_the_rows_above() {
+        let mut app = App::new("PLAN.md".into(), DOC);
+        app.begin_comment();
+        app.editor.set(&comment_of_rows(12));
+        let buf = render_buf(&mut app, 40, 30);
+        let rows = comment_box_rows(&buf);
+        // Eight content rows between the two borders, showing rows 5 to 12.
+        assert_eq!(rows.len(), 10, "{rows:?}");
+        let shown: Vec<String> = rows[1..rows.len() - 1]
+            .iter()
+            .map(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim()
+                    .trim_start_matches(['│', '>', ' '])
+                    .trim_end_matches('│')
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            (5..=12).map(|i| format!("row{i}")).collect::<Vec<_>>(),
+            "{shown:?}"
+        );
     }
 
     /// A caret past the end of the line has no grapheme of its own, so it is

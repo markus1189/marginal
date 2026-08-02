@@ -72,9 +72,10 @@ Put it behind a cargo feature so the lean build stays the default.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
 - **horizontal scrolling** — deliberately, now. See below.
-- the annotations pane is a fixed six rows and does not scroll; the comment
-  editor caps at eight rows and does not scroll either, so the caret vanishes
-  in a longer comment.
+- the annotations pane is a fixed six rows and does not scroll. The comment
+  editor still caps at eight, but it scrolls both ways now, so the row being
+  typed on is always on screen — except below a nine-row terminal, where the
+  fixed six leave the box no content row at all to put it on.
 
 ## Pretty mode — soft wrap and aligned tables
 
