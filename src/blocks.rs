@@ -122,6 +122,75 @@ pub fn options() -> Options<'static> {
     o
 }
 
+/// The document split into lines the way markdown ends one — and therefore
+/// the way comrak numbers `sourcepos`. **Every vector that a `sourcepos.line`
+/// indexes has to come from here**, or the two disagree about which line is
+/// which.
+///
+/// `str::lines` is not that split. It breaks on `\n` alone, discarding a `\r`
+/// only when one immediately precedes the newline. The spec ends a line on a
+/// line feed, a carriage return, *or* a carriage-return/line-feed pair, so a
+/// document holding a lone `\r` — one that is not part of a `\r\n` — has one
+/// more line than `str::lines` reports, and every line after it shifts up by
+/// one per such byte. Verified against comrak 0.54: it puts the paragraph of
+/// `"# H\rpara\r"` at line 2, where `str::lines` yields a single line.
+///
+/// The terminator belongs to no line, so column 1 is the line's first byte in
+/// both views and a byte column keeps meaning the same thing. It also means no
+/// line yielded here can contain a `\r`, which is what lets everything
+/// downstream keep splitting its own `\n`-joined text on `\n`.
+pub fn source_lines(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while !rest.is_empty() {
+        let Some(i) = rest.find(['\r', '\n']) else {
+            out.push(rest);
+            break;
+        };
+        out.push(&rest[..i]);
+        let term = if rest[i..].starts_with("\r\n") { 2 } else { 1 };
+        rest = &rest[i + term..];
+    }
+    out
+}
+
+/// Documents whose line endings disagree with each other, and one real shape
+/// per fixture: a heading, a table, a lazy blockquote continuation, both kinds
+/// of code block, a nested list with a tail paragraph, and a multi-byte line.
+///
+/// Here rather than in the test module below because `app` sweeps the same
+/// corpus through `App`, which is where a line vector out of step with comrak
+/// actually reaches the deliverable.
+#[cfg(test)]
+pub const MIXED_ENDINGS: &[&str] = &[
+    "# H\rpara\r",
+    "intro\rrest\n\n# Heading\n\n- item one\n- item two\n",
+    "| a | b |\r|---|---|\r| 1 | 2 |\n\npara\n",
+    "> quote line\r   lazy continuation\n\n- item\r\n- second\r",
+    "```\ncode a\rcode b\n```\n\nafter the fence\n",
+    "    indented\rnot indented any more\n",
+    "- one\r  - nested\r\n\n  tail para\n",
+    "prüfen `köde`\rzweite Zeile mit `Umlaut ö`\n",
+    "text\r\r\nblank line between\n",
+];
+
+/// What `source_lines` must produce, computed the other way round: rewrite
+/// every ending to `\n` first, then split on that. Deliberately a second
+/// implementation and not a second call, so a test comparing the two cannot
+/// inherit a mistake from the one it is checking.
+#[cfg(test)]
+pub fn normalised_lines(src: &str) -> Vec<String> {
+    if src.is_empty() {
+        return Vec::new();
+    }
+    let flat = src.replace("\r\n", "\n").replace('\r', "\n");
+    flat.strip_suffix('\n')
+        .unwrap_or(&flat)
+        .split('\n')
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn line_len(lines: &[&str], line: usize) -> usize {
     lines.get(line.saturating_sub(1)).map_or(0, |l| l.len())
 }
@@ -285,7 +354,7 @@ fn push(out: &mut Vec<Block>, kind: &'static str, span: Span, level: usize) {
 
 /// The flat list of navigation units, ordered by position, ids renumbered.
 pub fn parse(src: &str) -> Vec<Block> {
-    let lines: Vec<&str> = src.lines().collect();
+    let lines = source_lines(src);
     let arena = Arena::new();
     let root = parse_document(&arena, src, &options());
 
@@ -343,7 +412,7 @@ fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str]) -> Vec<TreeNode> {
 
 /// The whole document as a containment hierarchy.
 pub fn parse_tree(src: &str) -> TreeNode {
-    let lines: Vec<&str> = src.lines().collect();
+    let lines = source_lines(src);
     let total = lines.len().max(1);
     let arena = Arena::new();
     let root = parse_document(&arena, src, &options());
@@ -552,9 +621,12 @@ still para.
             "1. Bump the version\n   - Cargo.toml\n   - flake.nix\n\n   Remember the lock file.\n\n2. Tag and push\n",
             "- item\n\n  - sub\n\n  ```\n  code\n  ```\n",
             "- item\n  - sub\n\n  tail para\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
-        ] {
+        ]
+        .into_iter()
+        .chain(MIXED_ENDINGS.iter().copied())
+        {
             let bs = parse(src);
-            for (i, line) in src.lines().enumerate() {
+            for (i, line) in source_lines(src).into_iter().enumerate() {
                 if line.trim().is_empty() {
                     continue;
                 }
@@ -621,6 +693,64 @@ still para.
             flat("# H\r\n\r\npara\r\n"),
             vec![("heading", 1, 1), ("paragraph", 3, 3)]
         );
+    }
+
+    /// Markdown ends a line on `\n`, on `\r\n`, **or on a bare `\r`**, and
+    /// comrak numbers `sourcepos` accordingly. `str::lines` only knows the
+    /// first two, so a document holding a lone `\r` used to yield a line vector
+    /// one entry short from that byte on — and every span below it named a line
+    /// that held someone else's text.
+    #[test]
+    fn source_lines_ends_a_line_where_commonmark_does() {
+        let cases: &[(&str, &[&str])] = &[
+            ("", &[]),
+            ("a", &["a"]),
+            ("a\n", &["a"]),
+            ("a\n\n", &["a", ""]),
+            ("a\nb\n", &["a", "b"]),
+            ("a\r\nb\r\n", &["a", "b"]),
+            ("a\rb\r", &["a", "b"]),
+            // A trailing lone `\r` ends the line it is on; it is not content,
+            // and `str::lines` leaves it in the last line as if it were.
+            ("para\r", &["para"]),
+            // `\r\r\n` is two endings — a bare `\r`, then a `\r\n` — so the
+            // line between them is empty. Pairing greedily would lose it.
+            ("a\r\r\nb\n", &["a", "", "b"]),
+            ("a\n\rb\n", &["a", "", "b"]),
+            // The terminator belongs to no line, so a byte column still counts
+            // from the line's own first byte whichever ending precedes it.
+            ("prüfen\rköde\n", &["prüfen", "köde"]),
+        ];
+        for (src, want) in cases {
+            assert_eq!(source_lines(src), *want, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_lone_carriage_return_ends_a_line_the_way_a_newline_does() {
+        assert_eq!(
+            flat("# H\rpara\r"),
+            vec![("heading", 1, 1), ("paragraph", 2, 2)]
+        );
+        // …and all three endings in one document, which is what a file edited
+        // on two machines actually looks like.
+        assert_eq!(
+            flat("# H\r\n\r\npara\rtail\n"),
+            vec![("heading", 1, 1), ("paragraph", 3, 4)]
+        );
+    }
+
+    /// The same split, arrived at the other way round: normalise all three
+    /// endings to `\n`, *then* split on that. A second implementation rather
+    /// than a second call, so the corpus is held to something that cannot share
+    /// a mistake with `source_lines` — and it is exactly the normalise-at-the-
+    /// boundary design this fix rejected, kept as the oracle it makes a good one
+    /// of. `App` holds its own line vector to the same standard.
+    #[test]
+    fn source_lines_agrees_with_normalising_the_endings_first() {
+        for src in MIXED_ENDINGS {
+            assert_eq!(source_lines(src), normalised_lines(src), "{src:?}");
+        }
     }
 
     // ---- tier 4: hierarchy -------------------------------------------------

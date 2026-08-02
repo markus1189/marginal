@@ -314,7 +314,10 @@ fn strictly_contains(outer: Span, inner: Span) -> bool {
 
 impl App {
     pub fn new(path: String, src: &str) -> Self {
-        let lines: Vec<String> = src.lines().map(std::string::ToString::to_string).collect();
+        let lines: Vec<String> = blocks::source_lines(src)
+            .into_iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let blocks = blocks::parse(src);
         let tree = blocks::parse_tree(src);
         let marks = highlight::marks(&tree, src);
@@ -1206,6 +1209,113 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
             b.slice(b.selection().unwrap()),
             "`parse_document(arena,\nsrc)`"
         );
+    }
+
+    /// `slice` builds `originalText` out of `line_text` calls, one per line the
+    /// span names — so a line vector that disagrees with comrak about which
+    /// line is which does not fail, it quotes a different part of the document,
+    /// under a `startLine` pointing somewhere else again. `str::lines` splits on
+    /// `\n` alone; the markdown spec, and therefore comrak, also ends a line on
+    /// a bare `\r`. One such byte is enough: everything below it was read a line
+    /// too high, so the list item's `originalText` came out empty and the
+    /// closing paragraph was quoted off the end of the file.
+    #[test]
+    fn a_lone_carriage_return_does_not_shift_what_a_span_quotes() {
+        const SRC: &str =
+            "# Title\n\n> quote line\rlazy continuation\n\n- list item alpha\n\nfinal para\n";
+        let a = App::new("t.md".into(), SRC);
+        let got: Vec<(&str, usize, usize, String)> = a
+            .blocks
+            .iter()
+            .map(|b| (b.kind, b.start(), b.end(), a.slice(b.span)))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("heading", 1, 1, "# Title".into()),
+                // The bare `\r` ends line 3; line 4 is a lazy continuation of
+                // the quoted paragraph, and the `> ` chrome it does not repeat
+                // is not there to trim.
+                ("paragraph", 3, 4, "quote line\nlazy continuation".into()),
+                ("list-item", 6, 6, "- list item alpha".into()),
+                ("paragraph", 8, 8, "final para".into()),
+            ]
+        );
+    }
+
+    /// The oracle this defect was found with, as a test: over documents whose
+    /// line endings disagree with each other, every block's `slice` has to
+    /// return exactly the bytes comrak's `sourcepos` names.
+    ///
+    /// Three claims, in the order a failure would propagate:
+    ///
+    /// 1. `App`'s line vector is the document's lines. Checked against
+    ///    `normalised_lines`, a second implementation of the split, so this
+    ///    cannot pass by agreeing with the one under test.
+    /// 2. every column comrak reports indexes the text comrak parsed there.
+    ///    For an inline text run comrak hands over both the position *and* the
+    ///    literal, so `line_text` sliced at that column has to reproduce it —
+    ///    which is the byte-offset invariant, stated by the only party that
+    ///    knows the answer. Counting lines would not catch a drifted column,
+    ///    and columns on a `\n`-only fixture would not catch a line count.
+    /// 3. a block whose span starts in column 1 slices to those lines joined.
+    ///    Column 1 because that is where no container chrome is trimmed off the
+    ///    continuation lines, so the expected value comes from the oracle split
+    ///    rather than from the same `line_text` calls `slice` makes.
+    ///
+    /// The failure mode being ruled out is silence: on a desynchronised
+    /// document every one of these still produces a valid string, of the wrong
+    /// bytes, under a `startLine` naming a line the reviewer never selected.
+    #[test]
+    fn every_block_slices_the_bytes_comrak_named_whatever_ends_the_lines() {
+        use comrak::nodes::NodeValue;
+
+        for src in blocks::MIXED_ENDINGS {
+            let want_lines = blocks::normalised_lines(src);
+            let a = App::new("t.md".into(), src);
+            assert_eq!(a.lines, want_lines, "line vector of {src:?}");
+
+            let arena = comrak::Arena::new();
+            let root = comrak::parse_document(&arena, src, &blocks::options());
+            let mut runs = 0;
+            let mut stack = vec![root];
+            while let Some(n) = stack.pop() {
+                stack.extend(n.children());
+                let data = n.data.borrow();
+                // Text runs only, and only single-line ones. comrak resolves
+                // entities and backslash escapes into `Code` and `Link`
+                // literals, so those are not source bytes; a text run is the
+                // one node that is verbatim, and no fixture uses either.
+                let NodeValue::Text(t) = &data.value else {
+                    continue;
+                };
+                let sp = data.sourcepos;
+                if sp.start.line != sp.end.line {
+                    continue;
+                }
+                let line = a.line_text(sp.start.line);
+                assert!(
+                    sp.end.column <= line.len(),
+                    "{sp:?} overruns {line:?} in {src:?}"
+                );
+                assert_eq!(&line[sp.start.column - 1..sp.end.column], t, "in {src:?}");
+                runs += 1;
+            }
+            assert!(runs > 0, "no text run to check in {src:?}");
+
+            for b in &a.blocks {
+                if b.span.start.col != 1 {
+                    continue;
+                }
+                let mut want: Vec<&str> = want_lines[b.start() - 1..b.end() - 1]
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let last = &want_lines[b.end() - 1];
+                want.push(&last[..b.span.end.col.min(last.len())]);
+                assert_eq!(a.slice(b.span), want.join("\n"), "{b:?} in {src:?}");
+            }
+        }
     }
 
     /// Every span starting in column 1 has an empty lead, so no chrome can be

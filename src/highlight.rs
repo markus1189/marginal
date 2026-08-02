@@ -185,7 +185,7 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
 
 /// One entry per source line, in order.
 pub fn marks(tree: &TreeNode, src: &str) -> Vec<LineMarks> {
-    let lines: Vec<&str> = src.lines().collect();
+    let lines = crate::blocks::source_lines(src);
     let mut out = vec![LineMarks::new(); lines.len()];
     walk(tree, &lines, &mut out);
     out
@@ -473,14 +473,56 @@ mod tests {
 
     #[test]
     fn every_mark_stays_within_its_line() {
-        let src = "# H\n\nPara with `code`.\n\n- item\n\n> quote\n";
-        let lines: Vec<&str> = src.lines().collect();
-        for (i, row) in marks(&parse_tree(src), src).iter().enumerate() {
-            for (a, b, t) in row {
-                assert!(a <= b, "inverted {t} on line {}", i + 1);
-                assert!(*b <= lines[i].len(), "{t} overruns line {}", i + 1);
+        let srcs = [
+            "# H\n\nPara with `code`.\n\n- item\n\n> quote\n",
+            // A bare `\r` is a line ending to comrak but not to `str::lines`,
+            // so a line vector built from the latter runs short and a mark
+            // addressed by comrak's line number overruns — or worse, does not,
+            // and paints the wrong text in silence.
+            "intro\rrest\n\n# H\n\n| a | b |\r|---|---|\n\n- item\n",
+        ];
+        for src in srcs {
+            let lines = crate::blocks::source_lines(src);
+            for (i, row) in marks(&parse_tree(src), src).iter().enumerate() {
+                for (a, b, t) in row {
+                    assert!(a <= b, "inverted {t} on line {} of {src:?}", i + 1);
+                    assert!(
+                        *b <= lines[i].len(),
+                        "{t} overruns line {} of {src:?}",
+                        i + 1
+                    );
+                }
             }
         }
+    }
+
+    /// A mark is a byte range into a line, addressed by comrak's line number.
+    /// A line vector out of step with comrak does not lose the mark — it paints
+    /// it onto whatever text sits at that index instead, which is how a
+    /// `list-marker` came to be reported over `| ` on a table row and over
+    /// `The` in a paragraph. Assert on what each marker mark *covers*, since
+    /// that is the only thing that says it landed on the right line.
+    #[test]
+    fn a_marker_mark_covers_the_marker_it_was_measured_from() {
+        let src = "intro\rrest\n\n## Heading here\n\n- item one\n\n3. ordinal\n";
+        let lines = crate::blocks::source_lines(src);
+        assert_eq!(lines.len(), 8, "{lines:?}");
+        let mut found: Vec<(&str, &str)> = Vec::new();
+        for (i, row) in marks(&parse_tree(src), src).iter().enumerate() {
+            for (a, b, t) in row {
+                if t.ends_with("marker") {
+                    found.push((t, &lines[i][*a..*b]));
+                }
+            }
+        }
+        assert_eq!(
+            found,
+            vec![
+                ("heading-marker", "## "),
+                ("list-marker", "- "),
+                ("list-marker", "3. ")
+            ]
+        );
     }
 
     #[test]
