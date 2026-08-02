@@ -48,8 +48,15 @@ fn heading_marker_len(line: &str) -> usize {
     hashes + rest.len() - rest.trim_start_matches(' ').len()
 }
 
-/// Byte length of a list item's marker: bullet or ordinal, trailing spaces, and
-/// a task checkbox if present. Measured from `from` within `line`.
+/// Byte length of a list item's marker: bullet or ordinal, trailing whitespace,
+/// and a task checkbox if present. Measured from `from` within `line`.
+///
+/// The fallback only — an item whose content begins on its start line is
+/// measured against comrak's own idea of where that content begins, in `walk`.
+/// This runs for the items that have no content there at all: `-` on its own
+/// line, or `- [x]` with nothing after it. Nothing but a checkbox can follow the
+/// marker in that case, since any other content would be a child node on this
+/// very line, so the rule below is never asked a question it can get wrong.
 fn list_marker_len(line: &str, from: usize) -> usize {
     let Some(rest) = line.get(from..) else {
         return 0;
@@ -67,13 +74,13 @@ fn list_marker_len(line: &str, from: usize) -> usize {
         }
         i += 1;
     }
-    while b.get(i) == Some(&b' ') {
+    while b.get(i).is_some_and(|c| matches!(c, b' ' | b'\t')) {
         i += 1;
     }
-    // Task checkbox. The middle byte has to be a real task marker: without that
-    // test any one-character bracket run matched, so `- [a] text` -- a shortcut
-    // reference label, which produces no link node to override it -- was tagged
-    // as list chrome up to the closing bracket.
+    // Task checkbox. The middle byte has to be a real task marker, and the
+    // bracket pair has to be followed by whitespace or the end of the line --
+    // both are what comrak's tasklist scanner demands, and it is the second that
+    // makes this a checkbox rather than the opening of ordinary text.
     //
     // Byte-safe: `[`, the marker and `]` are all ASCII, and no byte of a
     // multi-byte sequence is ever below 0x80, so `i += 3` cannot land
@@ -82,9 +89,10 @@ fn list_marker_len(line: &str, from: usize) -> usize {
         && b.get(i + 1)
             .is_some_and(|c| matches!(c, b' ' | b'x' | b'X'))
         && b.get(i + 2) == Some(&b']')
+        && b.get(i + 3).is_none_or(|c| matches!(c, b' ' | b'\t'))
     {
         i += 3;
-        while b.get(i) == Some(&b' ') {
+        while b.get(i).is_some_and(|c| matches!(c, b' ' | b'\t')) {
             i += 1;
         }
     }
@@ -135,10 +143,38 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
                 add(out, span.start.line, from, from + n, "heading-marker");
             }
             "list-item" => {
+                // The marker ends where the item's content begins, and comrak
+                // already reports that: the first child's start column is placed
+                // after the bullet, its padding *and* the task checkbox, because
+                // the tasklist extension moves that paragraph's start column
+                // past the checkbox it consumed. Measuring the marker instead
+                // meant re-deciding whether a bracket pair was a checkbox, and
+                // the lexical rule disagreed with comrak four ways: `- [x]and`
+                // is a plain item whose text is `[x]and` (no whitespace after
+                // the `]`, so no checkbox) and lost five bytes to list chrome;
+                // `-\t[x] a` and `- [x]\ttab` are task items whose checkbox the
+                // space-only skip never reached; and `-     [x] a` is an item
+                // holding an indented code block whose first line is `[x] a`,
+                // dimmed as a marker. `- [x](b) t` was wrong too, and only
+                // looked right because the `link` mark lands on top of it.
+                //
+                // Knowing merely *that* comrak parsed a task item would not
+                // settle any of these — the question is where the marker ends,
+                // and the child's column answers it directly.
                 let l = lines.get(span.start.line - 1).copied().unwrap_or("");
                 let from = span.start.col - 1;
-                let n = list_marker_len(l, from);
-                add(out, span.start.line, from, from + n, "list-marker");
+                let to = child
+                    .children
+                    .first()
+                    .filter(|c| c.span.start.line == span.start.line)
+                    .map_or_else(
+                        // No content on this line to end the marker: `-` alone,
+                        // or `- [x]` with nothing after it.
+                        || from + list_marker_len(l, from),
+                        |c| c.span.start.col - 1,
+                    )
+                    .min(l.len());
+                add(out, span.start.line, from, to, "list-marker");
             }
             _ => {}
         }
@@ -277,11 +313,64 @@ mod tests {
 
     #[test]
     fn task_checkbox_counts_as_part_of_the_marker() {
-        let src = "- [ ] Add validation\n";
-        assert!(tags(src, 1).contains(&(0, 6, "list-marker")));
-        for done in ["- [x] Done\n", "- [X] Done\n"] {
-            assert!(tags(done, 1).contains(&(0, 6, "list-marker")), "{done:?}");
-        }
+        every_case(&[
+            ("- [ ] Add validation\n", vec![(0, 6, "list-marker")]),
+            ("- [x] Done\n", vec![(0, 6, "list-marker")]),
+            ("- [X] Done\n", vec![(0, 6, "list-marker")]),
+            ("1. [x] ordered\n", vec![(0, 7, "list-marker")]),
+            (
+                "> - [x] quoted\n",
+                vec![(0, 14, "quote"), (2, 8, "list-marker")],
+            ),
+        ]);
+        // A sublist item measures from its own indent, and its checkbox with it.
+        assert_eq!(
+            tags("- outer\n  - [x] inner\n", 2),
+            vec![(2, 8, "list-marker")]
+        );
+    }
+
+    /// A bracket pair is only a checkbox if whitespace or the end of the line
+    /// follows the `]` — comrak's tasklist scanner demands it, and the rule here
+    /// did not. `- [x]and` is therefore a plain item whose text is `[x]and`, and
+    /// all five bytes of `- [x]` were painted as list chrome over the front of a
+    /// word. `- [x](b) t` was tagged just as wrongly and only looked right
+    /// because the `link` mark lands on top of it.
+    ///
+    /// The measurement now ends where comrak says the item's content begins,
+    /// which settles three more disagreements the byte scan could not: the two
+    /// tab cases, where the space-only skip never reached the checkbox at all,
+    /// and `-     [x] a`, which is five spaces of padding — one past the point
+    /// where the rest becomes an indented code block, so `[x] a` is *code* and
+    /// was being dimmed as a marker.
+    ///
+    /// Whole mark lists, not `contains`: every one of these is a marker that
+    /// reaches too far or not far enough, and both are invisible to a `contains`
+    /// asking for a mark that is present either way.
+    #[test]
+    fn a_checkbox_needs_whitespace_after_it_to_be_one() {
+        every_case(&[
+            // Not checkboxes: comrak parsed every one of these as a plain item
+            // whose text starts at the `[`.
+            ("- [x]and\n", vec![(0, 2, "list-marker")]),
+            ("- [a] text\n", vec![(0, 2, "list-marker")]),
+            ("- [x](b) t\n", vec![(0, 2, "list-marker"), (2, 8, "link")]),
+            // Five spaces after the bullet: an indented code block, not a task.
+            (
+                "-     [x] a\n",
+                vec![(0, 6, "list-marker"), (6, 11, "code")],
+            ),
+            // Real task items whose checkbox is reached across a tab.
+            ("-\t[x] a\n", vec![(0, 6, "list-marker")]),
+            ("- [x]\ttab after\n", vec![(0, 6, "list-marker")]),
+            // comrak's scanner consumes exactly one space after the `]`; the
+            // second belongs to the paragraph, whose text is " a".
+            ("-  [x]  a\n", vec![(0, 7, "list-marker")]),
+            // No content at all on the line, so there is no child column to
+            // measure against and the byte scan answers instead.
+            ("- [x]\n", vec![(0, 5, "list-marker")]),
+            ("-\n", vec![(0, 1, "list-marker")]),
+        ]);
     }
 
     /// The rule asked only for a bracket pair with one byte between, never that
