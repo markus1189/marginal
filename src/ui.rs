@@ -13,6 +13,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::app::{Anchor, App, Mode};
 use crate::wrap::{cells, wrap, Piece, Row};
@@ -511,6 +512,54 @@ fn keep_cursor_visible(app: &App, scroll: &mut Anchor, viewport: usize) {
     }
 }
 
+/// The comment editor's first-row prompt. Continuation rows draw two spaces, so
+/// two cells is what every row of the box spends before its text either way.
+const PROMPT: &str = "> ";
+
+/// The horizontal scroll that leaves the caret grapheme wholly on screen.
+///
+/// `prompt` and `before` are everything the row draws to the left of the caret;
+/// `caret` is the grapheme under it, empty when the caret sits past the end of
+/// the line and a space is drawn instead. Two properties of ratatui's
+/// `LineTruncator` decide the answer, and neither of them is about the caret's
+/// left cell:
+///
+/// - a grapheme that does not fit whole is not half-drawn. The truncator
+///   `break`s out of the line, so a two-cell caret placed in the last column is
+///   not clipped to one column — it is dropped, along with everything after it.
+///   The caret's *right* cell has to be inside the pane too.
+/// - `trim_offset` skips whole graphemes, so an offset landing inside a wide one
+///   is rounded **down** and the row is drawn one cell to the right of where it
+///   was asked for. Rounding **up** to an offset the truncator can reach is what
+///   keeps the arithmetic here and the arithmetic on screen the same one.
+///
+/// Widths come from `str::cell_width`, not `wrap::cells`, for the reason
+/// `cac34c1` gives: they disagree by one column per halfwidth katakana dakuten,
+/// and only the former is what ratatui lays the row out with.
+fn caret_hscroll(prompt: &str, before: &str, caret: &str, inner_w: u16) -> u16 {
+    // Each cumulative grapheme width is an offset `trim_offset` can land on
+    // exactly, and nothing between two of them is.
+    let mut x = 0u16;
+    let stops: Vec<u16> = std::iter::once(0)
+        .chain(
+            prompt
+                .graphemes(true)
+                .chain(before.graphemes(true))
+                .map(|g| {
+                    x = x.saturating_add(g.cell_width());
+                    x
+                }),
+        )
+        .collect();
+    // `x` is now the caret's left cell, and the caret claims `caret_w` from it.
+    // An empty `caret` is the end-of-line space, one cell like any other.
+    let caret_w = caret.cell_width().max(1);
+    let need = x.saturating_add(caret_w).saturating_sub(inner_w);
+    // `x` is itself a stop, so this only fails when the caret is wider than the
+    // whole pane — where scrolling it flush left is the best there is.
+    stops.into_iter().find(|&s| s >= need).unwrap_or(x)
+}
+
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let range = match app.selection() {
         Some(s) if s.start.line == s.end.line && s.start.col == 1 => format!("L{}", s.start.line),
@@ -538,13 +587,16 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     // nothing. Scrolling rather than wrapping because the box's height is
     // computed from `rows().len()`, so a wrapped line would overflow it
     // vertically and be clipped again, one axis over.
-    let inner_w = usize::from(area.width.saturating_sub(2));
+    let inner_w = area.width.saturating_sub(2);
     let all_rows = app.editor.rows();
     let cur = all_rows.get(crow).copied().unwrap_or("");
-    // Two cells for the prompt.
-    let caret_x = 2 + cells(&cur[..ccol.min(cur.len())]);
-    let hscroll =
-        u16::try_from(caret_x.saturating_sub(inner_w.saturating_sub(1))).unwrap_or(u16::MAX);
+    let ccol = ccol.min(cur.len());
+    let hscroll = caret_hscroll(
+        PROMPT,
+        &cur[..ccol],
+        cur[ccol..].graphemes(true).next().unwrap_or(""),
+        inner_w,
+    );
 
     let rows: Vec<Line> = app
         .editor
@@ -553,17 +605,22 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, text)| {
             let prompt = Span::styled(
-                if i == 0 { "> " } else { "  " },
+                if i == 0 { PROMPT } else { "  " },
                 Style::default().fg(Color::Yellow),
             );
             let mut spans = vec![prompt];
             if i == crow {
                 // Draw the caret as a cell so it is visible on any terminal,
-                // including one sitting past the end of the line.
+                // including one sitting past the end of the line. One *grapheme
+                // cluster*, not one char: a char stops after the first codepoint
+                // of a ZWJ sequence or of a base plus a combining mark, which
+                // both styles half a glyph and — because a span is segmented on
+                // its own — hands ratatui two clusters where the text has one,
+                // changing what the row is as wide as.
                 let c1 = text[ccol..]
-                    .char_indices()
-                    .nth(1)
-                    .map_or(text.len(), |(n, _)| ccol + n);
+                    .graphemes(true)
+                    .next()
+                    .map_or(text.len(), |g| ccol + g.len());
                 spans.extend(segments(
                     text,
                     &[(ccol, c1.max(ccol), caret)],
@@ -1040,35 +1097,157 @@ mod tests {
         assert_eq!(shorten_path("/tmp/Prüfen/köde.md", 8), "…köde.md");
     }
 
+    /// Rows of the comment box. It is the only block with a yellow border, so
+    /// its left edge names them — top border, content, bottom border.
+    fn comment_box_rows(buf: &ratatui::buffer::Buffer) -> Vec<u16> {
+        let rows: Vec<u16> = (0..buf.area.height)
+            .filter(|&y| buf[(0, y)].style().fg == Some(Color::Yellow))
+            .collect();
+        assert!(rows.len() >= 3, "comment box not found: {rows:?}");
+        rows
+    }
+
+    /// The caret inside the comment box, as `(x, y, symbol)`: the first cell
+    /// painted in the caret's colours. `None` when it never reached the buffer,
+    /// which is the whole failure mode under test — a `LineTruncator` that
+    /// cannot fit a grapheme does not clip it, it drops the rest of the line.
+    fn caret_cell(buf: &ratatui::buffer::Buffer) -> Option<(u16, u16, String)> {
+        comment_box_rows(buf).into_iter().find_map(|y| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].style().bg == Some(Color::Yellow))
+                .map(|x| (x, y, buf[(x, y)].symbol().to_string()))
+        })
+    }
+
+    /// Comment texts whose caret arithmetic differs. `ｶﾞ` is here because
+    /// `wrap::cells` and ratatui's `cell_width` disagree about it by one column
+    /// (see `cac34c1`), so a scroll measured with the former is short by a
+    /// column per pair.
+    const CARET_TEXTS: [(&str, &str); 5] = [
+        (
+            "ascii",
+            "the quick brown fox jumps over the lazy dog again and again",
+        ),
+        (
+            "cjk",
+            "漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢漢",
+        ),
+        ("emoji", "👨‍👩‍👧‍👦❤️👍🏽👨‍👩‍👧‍👦❤️👍🏽👨‍👩‍👧‍👦❤️👍🏽👨‍👩‍👧‍👦❤️👍🏽"),
+        ("mixed", "ab漢cd👍🏽ef漢gh❤️ij漢kl👨‍👩‍👧‍👦mn漢op qr漢st uv漢wx"),
+        ("dakuten", "ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ"),
+    ];
+
+    /// A named caret position, as the motion that reaches it from the end.
+    type CaretPos = (&'static str, fn(&mut crate::editor::Editor));
+
+    /// Caret positions reachable by a binding, `set` having left it at the end.
+    /// `left` is the interesting one: it is the only one that parks the caret
+    /// *on* the last grapheme rather than on the space past it, and a space is
+    /// one cell whatever the text is made of.
+    const CARET_POSITIONS: [CaretPos; 6] = [
+        ("end", |_| {}),
+        ("home", crate::editor::Editor::home),
+        ("word_left", crate::editor::Editor::word_left),
+        ("word_left*2", |e| {
+            e.word_left();
+            e.word_left();
+        }),
+        ("home+word_right", |e| {
+            e.home();
+            e.word_right();
+        }),
+        ("end-1", crate::editor::Editor::left),
+    ];
+
     /// `Editor::rows` splits on `\n` only, so a comment typed without `C-j` is
     /// one row however long. With no wrap and no scroll the paragraph was
     /// clipped at the border and the caret — a styled cell like any other — was
     /// clipped with it, so everything typed past the edge happened blind. The
     /// source view protects the same invariant with a marker; the comment box
     /// had nothing.
+    ///
+    /// The scroll that fixed that was a cell count taken against the caret's
+    /// *left* cell, which is right for ASCII and wrong for everything wider.
+    /// Hence the sweep: 5 texts × 6 caret positions × every width from 4 to 120.
     #[test]
     fn the_comment_caret_stays_on_screen_however_long_the_comment() {
-        // The comment box is the only block with a yellow border, so its left
-        // edge names its rows: top, the single content row, bottom.
-        let caret_row = |buf: &ratatui::buffer::Buffer| -> u16 {
-            let edge: Vec<u16> = (0..buf.area.height)
-                .filter(|&y| buf[(0, y)].style().fg == Some(Color::Yellow))
-                .collect();
-            assert_eq!(edge.len(), 3, "comment box not found: {edge:?}");
-            edge[1]
-        };
+        for (tname, text) in CARET_TEXTS {
+            for (pname, pos) in CARET_POSITIONS {
+                for w in 4u16..=120 {
+                    let mut app = App::new("PLAN.md".into(), DOC);
+                    app.begin_comment();
+                    app.editor.set(text);
+                    pos(&mut app.editor);
+                    let buf = render_buf(&mut app, w, 20);
+                    assert!(
+                        caret_cell(&buf).is_some(),
+                        "no caret cell at width {w}, text {tname}, caret at {pname}"
+                    );
+                }
+            }
+        }
+    }
 
-        for w in [30u16, 60, 100] {
-            for len in [1usize, 40, 300] {
+    /// The caret cell must hold the whole cluster the caret sits on. It was cut
+    /// with `char_indices().nth(1)`, which is the first *codepoint*: for a ZWJ
+    /// family or a skin-tone modifier that styles a fragment and — because a
+    /// span is segmented on its own — hands ratatui several clusters where the
+    /// text has one, so the row is laid out at a width the scroll never
+    /// accounted for.
+    #[test]
+    fn the_caret_covers_the_whole_grapheme_cluster_it_sits_on() {
+        for g in ["a", "漢", "👨‍👩‍👧‍👦", "❤️", "👍🏽", "ｶﾞ"] {
+            let text = g.repeat(20);
+            for w in 6u16..=60 {
                 let mut app = App::new("PLAN.md".into(), DOC);
                 app.begin_comment();
-                app.editor.set(&"x".repeat(len));
+                app.editor.set(&text);
+                app.editor.home();
                 let buf = render_buf(&mut app, w, 20);
-                let y = caret_row(&buf);
-                assert!(
-                    (0..buf.area.width).any(|x| buf[(x, y)].style().bg == Some(Color::Yellow)),
-                    "caret off-screen at width {w} with {len} characters typed"
-                );
+                let (_, _, sym) = caret_cell(&buf)
+                    .unwrap_or_else(|| panic!("no caret cell at width {w} on {g:?}"));
+                assert_eq!(sym, g, "caret cut mid-cluster at width {w} on {g:?}");
+            }
+        }
+    }
+
+    /// A caret past the end of the line has no grapheme of its own, so it is
+    /// drawn as a space — one cell wide however wide the text before it is.
+    #[test]
+    fn the_caret_past_the_end_of_a_line_is_a_space() {
+        for g in ["a", "漢", "👨‍👩‍👧‍👦"] {
+            let mut app = App::new("PLAN.md".into(), DOC);
+            app.begin_comment();
+            app.editor.set(&g.repeat(20));
+            let buf = render_buf(&mut app, 30, 20);
+            let (_, _, sym) = caret_cell(&buf).expect("no caret cell");
+            assert_eq!(sym, " ", "end-of-line caret on {g:?}");
+        }
+    }
+
+    /// `caret_hscroll` never scrolls the caret off the left edge to get it off
+    /// the right one, and never asks for an offset ratatui would round down —
+    /// every answer is a cumulative grapheme width of what precedes the caret.
+    #[test]
+    fn caret_hscroll_lands_on_a_reachable_offset_left_of_the_caret() {
+        for before in ["", "ab", "漢漢漢", "a漢b👍🏽c", "ｶﾞｶﾞｶﾞ"] {
+            let mut stops = vec![0u16];
+            let mut x = 0u16;
+            for g in PROMPT.graphemes(true).chain(before.graphemes(true)) {
+                x += g.cell_width();
+                stops.push(x);
+            }
+            for caret in ["a", "漢", ""] {
+                for inner_w in 1u16..=40 {
+                    let h = caret_hscroll(PROMPT, before, caret, inner_w);
+                    assert!(stops.contains(&h), "{h} is not a reachable offset");
+                    assert!(h <= x, "scrolled past the caret at inner width {inner_w}");
+                    let caret_w = caret.cell_width().max(1);
+                    assert!(
+                        caret_w > inner_w || x - h + caret_w <= inner_w,
+                        "caret {caret:?} after {before:?} overflows inner width {inner_w}"
+                    );
+                }
             }
         }
     }

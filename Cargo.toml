@@ -10,6 +10,11 @@ ratatui = "0.30"
 crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already in the tree under ratatui (which segments every span with it), so the
+# direct dependency costs no new crate. `chars()` is not a substitute: a ZWJ
+# sequence and a base-plus-combining-mark are each one cell cluster and several
+# chars, and the caret has to cover the cluster ratatui will render.
+unicode-segmentation = "1.13"
 
 [profile.release]
 opt-level = 2
