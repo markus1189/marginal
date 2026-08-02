@@ -771,10 +771,20 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// narrower pane it used to be cut mid-word, losing `c comment · x remove ·
 /// q quit` — precisely the part a first-time reader needs. Whichever variant
 /// fits the room available wins, and `q quit` survives to the very last.
+///
+/// The table also sets where the status field starts appearing: `status_floor`
+/// reads the floor off these widths, and for `KEYS` it is the third rung that
+/// decides it — 50 cells, so 80 columns. Widen that rung by one cell and an
+/// 80-column terminal loses the only confirmation `x remove` gives. Under that
+/// budget it documents `w/b` and `v/V` and not `hjkl` or `+/-`: `hjkl` is the
+/// one group in the table with a second binding — the arrow keys — and the
+/// rung below it already goes without, while `v` and `V` answer with `block
+/// selection — J/K to extend` in the status field this rung has just bought,
+/// so the three cells they cost name three more keys than they spell.
 const KEYS: [&str; 6] = [
     "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · c comment · x remove · q quit",
     "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · c comment · x remove · q quit",
-    "hjkl · w/b · v/V · +/- · z peek · c comment · x remove · q quit",
+    "w/b · v/V · z peek · c comment · x remove · q quit",
     "w/b · z peek · c comment · x remove · q quit",
     "c comment · x remove · q quit",
     "q quit",
@@ -807,11 +817,11 @@ fn hints_and_status_w(keys: &str) -> usize {
 /// That floor is also the lowest one the two monotonicities allow: one column
 /// below it the field only fits beside a rung barer than the one that pane
 /// already shows, so buying it there would take hints away from a *widening*
-/// pane. For `KEYS` the floor is 93, and 80 columns keeps the hints instead —
-/// at 80 the rung on screen is 63 cells wide and the field would force the
-/// 44-cell one.
+/// pane. For `KEYS` the floor is 80: at 80 columns the rung the hints alone
+/// would pick is the 50-cell one, and 50 + 30 is exactly the room an 80-column
+/// pane has, so the field costs that pane nothing. At 79 it would cost a rung.
 ///
-/// Derived, never written down. A hard-coded 93 is right for `KEYS` today and
+/// Derived, never written down. A hard-coded 80 is right for `KEYS` today and
 /// wrong the moment a hint string is edited — and `INPUT_KEYS` and `PEEK_KEYS`
 /// have floors of their own, 53 and 58.
 fn status_floor(table: &[&str]) -> usize {
@@ -1401,8 +1411,13 @@ mod tests {
         sweep("INPUT_KEYS", App::begin_comment, &INPUT_KEYS);
         sweep("PEEK_KEYS", |a| a.peek = true, &PEEK_KEYS);
 
-        // The width that motivated the reserve: `x remove` has no undo and no
-        // prompt, and 140 columns is where the field used to be missing.
+        // The widths that motivated the reserve: `x remove` has no undo and no
+        // prompt, and the field used to be missing at both of the commonest
+        // terminal sizes. 80 is an anchor on the rung table, not just on the
+        // reserve — the floor is derived, so a third rung one cell wider than
+        // its 50-cell budget puts the field out of reach of an 80-column pane
+        // again without touching a line of the footer's arithmetic.
+        assert!(footer_at(|_| {}, &KEYS, 80).1, "no status at 80 columns");
         assert!(footer_at(|_| {}, &KEYS, 140).1, "no status at 140 columns");
     }
 
