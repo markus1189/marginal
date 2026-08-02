@@ -716,6 +716,48 @@ const PEEK_KEYS: [&str; 2] = ["j/k scroll · z or Esc closes", "z closes"];
 
 const STATUS_W: u16 = 28;
 
+/// What a rung costs on its own: one column of leading space, then the hints.
+fn hints_w(keys: &str) -> usize {
+    1 + cells(keys)
+}
+
+/// …and what it costs with the status field beside it, one column between the
+/// two so they never abut.
+fn hints_and_status_w(keys: &str) -> usize {
+    hints_w(keys) + 1 + usize::from(STATUS_W)
+}
+
+/// The narrowest pane that shows the status field, read off the rung table.
+///
+/// Rung `i` is what the hints alone would pick for every width from
+/// `hints_w(table[i])` up to `hints_w(table[i - 1]) - 1`; wider than that and
+/// the fuller rung above takes over. The field is free — costs no rung —
+/// exactly where `hints_and_status_w(table[i])` still lands inside rung `i`'s
+/// own band, and the floor is the narrowest such width in the table. The first
+/// rung's band has no ceiling, so a candidate always exists.
+///
+/// That floor is also the lowest one the two monotonicities allow: one column
+/// below it the field only fits beside a rung barer than the one that pane
+/// already shows, so buying it there would take hints away from a *widening*
+/// pane. For `KEYS` the floor is 93, and 80 columns keeps the hints instead —
+/// at 80 the rung on screen is 63 cells wide and the field would force the
+/// 44-cell one.
+///
+/// Derived, never written down. A hard-coded 93 is right for `KEYS` today and
+/// wrong the moment a hint string is edited — and `INPUT_KEYS` and `PEEK_KEYS`
+/// have floors of their own, 53 and 58.
+fn status_floor(table: &[&str]) -> usize {
+    let mut floor = usize::MAX;
+    let mut ceiling = usize::MAX; // nothing is fuller than the first rung
+    for keys in table {
+        if hints_and_status_w(keys) <= ceiling {
+            floor = floor.min(hints_and_status_w(keys));
+        }
+        ceiling = hints_w(keys) - 1;
+    }
+    floor
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let width = usize::from(area.width);
     let table: &[&str] = if app.mode == Mode::Input {
@@ -726,9 +768,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         &KEYS
     };
 
-    // The status field is a luxury; the key hints are the only documentation on
-    // screen, so the richest rung that fits picks itself first and the status is
-    // kept only if there is still room beside it.
+    // Below `status_floor` the key hints come first: they are the only
+    // documentation on screen, and the status field is a luxury bought only
+    // where it costs no rung.
     //
     // Deciding the status first — and against the *barest* rung, `q quit` —
     // made the footer non-monotonic in width: from 36 to 57 columns the
@@ -737,18 +779,28 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // fitted two rungs more. Widening the terminal from 35 to 36 columns
     // therefore *removed* the key hints.
     //
-    // One column for the leading space, one more so the keys never abut the
-    // status field.
-    let keys = table
-        .iter()
-        .copied()
-        .find(|k| cells(k) < width)
-        .unwrap_or("q");
-    let status_w = if width >= cells(keys) + usize::from(STATUS_W) + 2 {
+    // Testing affordability against the rung *just chosen* brought the same
+    // fault back on the other axis: `cells(keys)` jumps a whole rung gap at each
+    // boundary, so the right-hand side of that test outran the left and the
+    // field vanished by *widening* — on at 94 columns, gone at 95. At and above
+    // the floor the field is therefore reserved outright and the rung is picked
+    // from what is left, which is monotone in width on both axes.
+    let status_w = if width >= status_floor(table) {
         STATUS_W
     } else {
         0
     };
+    let keys = table
+        .iter()
+        .copied()
+        .find(|k| {
+            if status_w == 0 {
+                hints_w(k) <= width
+            } else {
+                hints_and_status_w(k) <= width
+            }
+        })
+        .unwrap_or("q");
 
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(status_w)]).split(area);
     f.render_widget(
@@ -1021,35 +1073,77 @@ mod tests {
         }
     }
 
-    /// Widening the pane must never take hints away. The status field was
-    /// decided first and against the *barest* rung, so from 36 to 57 columns
-    /// the 28-column field was always affordable next to `q quit` and therefore
-    /// always taken — forcing the barest rung even though dropping it would
-    /// have fitted two rungs more. Going from 35 to 36 columns removed
-    /// `c comment · x remove` from the screen.
+    /// A status text no rung contains, so finding it on the footer row means
+    /// the status field itself reached the terminal.
+    const STATUS_PROBE: &str = "annotation removed";
+
+    /// The footer as rendered at width `w`: which rung of `table` is on the last
+    /// row, and whether the status field came with it. `usize::MAX` for the rung
+    /// when none of them is there at all — barer than any real rung, which is
+    /// what a pane too narrow for even `q quit` deserves.
+    fn footer_at(setup: fn(&mut App), table: &[&str], w: u16) -> (usize, bool) {
+        let mut app = App::new("PLAN.md".into(), DOC);
+        setup(&mut app);
+        app.status = STATUS_PROBE.into();
+        let buf = render_buf(&mut app, w, 14);
+        let y = buf.area.height - 1;
+        let row: String = (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        // `position` finds the richest rung on the row: a rung can only contain
+        // rungs shorter than itself, so every spurious match is a barer one.
+        let rung = table
+            .iter()
+            .position(|k| row.contains(k))
+            .unwrap_or(usize::MAX);
+        (rung, row.contains(STATUS_PROBE))
+    }
+
+    /// Widening the pane must take nothing away — neither hints nor status.
+    ///
+    /// Hints: the status field was once decided first and against the *barest*
+    /// rung, so from 36 to 57 columns the 28-column field was always affordable
+    /// next to `q quit` and therefore always taken, forcing the barest rung
+    /// even though dropping it would have fitted two rungs more. Going from 35
+    /// to 36 columns removed `c comment · x remove` from the screen.
+    ///
+    /// Status: testing the field against the rung just chosen moved the same
+    /// fault to the other axis. `cells(keys)` jumps 31 and 38 cells at the
+    /// `KEYS` rung boundaries, so the field was on at 94 columns and gone at 95,
+    /// on at 132 and gone at 133 — absent at 80 and 140, the two commonest
+    /// terminal widths, and it is the only confirmation `x remove` gives.
+    ///
+    /// Both axes, all three tables, and out to 250 columns: `INPUT_KEYS` and
+    /// `PEEK_KEYS` escaped the second fault only because their rung gaps happen
+    /// to be under the width of the status field, which nothing recorded.
     #[test]
-    fn the_footer_never_loses_hints_as_the_pane_widens() {
-        let rung = |w: u16| -> usize {
-            let mut app = App::new("PLAN.md".into(), DOC);
-            let screen = render(&mut app, w, 12);
-            let footer = screen.lines().last().unwrap_or_default().to_string();
-            // `position` finds the richest rung the line contains, since every
-            // barer one is a suffix of it.
-            KEYS.iter()
-                .position(|k| footer.contains(k))
-                .unwrap_or(KEYS.len())
-        };
-        let mut prev = KEYS.len();
-        for w in 8u16..=140 {
-            let i = rung(w);
-            assert!(
-                i <= prev,
-                "width {w} shows a barer rung than width {}",
-                w - 1
-            );
-            prev = i;
+    fn the_footer_never_loses_hints_or_status_as_the_pane_widens() {
+        fn sweep(name: &str, setup: fn(&mut App), table: &[&str]) {
+            let mut prev_rung = usize::MAX;
+            let mut had_status = false;
+            for w in 8u16..=250 {
+                let (rung, status) = footer_at(setup, table, w);
+                assert!(
+                    rung <= prev_rung,
+                    "{name}: width {w} shows a barer rung than width {}",
+                    w - 1
+                );
+                assert!(
+                    status || !had_status,
+                    "{name}: width {w} dropped the status field a narrower pane had"
+                );
+                prev_rung = rung;
+                had_status |= status;
+            }
+            assert!(had_status, "{name}: the status field never showed at all");
         }
-        assert!(rung(36) <= rung(35), "35 -> 36 columns lost hints");
+        sweep("KEYS", |_| {}, &KEYS);
+        sweep("INPUT_KEYS", App::begin_comment, &INPUT_KEYS);
+        sweep("PEEK_KEYS", |a| a.peek = true, &PEEK_KEYS);
+
+        // The width that motivated the reserve: `x remove` has no undo and no
+        // prompt, and 140 columns is where the field used to be missing.
+        assert!(footer_at(|_| {}, &KEYS, 140).1, "no status at 140 columns");
     }
 
     /// The full hint line is ~105 columns; in a 95-column pane it was cut
