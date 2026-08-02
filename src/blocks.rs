@@ -50,6 +50,12 @@
 //!
 //! where the backtick is character 8 but comrak reports column 9. Every
 //! consumer of `col` therefore has to respect char boundaries.
+//!
+//! They are not all *source* columns as comrak hands them over, though: inside
+//! a table the extension rewrites the text before the inline parser sees it,
+//! and the columns it then reports index the rewrite. [`PipeShift`] maps them
+//! back, once per parse, so everything downstream of [`parse_tree`] — slices,
+//! marks, the containment tree — indexes the file.
 
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{parse_document, Arena, Options};
@@ -250,6 +256,205 @@ fn norm(sp: comrak::nodes::Sourcepos, lines: &[&str]) -> Span {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The escaped-pipe column shift
+// ---------------------------------------------------------------------------
+
+/// One run of text comrak's table extension unescaped before it parsed the
+/// inlines inside it, and the source columns of the backslashes that cost it.
+#[derive(Debug)]
+struct Unescaped {
+    line: usize,
+    /// 1-based byte column of the run's first byte, in the source.
+    start: usize,
+    /// 1-based byte column of its last byte, in the source.
+    end: usize,
+    /// Source columns of the dropped backslashes, ascending. Never empty.
+    dropped: Vec<usize>,
+}
+
+/// The map from the inline columns comrak reports back to source columns, for
+/// the runs its table extension unescapes. Empty for any document without a
+/// table, which is why it is built once per parse and consulted per node.
+///
+/// # What comrak does
+///
+/// `\|` is how GFM puts a literal pipe in a table cell, and comrak's
+/// `parser::table::unescape_pipes` takes the backslash out of the text
+/// **before** that text is handed to the inline parser. Every position the
+/// inline parser then reports is measured against the shortened string, while
+/// the cell's own `sourcepos` — and the row's, and the table's — stays in
+/// source coordinates. So an inline column inside such a run is short by one
+/// byte per `\|` dropped ahead of it, and `App::slice` quotes the wrong bytes:
+/// on
+///
+/// ```text
+/// | Meldung (`"ERROR" \| "TIMEOUT"`) per E-Mail |
+/// ```
+///
+/// the text run comrak parsed as `) per E-Mail` is reported at columns 33..44,
+/// which slices to `` `) per E-Mai `` — one byte left of the truth at both
+/// ends, so the selection opens on the code span's closing backtick and stops
+/// a letter short. The code span above it loses that backtick for the same
+/// reason.
+///
+/// # Ground truth, taken from comrak 0.54 one case at a time
+///
+/// * The shift is **per run, not per line**: it starts over in each cell, so a
+///   `\|` in an earlier cell of the same row shifts nothing in a later one.
+///   Within a cell it accumulates, one byte per escape.
+/// * Only the **inline** columns move. `table`, `table-row` and `table-cell`
+///   spans are all built from source offsets and stay correct, which is what
+///   lets a cell's own span anchor the correction.
+/// * `\|` inside a code span shifts exactly as it does in plain text — the
+///   unescaping happens before anything knows what a code span is.
+/// * `\\|` — an escaped backslash before a pipe — drops nothing, matching
+///   `unescape_pipes`'s own state machine, which clears its flag on the second
+///   backslash. Neither does a `\|` that comrak's cell scanner never saw,
+///   because the row was not a table.
+/// * No other escape shifts anything. `\*`, `\_`, `\\` and `\[` in a cell all
+///   report source columns, because the inline parser handles those itself and
+///   tracks its own position while doing it. `\|` is the odd one out precisely
+///   because it is resolved by the *block* parser, behind the inline parser's
+///   back. The same `\|` in a paragraph, a heading or a list item — anywhere
+///   outside a table — shifts nothing either.
+/// * A **paragraph absorbed above a table's header row** goes through the same
+///   `unescape_pipes` call (in `try_inserting_table_header_paragraph`) and its
+///   inlines shift the same way, even though it is not a table row and holds
+///   no cells. It is a sibling case in the literal sense: same function, same
+///   corruption, a different node kind. The run there is a whole line, and the
+///   shift does not cross a line break because a newline clears the escape.
+#[derive(Debug)]
+struct PipeShift {
+    /// Sorted by `(line, start)`, and never overlapping: table cells are
+    /// disjoint by construction and a preface line is never a row.
+    runs: Vec<Unescaped>,
+}
+
+impl PipeShift {
+    /// The source column that a column comrak reported on `line` names.
+    ///
+    /// Identity outside an unescaped run, and identity for the `column: 0`
+    /// end-of-block sentinel `norm` still has to recognise.
+    fn source_column(&self, line: usize, col: usize) -> usize {
+        let upto = self
+            .runs
+            .partition_point(|r| (r.line, r.start) <= (line, col));
+        let Some(run) = self.runs[..upto]
+            .last()
+            .filter(|r| r.line == line && col <= r.end)
+        else {
+            return col;
+        };
+        // Each dropped backslash at or before the position built so far is a
+        // byte the inline parser never counted, so the answer moves right past
+        // it -- and past whatever that uncovers.
+        let mut out = col;
+        for &d in &run.dropped {
+            if d > out {
+                break;
+            }
+            out += 1;
+        }
+        out
+    }
+}
+
+/// The backslashes `unescape_pipes` drops from `line`, as 1-based source byte
+/// columns. A transcription of comrak's own loop: the flag is set only by a
+/// backslash that no pending backslash precedes, so `\\|` keeps both.
+///
+/// Scanning the whole line rather than each run is sound because a `|` with a
+/// backslash in front of it is never a cell delimiter — comrak's cell scanner
+/// treats it as escaped whether or not `unescape_pipes` agrees — so the flag is
+/// always clear where one run ends and the next begins.
+fn dropped_backslashes(line: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut after_backslash = false;
+    for (i, c) in line.char_indices() {
+        if after_backslash {
+            if c == '|' {
+                // The backslash is the byte before, so `i` is its 1-based column.
+                out.push(i);
+            }
+            after_backslash = false;
+        } else if c == '\\' {
+            after_backslash = true;
+        }
+    }
+    out
+}
+
+/// True for a paragraph comrak split off the top of a table's own container —
+/// the `preface` of `try_inserting_table_header_paragraph`, which is unescaped
+/// with the cells. A table cannot otherwise interrupt a paragraph, so a table
+/// starting on the line after a paragraph ends *is* that split.
+fn is_table_preface<'a>(para: &'a AstNode<'a>) -> bool {
+    let end = para.data.borrow().sourcepos.end.line;
+    para.next_sibling().is_some_and(|next| {
+        let d = next.data.borrow();
+        matches!(d.value, NodeValue::Table(_)) && d.sourcepos.start.line == end + 1
+    })
+}
+
+/// Source ranges of every run comrak unescaped, as `(line, start, end)` in
+/// 1-based byte columns.
+fn unescaped_runs<'a>(node: &'a AstNode<'a>, lines: &[&str], out: &mut Vec<(usize, usize, usize)>) {
+    for child in node.children() {
+        {
+            let data = child.data.borrow();
+            let sp = data.sourcepos;
+            match &data.value {
+                // A cell is one line by construction; the guard is here so a
+                // future comrak that changes that degrades to no correction
+                // rather than to a wrong one.
+                NodeValue::TableCell if sp.start.line == sp.end.line => {
+                    out.push((sp.start.line, sp.start.column, sp.end.column));
+                }
+                NodeValue::Paragraph if is_table_preface(child) => {
+                    for l in sp.start.line..=sp.end.line {
+                        out.push((l, 1, line_len(lines, l)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        unescaped_runs(child, lines, out);
+    }
+}
+
+fn pipe_shift<'a>(root: &'a AstNode<'a>, lines: &[&str]) -> PipeShift {
+    let mut ranges = Vec::new();
+    unescaped_runs(root, lines, &mut ranges);
+    ranges.sort_unstable();
+
+    let mut runs: Vec<Unescaped> = Vec::new();
+    let mut scanned: Option<(usize, Vec<usize>)> = None;
+    for (line, start, end) in ranges {
+        let Some(text) = line.checked_sub(1).and_then(|i| lines.get(i)) else {
+            continue;
+        };
+        if !matches!(&scanned, Some((l, _)) if *l == line) {
+            scanned = Some((line, dropped_backslashes(text)));
+        }
+        let Some((_, all)) = &scanned else { continue };
+        let dropped: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|c| *c >= start && *c <= end)
+            .collect();
+        if !dropped.is_empty() {
+            runs.push(Unescaped {
+                line,
+                start,
+                end,
+                dropped,
+            });
+        }
+    }
+    PipeShift { runs }
+}
+
 const fn kind_of(v: &NodeValue) -> Option<&'static str> {
     Some(match v {
         // block level
@@ -425,13 +630,21 @@ pub fn block_at(blocks: &[Block], line: usize) -> Option<usize> {
 // Containment hierarchy
 // ---------------------------------------------------------------------------
 
-fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str]) -> Vec<TreeNode> {
+fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str], shift: &PipeShift) -> Vec<TreeNode> {
     let mut out = Vec::new();
     for child in node.children() {
         let value = child.data.borrow().value.clone();
-        let span = norm(child.data.borrow().sourcepos, lines);
-        let kids = walk_tree(child, lines);
-        match kind_of(&value) {
+        let kind = kind_of(&value);
+        let mut sp = child.data.borrow().sourcepos;
+        // Only the inline columns are measured against unescaped text; the
+        // block spans a run is anchored to would be broken by the same move.
+        if kind.is_some_and(is_inline) {
+            sp.start.column = shift.source_column(sp.start.line, sp.start.column);
+            sp.end.column = shift.source_column(sp.end.line, sp.end.column);
+        }
+        let span = norm(sp, lines);
+        let kids = walk_tree(child, lines, shift);
+        match kind {
             Some(kind) => out.push(TreeNode {
                 kind,
                 span,
@@ -452,6 +665,7 @@ pub fn parse_tree(src: &str) -> TreeNode {
     let total = lines.len().max(1);
     let arena = Arena::new();
     let root = parse_document(&arena, src, &options());
+    let shift = pipe_shift(root, &lines);
     TreeNode {
         kind: "document",
         span: Span {
@@ -459,7 +673,7 @@ pub fn parse_tree(src: &str) -> TreeNode {
             end: Pos::new(total, line_len(&lines, total).max(1)),
         },
         setext: false,
-        children: walk_tree(root, &lines),
+        children: walk_tree(root, &lines, &shift),
     }
 }
 
@@ -860,6 +1074,241 @@ still para.
         assert!(kinds.contains(&"table-cell"));
         assert!(kinds.contains(&"table-row"));
         assert!(kinds.contains(&"table"));
+    }
+
+    // ---- tier 4b: the escaped-pipe column shift ----------------------------
+
+    /// Every inline node of `src` in document order, as `(kind, the bytes its
+    /// span names)`. The slice is the whole point of these tests: a column that
+    /// has drifted off its own text reads as a plausible number and as obvious
+    /// nonsense here. Slicing raw is deliberate too — a corrected column that
+    /// landed inside a character would panic rather than round quietly.
+    fn inline_slices(src: &str) -> Vec<(&'static str, String)> {
+        fn go(n: &TreeNode, lines: &[&str], out: &mut Vec<(&'static str, String)>) {
+            if is_inline(n.kind) && n.span.start.line == n.span.end.line {
+                let line = lines[n.span.start.line - 1];
+                out.push((
+                    n.kind,
+                    line[n.span.start.col - 1..n.span.end.col].to_string(),
+                ));
+            }
+            for c in &n.children {
+                go(c, lines, out);
+            }
+        }
+        let lines = source_lines(src);
+        let mut out = Vec::new();
+        go(&parse_tree(src), &lines, &mut out);
+        out
+    }
+
+    fn slices(src: &str) -> Vec<String> {
+        inline_slices(src).into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// comrak's table extension takes the backslash out of `\|` before it parses
+    /// a cell's inlines, so every inline column after one is short by a byte —
+    /// and `App::slice` then quotes text the reviewer never selected. The cases
+    /// here are the ground truth this was fixed against, each read off comrak
+    /// 0.54 rather than assumed.
+    #[test]
+    fn an_escaped_pipe_does_not_shift_what_an_inline_span_quotes() {
+        // One escape: the run holding it, and everything after it in the cell.
+        assert_eq!(
+            slices("| a \\| b | c *em* d |\n|---|---|\n"),
+            ["a \\| b", "c ", "*em*", "em", " d"]
+        );
+        // Two: the shift accumulates, one byte per escape.
+        assert_eq!(
+            slices("| a \\| b \\| c *em* tail | z |\n|---|---|\n"),
+            ["a \\| b \\| c ", "*em*", "em", " tail", "z"]
+        );
+        // A code span is unescaped with everything else — the rewrite happens
+        // before anything knows a code span is there.
+        assert_eq!(
+            slices("| `x \\| y` then *em* z |\n|---|\n"),
+            ["`x \\| y`", " then ", "*em*", "em", " z"]
+        );
+        // An escape as the last thing in the cell still moves its own run's end.
+        assert_eq!(
+            slices("| a *em* b \\| |\n|---|\n"),
+            ["a ", "*em*", "em", " b \\|"]
+        );
+        // A cell that is nothing but the escape: the run is the pipe alone.
+        assert_eq!(
+            slices("| \\| | *em* b |\n|---|---|\n"),
+            ["|", "*em*", "em", " b"]
+        );
+        // Inside a container, where the columns start further right.
+        assert_eq!(
+            slices("> | a \\| b *em* c |\n> |---|\n"),
+            ["a \\| b ", "*em*", "em", " c"]
+        );
+    }
+
+    /// The shift starts over in every cell. comrak anchors each cell's inlines
+    /// at that cell's own start column, so an escape in an earlier cell of the
+    /// same row moves nothing in a later one — and a fix that counted a row's
+    /// escapes would push every later cell right by them.
+    #[test]
+    fn the_shift_stops_at_the_edge_of_the_cell_that_causes_it() {
+        // Escape in cell one only: cell two was never wrong and stays right.
+        assert_eq!(
+            slices("| a \\| b | c *em* d |\n|---|---|\n"),
+            ["a \\| b", "c ", "*em*", "em", " d"]
+        );
+        // One in each: cell two moves by its own escape, not by both.
+        assert_eq!(
+            slices("| a \\| b | c \\| d *em* e |\n|---|---|\n"),
+            ["a \\| b", "c \\| d ", "*em*", "em", " e"]
+        );
+        // And it does not carry into the next row either.
+        assert_eq!(
+            slices("| h |\n|---|\n| a \\| b *em* c |\n| p *em* q |\n"),
+            ["h", "a \\| b ", "*em*", "em", " c", "p ", "*em*", "em", " q"]
+        );
+    }
+
+    /// `\|` is the odd one out because the *block* parser resolves it, behind
+    /// the inline parser's back. Every escape the inline parser handles itself
+    /// reports source columns, in a cell as anywhere else — so the correction
+    /// must fire for this one and for nothing else.
+    #[test]
+    fn only_the_pipe_escape_shifts_a_column() {
+        assert_eq!(
+            slices("| a \\* b \\_ c \\\\ d \\[ e *em* f |\n|---|\n"),
+            ["a \\* b \\_ c \\\\ d \\[ e ", "*em*", "em", " f"]
+        );
+        // `\\|` is an escaped *backslash* and then a pipe. comrak's own state
+        // machine clears its flag on the second backslash and drops nothing.
+        assert_eq!(
+            slices("| a \\\\| b *em* c |\n|---|\n"),
+            ["a \\\\| b ", "*em*", "em", " c"]
+        );
+        // The same escape outside a table is never unescaped at all.
+        for src in [
+            "para a \\| b *em* c\n",
+            "# head a \\| b *em* c\n",
+            "- item a \\| b *em* c\n",
+        ] {
+            let got = slices(src);
+            assert!(got.contains(&"*em*".to_string()), "{src:?} -> {got:?}");
+            assert!(
+                got.iter().any(|s| s.ends_with("a \\| b ")),
+                "{src:?} -> {got:?}"
+            );
+        }
+    }
+
+    /// The sibling case, and the reason this is not a table-cell fix. comrak
+    /// splits the paragraph lines above a header row off the table's container
+    /// and runs them through the *same* `unescape_pipes` call, so a `\|` there
+    /// shifts a paragraph that holds no cells at all. The escape does not carry
+    /// across the line break, because the newline clears the escape flag.
+    #[test]
+    fn a_paragraph_a_table_absorbed_shifts_the_same_way_a_cell_does() {
+        assert_eq!(
+            slices("intro \\| text *em* tail\n| a | b |\n|---|---|\n"),
+            ["intro \\| text ", "*em*", "em", " tail", "a", "b"]
+        );
+        // Two preface lines, the escape on the first: the second is untouched.
+        assert_eq!(
+            slices("first \\| line *em* one\nsecond *em* line\n| a | b |\n|---|---|\n"),
+            [
+                "first \\| line ",
+                "*em*",
+                "em",
+                " one",
+                "second ",
+                "*em*",
+                "em",
+                " line",
+                "a",
+                "b"
+            ]
+        );
+        // …and on the second, where the first is the one that must not move.
+        assert_eq!(
+            slices("first *em* line\nsecond \\| line *em* two\n| a | b |\n|---|---|\n"),
+            [
+                "first ",
+                "*em*",
+                "em",
+                " line",
+                "second \\| line ",
+                "*em*",
+                "em",
+                " two",
+                "a",
+                "b"
+            ]
+        );
+        // A paragraph with a blank line under it is not a preface — the table
+        // never touched its text, and correcting it would break it.
+        assert_eq!(
+            slices("intro \\| text *em* tail\n\n| a | b |\n|---|---|\n"),
+            ["intro \\| text ", "*em*", "em", " tail", "a", "b"]
+        );
+    }
+
+    /// The corrected column is still a *byte* offset, and still lands on a
+    /// character boundary — `inline_slices` slices raw, so anything else is a
+    /// panic here rather than a silent round in `ceil_boundary`.
+    #[test]
+    fn a_corrected_column_is_still_a_byte_offset_on_a_boundary() {
+        assert_eq!(
+            slices("| Prüfen \\| köde *em* x |\n|---|\n"),
+            ["Prüfen \\| köde ", "*em*", "em", " x"]
+        );
+        // The escape immediately before a multi-byte character, so the shift
+        // has to step over the whole of it.
+        assert_eq!(
+            slices("| \\| ö *em* ü |\n|---|\n"),
+            ["| ö ", "*em*", "em", " ü"]
+        );
+    }
+
+    /// The oracle this defect was found with, as a test.
+    ///
+    /// A cell's inlines have to land on the same source bytes as the identical
+    /// text parsed *outside* a table, where comrak unescapes nothing and its
+    /// columns are known good. The reference is comrak's own behaviour on the
+    /// other side of the table extension, not a second copy of the correction,
+    /// so this cannot pass by agreeing with the code it checks.
+    #[test]
+    fn a_cell_quotes_what_the_same_text_quotes_outside_a_table() {
+        const BODIES: [&str; 8] = [
+            "plain text",
+            "a *em* b",
+            "a **strong** b",
+            "a `code` b",
+            "see [lbl](http://x) end",
+            "a ~~gone~~ b",
+            "Prüfen `köde` ü",
+            "a <b>x</b> c",
+        ];
+        // Both escapes that move a column and every neighbouring shape that
+        // must not: an escaped backslash, escapes the inline parser owns.
+        const ESCAPES: [&str; 6] = ["", " \\| ", " \\* ", " \\\\| ", " \\\\ ", " \\[ "];
+
+        let mut checked = 0;
+        for body in BODIES {
+            for head in ESCAPES {
+                for tail in ESCAPES {
+                    let cell = format!("{head}{body}{tail}");
+                    let reference = cell.trim_matches(|c: char| c == ' ' || c == '\t');
+                    let doc = format!("|{cell}| second *em* cell |\n|---|---|\n");
+                    let want = slices(reference);
+                    let got = slices(&doc);
+                    assert!(
+                        got.starts_with(&want),
+                        "cell {cell:?}\n  in a table: {got:?}\n  standalone: {want:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, BODIES.len() * ESCAPES.len() * ESCAPES.len());
     }
 
     #[test]

@@ -1348,6 +1348,55 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         }
     }
 
+    /// The lone-carriage-return failure one axis over: not which line a column
+    /// belongs to, but where in the line it sits. comrak's table extension
+    /// takes the backslash out of
+    /// `\|` before it parses a cell's inlines, so every inline column after one
+    /// in that cell is short by a byte — and an inline selection made with
+    /// `+`/`-` writes those columns, and the text they name, into the
+    /// annotation. This row is the shape it was found on: a code span holding
+    /// two escaped pipes, and prose after it.
+    ///
+    /// Both directions are pinned, because the shift moves a span's start and
+    /// its end alike: the code span used to lose its closing backtick, and the
+    /// run after it used to begin on that backtick and stop a word early.
+    #[test]
+    fn an_escaped_pipe_does_not_shift_what_an_inline_selection_quotes() {
+        const SRC: &str = concat!(
+            "| Signal | Beschreibung |\n",
+            "|---|---|\n",
+            "| `status` | Grep auf (`\"ERROR\" \\| \"TIMEOUT\" \\| \"500\"`) per E-Mail |\n"
+        );
+        let mut a = App::new("t.md".into(), SRC);
+
+        // The code span itself, reached the way a reviewer reaches it.
+        a.cursor = Pos::new(3, 30);
+        a.contract(); // the row down to the cell
+        a.contract(); // the cell down to the code span
+        assert_eq!(a.selection_kind(), "code-span");
+        assert_eq!(
+            a.slice(a.selection().unwrap()),
+            "`\"ERROR\" \\| \"TIMEOUT\" \\| \"500\"`"
+        );
+
+        // The prose after it, which is where the two dropped bytes accumulate.
+        let after = a.line_text(3).find(") per").unwrap() + 1;
+        let mut b = App::new("t.md".into(), SRC);
+        b.cursor = Pos::new(3, after);
+        b.contract();
+        b.contract();
+        assert_eq!(b.selection_kind(), "text");
+        assert_eq!(b.slice(b.selection().unwrap()), ") per E-Mail");
+
+        // The cell around them was never wrong and must not move either.
+        b.expand();
+        assert_eq!(b.selection_kind(), "table-cell");
+        assert_eq!(
+            b.slice(b.selection().unwrap()),
+            " Grep auf (`\"ERROR\" \\| \"TIMEOUT\" \\| \"500\"`) per E-Mail "
+        );
+    }
+
     /// Every span starting in column 1 has an empty lead, so no chrome can be
     /// counted and no continuation line can be trimmed: the whole feature is
     /// invisible to it. Held over blocks and hierarchy nodes alike, across
