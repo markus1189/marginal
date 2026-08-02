@@ -16,7 +16,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::app::{Anchor, App, Mode};
-use crate::wrap::{cells_claimed, wrap, Piece, Row};
+use crate::wrap::{cells_claimed, cells_drawn, wrap, Piece, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
@@ -107,6 +107,19 @@ fn segments(text: &str, marks: &[(usize, usize, Style)], base: Style) -> Vec<Spa
 /// Line-number field floor. The gutter is this plus two cells: the annotation
 /// dot and the selection bar.
 const LINENO_MIN: usize = 4;
+
+/// Cells the terminal will draw `row` in.
+///
+/// Deliberately not `Line::width()`, which is the sum of `Span::width()` and so
+/// is `cells_claimed` — the measure that decides how big an *area* is. A row
+/// gets no say in the size of the body pane; it is laid into it by
+/// `LineTruncator`, which advances by `cell_width` a grapheme at a time. Summing
+/// per span is the same arithmetic the truncator does, and it stays the same
+/// number when a cursor or selection mark splits a cluster into two spans: the
+/// column `cell_width` adds is charged per halfwidth sound mark, not per pair.
+fn row_cells_drawn(row: &Line) -> usize {
+    row.spans.iter().map(|s| cells_drawn(&s.content)).sum()
+}
 
 /// Byte index of the cursor within `text`, floored onto a character boundary.
 /// `App::snap` normally guarantees this, but tests assign `cursor` directly and
@@ -357,12 +370,16 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 spans.push(Span::styled(" ", cur_style));
             }
             let row = Line::from(spans);
-            if row.width() > body_w {
+            // `row_cells_drawn`, not `Line::width()`: both of the decisions
+            // below are about what the pane will hold, and the pane is cut by
+            // `LineTruncator`, which advances by `cell_width`. `Line::width()`
+            // is `cells_claimed` — see the rule in `wrap`'s module doc.
+            if row_cells_drawn(&row) > body_w {
                 // A cursor past the edge leaves no cursor cell on screen at all.
                 // The marker takes the cursor's colour in that case, so the screen
                 // still says where you are — `w`/`b`, `0` and `z` get you back to it.
                 let hidden =
-                    on_cursor_line && cells_claimed(&text[..cursor_byte(app, &text)]) >= body_w;
+                    on_cursor_line && cells_drawn(&text[..cursor_byte(app, &text)]) >= body_w;
                 let dim = Style::default().fg(Color::DarkGray);
                 overflow.push((idx, if hidden { cur_style } else { dim }));
             }
@@ -846,8 +863,17 @@ const PEEK_KEYS: [&str; 2] = ["j/k scroll · z or Esc closes", "z closes"];
 const STATUS_W: u16 = 28;
 
 /// What a rung costs on its own: one column of leading space, then the hints.
+///
+/// `cells_drawn` because the comparison this feeds is against the footer pane,
+/// which a `Paragraph` truncates. It is the only site in the crate where the
+/// choice cannot be observed: the three tables above are compile-time constants
+/// of ASCII plus `·` and `—`, and the two measures agree on every character of
+/// them — `the_two_measures_agree_on_every_key_hint` says so, and would fail if
+/// a rung ever grew a character where they do not. The rule still decides it,
+/// because "it does not matter here" is a fact about today's strings and not
+/// about the function.
 fn hints_w(keys: &str) -> usize {
-    1 + cells_claimed(keys)
+    1 + cells_drawn(keys)
 }
 
 /// …and what it costs with the status field beside it, one column between the
@@ -909,7 +935,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // therefore *removed* the key hints.
     //
     // Testing affordability against the rung *just chosen* brought the same
-    // fault back on the other axis: `cells_claimed(keys)` jumps a whole rung gap at each
+    // fault back on the other axis: `cells_drawn(keys)` jumps a whole rung gap at each
     // boundary, so the right-hand side of that test outran the left and the
     // field vanished by *widening* — on at 94 columns, gone at 95. At and above
     // the floor the field is therefore reserved outright and the rung is picked
@@ -1435,7 +1461,7 @@ mod tests {
     /// to 36 columns removed `c comment · x remove` from the screen.
     ///
     /// Status: testing the field against the rung just chosen moved the same
-    /// fault to the other axis. `cells_claimed(keys)` jumps 31 and 38 cells at the
+    /// fault to the other axis. `cells_drawn(keys)` jumps 31 and 38 cells at the
     /// `KEYS` rung boundaries, so the field was on at 94 columns and gone at 95,
     /// on at 132 and gone at 133 — absent at 80 and 140, the two commonest
     /// terminal widths, and it is the only confirmation `x remove` gives.
@@ -1728,6 +1754,81 @@ mod tests {
             app.cursor = Pos::new(1, 150);
             let buf = render_buf(&mut app, w, 6);
             assert!(has_cursor(&buf), "no cursor indication at width {w}");
+        }
+    }
+
+    /// Both of the overflow marker's decisions, on the character class where the
+    /// two measures disagree.
+    ///
+    /// *Whether* it fires was `Line::width() > body_w`. `Line::width()` sums
+    /// `Span::width()`, which is `cells_claimed`, so a row of halfwidth katakana
+    /// and dakuten reported half the columns it needs: 34 clusters in a 35-cell
+    /// body measured 34, so the row was judged to fit and ratatui then cut 33
+    /// of its 68 cells off the end with nothing on screen to say so. The band
+    /// swept is exactly the one where the two answers differ — wide enough for
+    /// the claimed width, too narrow for the drawn one.
+    ///
+    /// *What colour* it fires in was the same mistake one function along:
+    /// `cells_claimed` of the text before the cursor, against the same `body_w`.
+    /// The marker takes the cursor's colour when the cursor is off screen, and
+    /// on these lines the cursor was off screen from half the column the guard
+    /// thought. `9f17460` and `cac34c1` both left this one standing.
+    ///
+    /// Backend buffer for both, since a marker that never survives `Buffer::diff`
+    /// is present in the front buffer and absent from the terminal.
+    #[test]
+    fn the_overflow_marker_fires_and_takes_its_colour_by_the_drawn_width() {
+        // 34 clusters: 34 claimed cells, 68 drawn ones, and six bytes apiece.
+        // Bodies from 35 to 65 cells are the band where only the drawn measure
+        // overflows, and where the last cluster is wholly off screen.
+        let doc = format!("{}\n", "ｶﾞ".repeat(34));
+        for w in 43u16..=73 {
+            let body_w = w - 8; // two border columns and the six-cell gutter
+            let mut app = App::new("kana.md".into(), &doc);
+            app.pretty = false;
+            app.cursor = Pos::new(1, 1);
+            let buf = render_buf(&mut app, w, 6);
+            assert_eq!(
+                buf[(w - 2, 1)].symbol(),
+                "›",
+                "width {w}: a {body_w}-cell body holding 68 cells of line is not marked"
+            );
+
+            // …and with the cursor past the last column the body can draw, the
+            // marker is the only thing left that can say where it is. The widest
+            // body here draws 32 clusters and the first half of the 33rd, so the
+            // 34th — six bytes to a cluster — is off screen at every width swept
+            // and on screen at none of them.
+            app.cursor = Pos::new(1, 33 * 6 + 1);
+            let buf = render_buf(&mut app, w, 6);
+            assert!(
+                (7..w - 2).all(|x| buf[(x, 1)].style().bg != Some(Color::Yellow)),
+                "width {w}: the cursor is drawn in the body, so this proves nothing"
+            );
+            assert_eq!(
+                buf[(w - 2, 1)].style().bg,
+                Some(Color::Yellow),
+                "width {w}: the cursor is off screen and the marker is not wearing its colour"
+            );
+        }
+    }
+
+    /// The footer measures its key hints with `cells_drawn` because they are cut
+    /// to a pane, but every rung is a compile-time constant that both measures
+    /// agree on — so the choice is invisible today. This is what makes that
+    /// sentence true rather than hopeful: a rung that grows a halfwidth dakuten,
+    /// or any other character the two count differently, fails here.
+    #[test]
+    fn the_two_measures_agree_on_every_key_hint() {
+        for table in [&KEYS[..], &INPUT_KEYS[..], &PEEK_KEYS[..]] {
+            for keys in table {
+                assert_eq!(
+                    cells_claimed(keys),
+                    cells_drawn(keys),
+                    "the footer's rung {keys:?} measures differently by the two rules, so \
+                     `hints_w` now has a visible choice to justify"
+                );
+            }
         }
     }
 
