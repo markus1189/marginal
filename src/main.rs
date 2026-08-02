@@ -89,24 +89,90 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
     }))
 }
 
+/// Where a write to `path` would actually land: `path` itself, or — when it is
+/// a symlink — the far end of the chain it points at, which is the file
+/// `fs::write` would create or overwrite. Only the last component is followed
+/// here; a symlinked *directory* in the middle is the kernel's business and
+/// `open` resolves it either way.
+///
+/// The hop limit is the kernel's own, so a symlink cycle ends up reported by
+/// the `open` in `preflight` (as `ELOOP`) rather than spun on here.
+fn write_target(path: &std::path::Path) -> std::path::PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..40 {
+        // Not a symlink (or unreadable): this is the end of the chain.
+        let Ok(link) = std::fs::read_link(&p) else {
+            break;
+        };
+        p = match p.parent() {
+            Some(dir) if link.is_relative() => dir.join(link),
+            _ => link,
+        };
+    }
+    p
+}
+
 /// Can `path` be written? Asked *before* the session rather than after it: a
 /// bad `--result` used to surface only on exit, by which point the reviewer had
 /// done all the work and there was nowhere left to put it.
 ///
-/// An existing file is opened without truncating, and one created to probe the
-/// directory is removed again — README's contract is that the result file's
-/// absence means the TUI never ran, and an empty file left by a pre-flight would
-/// make that read false.
+/// The question is asked without creating anything at `path` and without
+/// removing anything at all, which is the part the first version got wrong
+/// twice over:
+///
+/// * `exists()` follows symlinks, so a **dangling** `--result` link read as
+///   absent. `create(true)` then made the file the link pointed at, and
+///   `remove_file(path)` unlinked the link. One run deleted the indirection a
+///   shared result path exists to provide *and* left behind the zero-byte file
+///   the removal was there to prevent — both invariants, in one command.
+/// * Sampling "did it exist?" and opening afterwards is a window another writer
+///   can step into: the file it created in between was opened intact (no
+///   truncate) and then unlinked as if this process had made it. Rare in
+///   practice — the launcher hands out a fresh `mktemp -d` — but it is somebody
+///   else's file being deleted.
+///
+/// So: what is already there is opened for writing and left exactly as it is,
+/// and what is not there yet is answered for by a probe file of this process's
+/// own, in the directory that would have to hold it. Nothing that pre-flight
+/// did not create is ever opened for creation or removed, at any interleaving.
+/// A pre-flight still leaves no result file behind, so it cannot make a session
+/// that never ran look like one that did.
 fn preflight(path: &str) -> io::Result<()> {
-    let existed = std::path::Path::new(path).exists();
+    let target = write_target(std::path::Path::new(path));
+
+    // No `create`, no `truncate`: an existing result file survives the question
+    // untouched, and a symlink is followed rather than replaced.
+    let absent = match std::fs::OpenOptions::new().write(true).open(&target) {
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => e,
+        Err(e) => return Err(e),
+    };
+
+    // Nothing there yet, so the real question is whether the directory takes a
+    // new file. `""`, `/` and `..` name no file to create, and for those the
+    // open's own error is already the answer.
+    let (Some(dir), Some(_)) = (target.parent(), target.file_name()) else {
+        return Err(absent);
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    // Pid and clock: unique against every other process and against a probe an
+    // earlier run was killed before removing.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let probe = dir.join(format!(
+        ".marginal-preflight-{}-{stamp}",
+        std::process::id()
+    ));
     std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
-    if !existed {
-        let _ = std::fs::remove_file(path);
-    }
+        .create_new(true)
+        .open(&probe)?;
+    let _ = std::fs::remove_file(&probe);
     Ok(())
 }
 
@@ -375,6 +441,15 @@ mod tests {
         p
     }
 
+    /// An empty directory of this test's own. Never the user's files, and never
+    /// shared with another test — several of these watch for a stray file.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = tmp(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     /// The `--result` path was only ever tried after the session, so an
     /// unwritable one was discovered when every annotation was already made and
     /// the early `return` skipped the feedback markdown that was the only other
@@ -400,6 +475,118 @@ mod tests {
         assert!(preflight(good.to_str().unwrap()).is_ok());
         assert_eq!(std::fs::read_to_string(&good).unwrap(), "keep");
         let _ = std::fs::remove_file(&good);
+
+        // An empty `--result` is still refused, with the message the OS has
+        // always given it. Improving that message is somebody else's commit;
+        // quietly starting to *accept* it would be this one's fault.
+        assert!(preflight("").is_err());
+    }
+
+    /// `exists()` follows symlinks, so a dangling `--result` link read as
+    /// absent: `create(true)` made the file it pointed at and `remove_file`
+    /// then unlinked the link. A result path deliberately pointed through a
+    /// symlink into a shared location silently stopped being an indirection,
+    /// and the zero-byte file the removal exists to prevent was left behind at
+    /// the other end — both halves of the doc comment broken by one run.
+    #[cfg(unix)]
+    #[test]
+    fn preflight_asks_through_a_symlink_without_replacing_it() {
+        let dir = scratch("symlink");
+        let link = dir.join("out.json");
+        let target = dir.join("shared.json");
+        let at = |p: &std::path::Path| preflight(p.to_str().unwrap());
+
+        // Dangling: the link is the only thing that exists yet.
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(at(&link).is_ok(), "refused a writable indirection");
+        assert!(link.is_symlink(), "pre-flight deleted the symlink itself");
+        assert!(
+            !target.exists(),
+            "pre-flight created the file the link points at"
+        );
+
+        // Resolved: the file at the far end is probed, not emptied, and the
+        // link still points at it afterwards.
+        std::fs::write(&target, "keep").unwrap();
+        assert!(at(&link).is_ok());
+        assert!(
+            link.is_symlink(),
+            "pre-flight replaced the link with a file"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+        // A chain is followed to its end, and one that lands nowhere writable
+        // is still an error — the link surviving is not a licence to accept it.
+        let chained = dir.join("chain.json");
+        std::os::unix::fs::symlink("out.json", &chained).unwrap();
+        assert!(at(&chained).is_ok());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+
+        let nowhere = dir.join("nowhere.json");
+        std::os::unix::fs::symlink(dir.join("no-such-dir/x.json"), &nowhere).unwrap();
+        assert!(at(&nowhere).is_err(), "accepted a link into a missing dir");
+        assert!(nowhere.is_symlink());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `existed` sample sat before the `open`, and `truncate(false)` meant
+    /// an interloper's file was opened intact and then unlinked as if this
+    /// process had made it. Deleting a file nobody asked to delete needs no
+    /// unlucky machine to matter, only an unlucky interleaving — and against a
+    /// writer sharing the path this lost thousands of files per twenty thousand
+    /// attempts.
+    ///
+    /// The property this pins is stronger than "usually survives": pre-flight
+    /// creates nothing at the result path at all, so there is no interleaving
+    /// left in which somebody else's file is the one it removes. A flaky pass
+    /// here would mean the property is back to being statistical.
+    #[test]
+    fn preflight_destroys_no_file_it_did_not_create() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const PRECIOUS: &str = "the other process's data";
+        let dir = scratch("race");
+        let path = dir.join("out.json");
+        let arg = path.to_str().unwrap().to_string();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let flight = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = preflight(&arg);
+                }
+            })
+        };
+
+        let (mut destroyed, mut truncated) = (0, 0);
+        for _ in 0..2000 {
+            std::fs::write(&path, PRECIOUS).unwrap();
+            match std::fs::read_to_string(&path) {
+                Err(_) => destroyed += 1,
+                Ok(s) if s != PRECIOUS => truncated += 1,
+                Ok(_) => {}
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        stop.store(true, Ordering::Relaxed);
+        flight.join().unwrap();
+
+        assert_eq!(
+            (destroyed, truncated),
+            (0, 0),
+            "pre-flight unlinked another writer's result file"
+        );
+        // …and cleaned up after itself while doing it.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(left.is_empty(), "pre-flight left a file behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `std::env::args()` panics on an argument that is not valid UTF-8, exiting
