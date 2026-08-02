@@ -2,10 +2,46 @@
 //!
 //! Two views of the same parse, for two different jobs:
 //!
-//! * [`parse`] — a flat, gapless, non-overlapping list of *navigation units*.
-//!   This is what `J`/`K` steps through and what block-wise selection joins.
+//! * [`parse`] — a flat list of *navigation units*, ordered by position. This
+//!   is what `J`/`K` steps through and what block-wise selection joins.
 //! * [`parse_tree`] — the full containment hierarchy, block **and** inline,
 //!   which powers expand/contract selection.
+//!
+//! # What the flat list guarantees, and what it does not
+//!
+//! Flat and ordered, always. Gapless and non-overlapping is the *goal* and the
+//! common case, and two tests pin it —
+//! `navigation_units_never_overlap` and
+//! `navigation_units_cover_every_non_blank_line_exactly_once` — but they pin it
+//! **over their fixtures**, not universally, and it is not universally true.
+//! Known counterexamples, all reproduced with `--dump-blocks` and all left
+//! standing here on purpose (each is its own fix, with its own test):
+//!
+//! * **Link reference definitions.** comrak builds no AST node for them, so
+//!   `[a]: http://example.com` on its own line is in no unit. `# T` / `See [a].`
+//!   / `[a]: …` / `Another.` yields units for L1, L3 and L7 — L5 is uncovered.
+//! * **Indented code in a list item, after a sublist.** comrak's sourcepos for
+//!   the item is short, and the guard in `walk_child` compares only
+//!   `start.line`: a code block that *starts* on the item's last covered line
+//!   but runs past it is neither inside the trimmed span nor walked. In
+//!   `- item one` / `  - sub` / two lines of eight-space code / `- item two`,
+//!   the second code line is uncovered.
+//! * **Unreferenced footnote definitions.** `footnotes` is on in [`options`],
+//!   and a definition nothing links to does not survive into the tree at all —
+//!   so a document that is nothing but `[^fn]: …` parses to **zero** units, and
+//!   one sitting between two paragraphs leaves its own line uncovered. A
+//!   *referenced* definition's inner blocks come through normally.
+//! * **A sublist opening on its parent's own line.** `- - a` gives two
+//!   `list-item` units both spanning `L1-L1`: the trim in `walk_child` can only
+//!   cut the parent back to `nested_start - 1`, and here that is the parent's
+//!   own start line, so the two **overlap**.
+//!
+//! What the callers actually rely on is weaker and does hold: the list is flat,
+//! ordered, and [`block_at`] never returns `None` for a non-empty list — a
+//! cursor in a hole resolves to the nearest unit above it. That fallback is
+//! why an uncovered line is quiet rather than fatal, and also why it is worth
+//! knowing about: a comment typed on one is filed against a *different* unit's
+//! lines and text.
 //!
 //! Positions come from comrak's sourcepos: 1-based line, 1-based **byte**
 //! column, end inclusive. Byte, not character — verified against the line

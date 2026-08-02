@@ -132,7 +132,9 @@ fn style_at(marks: &[(usize, usize, Style)], byte: usize) -> Style {
 }
 
 /// The nearest byte the rows actually render, at or before `b`, falling forward
-/// when nothing precedes it.
+/// when nothing precedes it — **except when the rows render nothing at all**,
+/// where it returns `b` unchanged and the promise in that first sentence is not
+/// kept. See the last paragraph: that case is covered elsewhere, not here.
 ///
 /// Rows are windows into the line but not a cover of it: `wrap_line` leaves the
 /// space it broke at, and any trailing run of spaces, outside every row so they
@@ -141,6 +143,24 @@ fn style_at(marks: &[(usize, usize, Style)], byte: usize) -> Style {
 /// is invisible and harmless — the byte is a space. For the cursor it means no
 /// cell on the screen carries the cursor style at all, and neither overflow
 /// safety net fires, because the row is neither empty nor over-width.
+///
+/// **The empty line is the hole in that, and so is the all-space line in pretty
+/// mode.** Both come back as one row whose only piece is the zero-width
+/// `Src(0, 0)`: an empty line has nothing to render, and pretty mode's wrapper
+/// leaves `"   "` entirely outside its rows, the same way it leaves any other
+/// trailing run of spaces. (Raw mode gives `Src(0, 3)` for that line, so only
+/// the empty case is a hole there.) Nothing then contains `b`, but `e <= b`
+/// *does* match — `0 <= 0` — so the middle branch takes `end = 0`, steps back to
+/// **byte 0**, and returns a byte no row renders. So does the fall-forward, and
+/// so would `unwrap_or(b)`: every route out is uncovered, and the first line of
+/// this doc is a promise this function cannot keep here.
+///
+/// A caller reading only this function would conclude the cursor vanishes on
+/// every blank line. It does not, and the reason is not in this function: it is
+/// the `spans.is_empty() && on_cursor_line` net in `draw_source`, ~200 lines
+/// down, which paints one cursor cell whenever a row produced no spans at all.
+/// That net is the entire guarantee for blank lines — narrow it or move it and
+/// the cursor disappears on every one of them, with nothing here to say so.
 fn snap_to_rendered(rows: &[Row], text: &str, b: usize) -> usize {
     let srcs = || {
         rows.iter().flat_map(|r| r.iter()).filter_map(|p| match *p {

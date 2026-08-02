@@ -384,6 +384,15 @@ impl App {
     /// Which of `line`'s rows holds byte `col - 1`. Padding cannot confuse this:
     /// it never changes the order of the source bytes, so row starts still
     /// ascend and the last one at or below `b` is the row `b` is in.
+    ///
+    /// The `unwrap_or(0)` is unreachable, not a default: `rposition` can only
+    /// come up empty if every row starts past `b`, and row 0 starts at byte 0
+    /// in every shape `line_rows` produces —
+    /// `row_zero_starts_at_byte_zero_in_every_shape_move_row_can_meet` asserts
+    /// it, `!rows.is_empty()` included. It is kept because it once fired, for an
+    /// indented line whose first word overflowed the row, and `move_row`
+    /// subtracted its way to a panic; a row shape that reopens that gap should
+    /// give a wrong row rather than no row.
     pub fn cursor_row(&self) -> usize {
         let (rows, _) = self.line_rows(self.cursor.line);
         let b = self.cursor.col.saturating_sub(1);
@@ -431,9 +440,21 @@ impl App {
         a
     }
 
-    /// Move the cursor one display row, keeping its offset within the row where
-    /// the target is long enough. Line-wise `j`/`k` cannot reach the middle of a
-    /// line that wraps to thousands of rows; this can.
+    /// Move the cursor one display row, keeping its **byte** offset within the
+    /// row where the target row is long enough. Line-wise `j`/`k` cannot reach
+    /// the middle of a line that wraps to thousands of rows; this can.
+    ///
+    /// Bytes, not screen columns. `off` below is `col - 1 - row_start` and `col`
+    /// is a byte column, so `C-n` from screen column 8 of an ASCII row onto a
+    /// CJK row lands 8 *bytes* in — two characters, screen column 4, once
+    /// `snap` floors to a character boundary. Measured on
+    /// `"abcdefghijklmnop"` over `"日本語のテキスト"`: from `L1` col 9 it lands
+    /// on `L2` col 7. Nothing here has ever measured cells; naming it here so
+    /// the next reader does not have to find it by pressing `C-n`.
+    ///
+    /// There is no `curswant` either: the offset is recomputed from the cursor
+    /// on every call, so a run of `C-n` across a short row forgets the column it
+    /// started from rather than restoring it, which is what vi's `j` does.
     pub fn move_row(&mut self, dir: isize) {
         self.drop_region();
         let (rows, _) = self.line_rows(self.cursor.line);
@@ -441,9 +462,18 @@ impl App {
         // Saturating, not bare: `cursor_row` falls back to row 0 when no row
         // starts at or below the cursor byte, and a bare subtraction then
         // underflows -- a panic in debug, and in release a wrapped offset that
-        // the `min` below silently clamps to the end of the target row. Rows are
-        // a partition again as of `wrap_line`'s indentation fix, so the fallback
-        // should be unreachable; this keeps a wrong answer from becoming a crash
+        // the `min` below silently clamps to the end of the target row.
+        //
+        // Rows are *not* a partition of the line and never became one:
+        // `snap_to_rendered` in `ui.rs` names the bytes that live in no row at
+        // all -- the space a row broke at, and any trailing run of spaces. The
+        // subtraction does not need a partition. It needs the narrower property
+        // that is true: **row 0 starts at byte 0, and row starts ascend**, which
+        // together make `cursor_row`'s `rposition` always find a row and make
+        // the row it finds the last one at or before the cursor.
+        // `row_zero_starts_at_byte_zero_in_every_shape_move_row_can_meet` pins
+        // exactly that, across the row shapes this can meet. So the fallback is
+        // unreachable; the saturation keeps a wrong answer from becoming a crash
         // if some future row shape reopens the gap.
         let off = self
             .cursor

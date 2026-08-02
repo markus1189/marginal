@@ -27,8 +27,11 @@ cargo test                       # enough for a tight loop; no test needs a tty
   every render cut goes through `floor_boundary` / `ceil_boundary`. A raw
   `&s[a..b]` on user text is a panic waiting for the first umlaut.
 - `unsafe_code = "forbid"`. Not negotiable.
-- Navigation units stay flat, gapless and non-overlapping. `blocks.rs` has a
-  test asserting it across three fixtures; keep it passing.
+- Navigation units stay flat and ordered. Gapless and non-overlapping is the
+  goal, asserted by `navigation_units_never_overlap` and
+  `navigation_units_cover_every_non_blank_line_exactly_once` **over their
+  fixtures** — keep both passing, and do not read them as a universal law. The
+  `blocks.rs` module doc lists four shapes where it does not hold today.
 - `app.rs` holds no ratatui types, so it stays testable without a terminal.
   Colours belong in `ui.rs`, tags in `highlight.rs`.
 

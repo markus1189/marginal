@@ -340,8 +340,12 @@ wrong. Every node already *is* a span.
 
 **`v` — units.** `J`/`K` steps through *navigation units*: headings,
 paragraphs, list items, code blocks, **table rows**, and the inner blocks of a
-blockquote. The unit list is flat, gapless and non-overlapping, which is what
-makes stepping through it predictable.
+blockquote. The unit list is flat and ordered, and on ordinary prose it is also
+gapless and non-overlapping, which is what makes stepping through it
+predictable. There are shapes where it is not — a link reference definition, an
+unreferenced footnote definition, `- - a` — and the `blocks.rs` module doc names
+them; the cursor resolves to the nearest unit above rather than falling out of
+the list.
 
 **`V` — lines.** Ignores structure entirely. This is what you want for four
 lines in the middle of a forty-line fence.
