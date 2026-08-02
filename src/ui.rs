@@ -7,6 +7,7 @@
 //! cuts land on character boundaries — the columns coming out of comrak are
 //! byte offsets, and slicing a multi-byte character in half panics.
 
+use ratatui::buffer::CellWidth as _;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -372,7 +373,26 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 // and `Buffer::diff` skips whatever follows a wide symbol, so
                 // the marker would reach the front buffer and never the
                 // terminal. Blank the lead cell and both survive.
-                if x > body_area.x && cells(buf[(x - 1, y)].symbol()) > 1 {
+                //
+                // It is `Cell::cell_width` that has to answer "is this wide?",
+                // because that is the function `Buffer::diff` itself asks. It
+                // is not `wrap::cells`: `cells` is plain `unicode-width`, while
+                // `cell_width` adds one column per halfwidth katakana dakuten
+                // (U+FF9E/U+FF9F), which `unicode-width` calls zero-width and
+                // terminals draw as a column of its own. `cells("ｶﾞ")` is 1 and
+                // `"ｶﾞ".cell_width()` is 2, so the old guard left every such
+                // line unblanked and the marker was dropped by `diff`. Asking
+                // the `Cell` rather than its symbol also honours a
+                // `CellDiffOption::ForcedWidth`, which is what `diff` skips by
+                // when one is set.
+                //
+                // Note what the blanking costs: the character it replaces
+                // *fitted*. Two columns cannot hold a two-cell glyph and a
+                // one-cell marker both, so raw mode's promise that every body
+                // cell is a byte of the file gives way here to saying that the
+                // line continues. Moving the marker to `x - 1` instead would
+                // destroy the same character and pull the marker off the edge.
+                if x > body_area.x && buf[(x - 1, y)].cell_width() > 1 {
                     buf[(x - 1, y)].set_symbol(" ");
                 }
                 buf[(x, y)].set_symbol("›").set_style(style);
@@ -1151,15 +1171,32 @@ mod tests {
     /// the cell after a wide symbol, so the marker reached the front buffer and
     /// never the backend. `render_buf` returns the backend buffer, which is the
     /// only place the difference shows.
+    ///
+    /// Both characters here are two cells on screen, but only one of them is
+    /// two cells according to `wrap::cells`. `cells` is plain `unicode-width`,
+    /// which calls the halfwidth dakuten U+FF9E zero-width; ratatui adds the
+    /// column back, so `cells("ｶﾞ")` is 1 where `"ｶﾞ".cell_width()` is 2. The
+    /// guard asked `cells`, saw a narrow cell, blanked nothing, and left the
+    /// original bug untouched on every dakuten line at every even width. Hence
+    /// the sweep: one width is not a test of a layout rule, and it is the even
+    /// ones that land the wide grapheme on the last two columns. `日` stays in
+    /// the sweep so this remains a test of the marker rather than a pin on one
+    /// Unicode quirk.
     #[test]
     fn the_overflow_marker_survives_a_wide_last_column() {
-        let doc = format!("{}\n", "日".repeat(200));
-        for w in 20u16..=40 {
-            let mut app = App::new("cjk.md".into(), &doc);
-            app.pretty = false;
-            app.cursor = Pos::new(1, 1);
-            let buf = render_buf(&mut app, w, 6);
-            assert_eq!(buf[(w - 2, 1)].symbol(), "›", "marker missing at width {w}");
+        for ch in ["日", "ｶﾞ"] {
+            let doc = format!("{}\n", ch.repeat(200));
+            for w in 10u16..=120 {
+                let mut app = App::new("cjk.md".into(), &doc);
+                app.pretty = false;
+                app.cursor = Pos::new(1, 1);
+                let buf = render_buf(&mut app, w, 6);
+                assert_eq!(
+                    buf[(w - 2, 1)].symbol(),
+                    "›",
+                    "marker missing at width {w} on a line of {ch:?}"
+                );
+            }
         }
     }
 
