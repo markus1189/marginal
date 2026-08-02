@@ -66,8 +66,19 @@ fn value(next: Option<String>, flag: &str, needs: &str) -> Result<String, String
 }
 
 /// `Ok(None)` means help was asked for, which is not a failure.
-fn parse_args() -> Result<Option<Args>, String> {
-    parse_argv(argv_utf8(std::env::args_os().skip(1))?)
+///
+/// Argv arrives as a parameter rather than being read here, because the bug
+/// this guards against lives in the *wiring* and nothing else: `argv_utf8` had
+/// a test from the day the panic was fixed, and putting `std::env::args()` back
+/// on the line below still left the suite green with the panic restored. There
+/// is now no argv this function can read except the one it is given, so the
+/// test and `main` walk the same path.
+///
+/// Decoding is the first thing that happens, before a single flag is looked at,
+/// so an undecodable argument is an error whatever else is on the command
+/// line — `--help` included. See README's exit codes.
+fn parse_args(argv: impl Iterator<Item = std::ffi::OsString>) -> Result<Option<Args>, String> {
+    parse_argv(argv_utf8(argv)?)
 }
 
 fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
@@ -214,7 +225,7 @@ fn preflight(path: &str) -> io::Result<()> {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
+    let args = match parse_args(std::env::args_os().skip(1)) {
         Ok(Some(a)) => a,
         Ok(None) => {
             println!("{USAGE}");
@@ -642,16 +653,47 @@ mod tests {
     /// "unreadable file -> exits 2" among the hardened edges. A Linux filename is
     /// an arbitrary byte string, so a shell glob over a directory holding a
     /// Latin-1 name reaches it with a file that is perfectly readable.
+    ///
+    /// This goes through `parse_args`, not `argv_utf8`, because the function was
+    /// never the risk. It was tested in isolation while the call site kept its
+    /// own copy of the decision, and a call site is exactly what a decoding rule
+    /// can be forgotten at: reverting that one line to `std::env::args()` left
+    /// the whole suite green with the panic back in the binary.
     #[cfg(unix)]
     #[test]
-    fn a_non_utf8_argument_is_an_error_not_a_panic() {
+    fn a_non_utf8_argument_reaches_the_parser_as_an_error_not_a_panic() {
+        use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt as _;
-        let bad = std::ffi::OsString::from_vec(vec![0xff, b'b', b'a', b'd']);
-        let err = argv_utf8([bad].into_iter()).unwrap_err();
-        assert!(err.contains("not valid UTF-8"), "{err}");
+        let bad = || OsString::from_vec(vec![0xff, b'b', b'a', b'd']);
+        let ok = |s: &str| OsString::from(s);
 
-        let ok = argv_utf8([std::ffi::OsString::from("f.md")].into_iter()).unwrap();
-        assert_eq!(ok, vec!["f.md".to_string()]);
+        // As the FILE, as a flag's value, and as a stray operand alike: the
+        // whole list is decoded before any of it is interpreted.
+        for case in [
+            vec![bad()],
+            vec![ok("--label"), bad(), ok("f.md")],
+            vec![ok("--result"), ok("o.json"), ok("f.md"), bad()],
+            // `--help` is no exception. An argument list that cannot be decoded
+            // is an error whatever else is on it; printing help while quietly
+            // dropping the argument nobody could read is the worse answer.
+            vec![ok("--help"), bad()],
+        ] {
+            let err = parse_args(case.clone().into_iter())
+                .err()
+                .unwrap_or_else(|| panic!("{case:?} parsed instead of erroring"));
+            assert!(err.contains("not valid UTF-8"), "{case:?}: {err}");
+            // The message shows the argument, lossily, so the human can tell
+            // which one it was.
+            assert!(err.contains('\u{fffd}'), "{case:?}: {err}");
+        }
+
+        // …and a decodable list still parses, so "reject everything" cannot
+        // pass this test.
+        let a = parse_args([ok("--label"), ok("WIP"), ok("f.md")].into_iter())
+            .unwrap()
+            .unwrap();
+        assert_eq!((a.file.as_str(), a.label.as_deref()), ("f.md", Some("WIP")));
+        assert!(parse_args([ok("--help")].into_iter()).unwrap().is_none());
     }
 
     fn argv(a: &[&str]) -> Result<Option<Args>, String> {

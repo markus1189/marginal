@@ -26,7 +26,7 @@ nix run . -- PLAN.md
 ```
 marginal FILE.md [--result PATH] [--label NAME] [--raw]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
-marginal --help                    # exits 0
+marginal --help                    # exits 0 (2 if an argument is not UTF-8)
 ```
 
 `--label NAME` replaces the path everywhere a human reads it — the title bar and
@@ -53,7 +53,13 @@ machine-readable route, and it carries the same markdown in
 `feedbackMarkdown`.
 
 Exit codes: `0` nothing was annotated, `1` something was, `2` tool failure
-(unreadable file, no tty, bad flag).
+(unreadable file, no tty, bad flag, an argument that is not valid UTF-8).
+
+Argv is decoded before a single flag is read, so an argument that is not valid
+UTF-8 is a tool failure whatever else is on the command line — `--help`
+included. A Linux filename is an arbitrary byte string, so this is reachable
+from an ordinary glob; the alternative, printing help while quietly dropping the
+one argument nobody could read, is worse than exiting `2` and saying so.
 
 A real run, annotating the inline code span in
 ``Use `parse_document` and the [comrak docs](https://docs.rs) here.``:
