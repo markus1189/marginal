@@ -406,6 +406,10 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
 /// keypress, and a long path used to push it off the end of the border
 /// entirely. The path is last and shortened to whatever is left, because a
 /// truncated path is still recognisable and a missing selection is not.
+///
+/// The title's slot is `width - 2`, the run of top border between the two
+/// corners — never `width`. What the path may spend is that slot less the fixed
+/// prefix and less the trailing pad space, which is the `+ 3` below.
 fn source_title(app: &App, width: u16) -> String {
     let sel = match app.selection() {
         Some(s) if s.start.line == s.end.line => format!(
@@ -428,6 +432,8 @@ fn source_title(app: &App, width: u16) -> String {
         app.blocks.len(),
         app.annotations.len(),
     );
+    // Two of the three are the border corners, the third is the pad space that
+    // `format!` appends below.
     let budget = usize::from(width).saturating_sub(cells(&rest) + 3);
     format!("{rest}{} ", shorten_path(app.display_name(), budget))
 }
@@ -440,26 +446,50 @@ fn source_title(app: &App, width: u16) -> String {
 /// the title then overran the border and was truncated by ratatui from the
 /// *right* — cutting away the file name this function exists to keep, with no
 /// ellipsis to say it had happened.
+///
+/// The cut walks **grapheme clusters** and measures the retained tail **whole**,
+/// with the same `cells` the caller applies to the finished title. Neither half
+/// of that is decoration:
+///
+/// - `cells` reads sequences, so a per-character sum is a different number.
+///   `"✔\u{FE0F}"` and `"1\u{FE0F}\u{20E3}"` are two cells each as a string and
+///   one summed per char; `"👩‍👩‍👧‍👦"` is two as a string and eight summed. The
+///   under-counting kind is the same overrun this function exists to prevent,
+///   reached through VS16 instead of through East-Asian-Wide.
+/// - a `char` boundary inside a cluster is not a place to cut. Splitting
+///   `"日\u{301}ab"` after `日` leaves the combining acute to attach to the
+///   ellipsis that gets prepended, so the cut mark comes out as `…́`.
+///
+/// `cells`, not `str::cell_width`, because a block title is measured twice and
+/// the *outer* of the two is `cells`. `Block::render_left_titles` sizes the
+/// title's `Rect` at `Line::width()` — plain `unicode-width`, the same function
+/// `cells` is — and only inside that rect does the span loop advance by
+/// `cell_width`. So `cells` is what decides whether the whole title gets a rect
+/// to live in, and being stricter than it buys nothing: the one string where
+/// the two disagree, halfwidth katakana plus dakuten, is clipped by ratatui
+/// whatever budget it is given, because the rect it is handed is derived from
+/// the title itself and is a column short per pair.
 fn shorten_path(path: &str, max: usize) -> String {
     if cells(path) <= max {
         return path.to_string();
     }
-    // One column goes to the ellipsis that marks the cut, and below two columns
-    // the ellipsis is all there is room to say.
-    if max <= 1 {
-        return "…".to_string();
+    // One column goes to the ellipsis that marks the cut. With no column at all
+    // there is nothing to say: an ellipsis at `max == 0` is one cell more than
+    // the slot holds, and what it would cost is the title's trailing pad space.
+    if max == 0 {
+        return String::new();
     }
     let budget = max - 1;
-    let mut buf = [0u8; 4];
-    let (mut w, mut start) = (0usize, path.len());
-    for (i, ch) in path.char_indices().rev() {
-        let cw = cells(ch.encode_utf8(&mut buf));
-        if w + cw > budget {
-            break;
-        }
-        w += cw;
-        start = i;
-    }
+    // Longest suffix that fits, measured as a string at every candidate cut.
+    // `cells` never shrinks as the suffix grows, so the first cut that does not
+    // fit ends the search.
+    let start = path
+        .grapheme_indices(true)
+        .map(|(i, _)| i)
+        .rev()
+        .take_while(|&i| cells(&path[i..]) <= budget)
+        .last()
+        .unwrap_or(path.len());
     format!("…{}", &path[start..])
 }
 
@@ -1113,9 +1143,15 @@ mod tests {
         assert_eq!(shorten_path("short.md", 20), "short.md");
         assert_eq!(shorten_path("/a/b/c/long.md", 8), "…long.md");
         assert_eq!(shorten_path("/a/b/c/long.md", 1), "…");
-        assert_eq!(shorten_path("/a/b/c/long.md", 0), "…");
+        // Nothing, not an ellipsis: a zero-cell budget cannot pay for the one
+        // cell an ellipsis costs, and the cell it used to take was the pad
+        // space that keeps the title off the corner.
+        assert_eq!(shorten_path("/a/b/c/long.md", 0), "");
         // multibyte must not be sliced apart
         assert_eq!(shorten_path("/tmp/Prüfen/köde.md", 8), "…köde.md");
+        // …and neither must a grapheme cluster. Cutting after `日` would leave
+        // the combining acute to attach itself to the ellipsis.
+        assert_eq!(shorten_path("日\u{301}ab", 3), "…ab");
     }
 
     /// Rows of the comment box. It is the only block with a yellow border, so
@@ -1479,34 +1515,124 @@ mod tests {
         assert_eq!(buf[(x, 3)].style().bg, Some(Color::Yellow));
     }
 
+    /// File names whose cell width is neither their character count nor the sum
+    /// of their characters' widths. `cells` reads sequences: `✔\u{FE0F}` and the
+    /// keycap `1\u{FE0F}\u{20E3}` are two cells whole and one summed per char,
+    /// and the ZWJ family is two whole and eight summed. `日` is the plain
+    /// East-Asian-Wide case where char and cluster coincide; `ｶﾞ` is the case
+    /// where `cells` and ratatui's own `cell_width` disagree (see `cac34c1`);
+    /// ASCII is the control that must not regress.
+    const TITLE_NAMES: [(&str, &str); 6] = [
+        ("ascii", "a-perfectly-ordinary-but-quite-long-file-name.md"),
+        ("cjk", "日本語日本語日本語日本語日本語日本語.md"),
+        ("vs16", "yyyyyyyyyy✔\u{FE0F}✔\u{FE0F}.md"),
+        ("keycap", "yyyyyyyyyy1\u{FE0F}\u{20E3}2\u{FE0F}\u{20E3}.md"),
+        ("zwj", "yyyyyyyyyy👩‍👩‍👧‍👦👩‍👩‍👧‍👦.md"),
+        ("dakuten", "ｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞｶﾞ.md"),
+    ];
+
+    /// The screen's top row, symbol by symbol. The title lives on the source
+    /// block's top border, which is row 0 of the frame.
+    fn top_row(buf: &ratatui::buffer::Buffer) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+    }
+
+    /// The narrowest width whose title slot holds the fixed fields at all.
+    /// Below it the prefix alone overruns, which is a different problem:
+    /// `source_title` shortens the path and nothing else.
+    fn narrowest_usable_width() -> u16 {
+        let mut bare = App::new("x.md".into(), DOC);
+        bare.label = Some(String::new());
+        let fixed = cells(&source_title(&bare, u16::MAX));
+        u16::try_from(fixed + 2).unwrap()
+    }
+
     /// `width` is terminal cells but the budget and the cut counted characters,
     /// so a wide-character path was under-counted by one per wide character. The
     /// title overran the border and ratatui truncated it from the right, taking
     /// the file name and extension — the very thing `shorten_path` keeps — with
     /// no ellipsis to show it had happened.
+    ///
+    /// Counting *cells* per char fixed the East-Asian-Wide half and left the
+    /// other half in place, because `cells` is a measure of a string and the cut
+    /// summed it over chars. Two different answers to "how wide is this?" cannot
+    /// both be the budget.
+    ///
+    /// The slot is `width - 2`, the border between the corners. The old
+    /// assertion here said `width`, which is two cells of slack — enough for the
+    /// VS16 case to pass while the `d` of `.md` was cut off the screen. So the
+    /// budget is checked against the slot, and the *buffer* is checked for the
+    /// name the title claims to end with.
     #[test]
-    fn the_title_fits_the_border_on_a_wide_character_path() {
+    fn the_title_fits_its_slot_and_keeps_the_file_name_on_screen() {
         // The cut itself, in cells rather than characters.
         assert_eq!(shorten_path("日本語日本語日本.md", 9), "…日本.md");
         assert_eq!(shorten_path("仕様/設計メモ.md", 20), "仕様/設計メモ.md");
         assert!(cells(&shorten_path("日本語日本語日本.md", 9)) <= 9);
+        // …and in cells of the sequence, not cells summed over its chars. Both
+        // directions: summing gives one cell per VS16 sequence where the string
+        // is two, so this one used to come back a cell over budget —
+        // "…✔\u{FE0F}✔\u{FE0F}.md" is 8 cells in a slot of 7. And eight per ZWJ
+        // family where the string is two, so this one used to come back as
+        // "….md" with room to spare.
+        assert_eq!(
+            shorten_path("yyyy✔\u{FE0F}✔\u{FE0F}.md", 7),
+            "…✔\u{FE0F}.md"
+        );
+        assert_eq!(shorten_path("yy👩‍👩‍👧‍👦👩‍👩‍👧‍👦.md", 8), "…👩‍👩‍👧‍👦👩‍👩‍👧‍👦.md");
 
-        // And the whole title, at widths where the fixed prefix fits at all.
-        for name in [
-            "日本語日本語日本語日本語日本語日本語.md",
-            "docs/仕様/設計メモ-第二版.md",
-            "a-perfectly-ordinary-but-quite-long-file-name.md",
-        ] {
-            for w in [80u16, 100, 120] {
-                let app = App::new(name.into(), DOC);
+        for (kind, name) in TITLE_NAMES {
+            // Widths at which the title claims to end in the file name, and the
+            // buffer is therefore worth looking at. Counted so that a
+            // `shorten_path` which gave up and returned "…" everywhere would
+            // fail here rather than skip its way to green.
+            let mut checked = 0usize;
+            for w in narrowest_usable_width()..=160 {
+                let mut app = App::new("x.md".into(), DOC);
+                app.label = Some(name.into());
                 let title = source_title(&app, w);
+                let slot = usize::from(w) - 2;
                 assert!(
-                    cells(&title) <= usize::from(w),
-                    "title overruns {w} cells ({}): {title:?}",
+                    cells(&title) <= slot,
+                    "{kind} title is {} cells in a {slot}-cell slot at width {w}: {title:?}",
                     cells(&title)
                 );
-                assert!(title.ends_with(".md "), "lost the file name: {title:?}");
+
+                // What the string says has to be what the screen shows. It was
+                // the gap between the two that hid this: the title ended in
+                // ".md " and the border ended in ".m".
+                if !title.ends_with(".md ") {
+                    continue;
+                }
+                let buf = render_buf(&mut app, w, 24);
+                let row = top_row(&buf);
+                // ratatui measures the title twice: `Block` sizes its rect at
+                // `Line::width()` — plain `unicode-width`, the function `cells`
+                // is — and then fills the rect with a loop that advances by
+                // `cell_width`. Halfwidth katakana sound marks are the only
+                // characters where the two disagree (`cac34c1`), and the
+                // difference comes off the right-hand end. The rect is derived
+                // from the title, so no budget this function could pick would
+                // widen it. `overhang` is 0 for every other name here, which
+                // leaves the plain assertion "the name the title claims is on
+                // the border"; for `ｶﾞ` it says how much is unreachable.
+                let overhang = title
+                    .chars()
+                    .filter(|c| matches!(*c, '\u{FF9E}' | '\u{FF9F}'))
+                    .count();
+                assert_eq!(
+                    row.contains(".md"),
+                    overhang <= 1, // the trailing pad space absorbs one cell
+                    "{kind} name at width {w}, {overhang} cells of overhang: {row:?}"
+                );
+                checked += 1;
             }
+            assert!(
+                checked >= 80,
+                "{kind} reached the buffer at {checked} widths"
+            );
         }
     }
 
