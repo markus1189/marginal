@@ -1293,6 +1293,39 @@ mod tests {
         }
     }
 
+    /// The other way the draft went missing, and the one that needed no no-op:
+    /// recall a comment, change your mind about a word of it, and go looking
+    /// again. The second `C-p` saw `browsing == None` — an edit turns it off —
+    /// and parked the recalled comment over the draft, so `C-n` handed back
+    /// `older note!` and the draft was gone with no key left to reach it.
+    ///
+    /// The editor's own tests could not see this either: the one that types
+    /// after a recall asserts exactly the first three keystrokes and stops one
+    /// `C-p` short of the loss.
+    #[test]
+    fn a_recalled_comment_you_have_edited_is_not_your_draft() {
+        let ctrl = KeyModifiers::CONTROL;
+        let chord = |c: char, m| key(c, m);
+
+        let mut app = editing();
+        handle_key(&mut app, chord('p', ctrl));
+        assert_eq!(app.editor.text(), "older note");
+        handle_key(&mut app, key('!', KeyModifiers::NONE));
+        assert_eq!(app.editor.text(), "older note!", "setup failed");
+
+        // Off to look at the history again. The edit is discarded — it never
+        // had a slot — but the draft is still in the one slot there is.
+        handle_key(&mut app, chord('p', ctrl));
+        assert_eq!(app.editor.text(), "older note", "the edit was parked");
+        handle_key(&mut app, chord('n', ctrl));
+        assert_eq!(app.editor.text(), INPUT_TEXT, "draft lost");
+
+        // And it commits as itself, not as a copy of the history entry.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 2);
+        assert_eq!(app.annotations[1].text, INPUT_TEXT);
+    }
+
     /// The other half of "a bad `--result` must not cost the session", and the
     /// half that was never tested. `preflight` catches an unwritable path before
     /// a word is written, but it cannot catch a disk that fills up, a directory

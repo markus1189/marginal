@@ -8,6 +8,24 @@
 //! * `M-DEL` / `M-d` / `M-b` / `M-f` (`*-word`) — alphanumeric words
 //!
 //! No kill ring: killed text is gone.
+//!
+//! # History and the draft slot
+//!
+//! readline keeps the line you are composing in a slot of its own below the
+//! oldest… newest history entries, so recalling an entry can never cost you
+//! what you had typed. That slot is `stash`, and the model here is:
+//!
+//! * The draft is parked on the first `C-p` that leaves it, and **only** then.
+//!   Nothing typed afterwards overwrites it.
+//! * `C-n` past the newest entry puts it back and empties the slot; so does
+//!   `submit` / `start_fresh`, which throw the whole buffer away anyway.
+//! * Editing a recalled entry ends browsing but does not touch the slot. The
+//!   *edit* has no slot of its own: it lives as long as you stay on it and is
+//!   gone the moment you walk away with `C-p`. The next `C-p` resumes from the
+//!   newest entry rather than from the one that was edited.
+//!
+//! Losing an edit to a recalled comment is a simplification, deliberately
+//! taken; losing the draft is data loss, and one `C-p` used to be enough.
 
 #[derive(Debug, Default)]
 pub struct Editor {
@@ -17,7 +35,10 @@ pub struct Editor {
     history: Vec<String>,
     /// `None` while editing; `Some(i)` while browsing history.
     browsing: Option<usize>,
-    stash: String,
+    /// The draft slot: `Some` from the `C-p` that parked the user's own line
+    /// until the `C-n` that puts it back. Not the same question as `browsing`,
+    /// which an edit turns off while the draft is still parked.
+    stash: Option<String>,
 }
 
 fn is_word(c: char) -> bool {
@@ -45,7 +66,7 @@ impl Editor {
         self.text.clear();
         self.cursor = 0;
         self.browsing = None;
-        self.stash.clear();
+        self.stash = None;
     }
 
     /// Record a submitted comment for `C-p` recall and reset for the next one.
@@ -63,6 +84,7 @@ impl Editor {
         self.text = s.to_string();
         self.cursor = self.text.len();
         self.browsing = None;
+        self.stash = None;
     }
 
     // ---- boundaries -----------------------------------------------------
@@ -114,9 +136,9 @@ impl Editor {
     // Movement does not end history browsing. `browsing` is documented as
     // "`None` while editing", and moving the cursor is not editing — the four
     // motions below never cleared it, and these two agreeing with them is what
-    // keeps the stashed draft reachable. Clearing it here stranded the draft:
-    // `history_next` returns early without a `browsing` index, and the next
-    // `history_prev` overwrote the stash with whatever was on display.
+    // keeps the parked draft one `C-n` away. Clearing it here took that away:
+    // `history_next` returns early without a `browsing` index, so `C-n`
+    // answered with nothing at all.
     pub fn left(&mut self) {
         self.cursor = self.prev(self.cursor);
     }
@@ -257,7 +279,17 @@ impl Editor {
         }
         let i = match self.browsing {
             None => {
-                self.stash = self.text.clone();
+                // Park the draft — but only if the buffer still *is* the
+                // draft. After an edit to a recalled comment `browsing` is
+                // `None` again while the slot is still full, and what is on
+                // screen is that comment, not anything the user composed.
+                // Stashing it here overwrote the draft with an entry the
+                // history already holds, and `C-n` handed that back instead:
+                // one `C-p`, one keystroke, one more `C-p` and the draft was
+                // gone with no key left to reach it.
+                if self.stash.is_none() {
+                    self.stash = Some(self.text.clone());
+                }
                 self.history.len() - 1
             }
             Some(0) => 0,
@@ -273,7 +305,7 @@ impl Editor {
         let Some(i) = self.browsing else { return };
         if i + 1 >= self.history.len() {
             self.browsing = None;
-            self.text = std::mem::take(&mut self.stash);
+            self.text = self.stash.take().unwrap_or_default();
         } else {
             self.browsing = Some(i + 1);
             self.text = self.history[i + 1].clone();
@@ -605,6 +637,86 @@ mod tests {
         e.insert('!');
         e.history_next(); // no longer browsing, so nothing is restored
         assert_eq!(e.text(), "old!");
+    }
+
+    /// The draft slot, and the reason it is a slot rather than "whatever was in
+    /// the buffer last time browsing started". `history_prev` stashed
+    /// `self.text` on every entry with `browsing == None`, which is also the
+    /// state one keystroke into an edit of a recalled comment — so the second
+    /// `C-p` parked that comment over the draft, and `C-n` handed it straight
+    /// back as if it were the user's own line:
+    ///
+    ///     "my draft" -> C-p -> "!" -> C-p -> C-n     used to yield "old!"
+    ///
+    /// with the draft gone and no key left to reach it. The slot now belongs to
+    /// the draft alone: it is filled once, by the `C-p` that parks it.
+    #[test]
+    fn an_edit_to_a_recalled_comment_never_takes_the_drafts_slot() {
+        let mut e = Editor::default();
+        e.set("old");
+        e.submit();
+
+        e.set("my draft");
+        e.history_prev();
+        assert_eq!(e.text(), "old");
+        e.insert('!'); // browsing off, draft still parked
+        e.history_prev();
+        assert_eq!(e.text(), "old", "the edit went into the history");
+        e.history_next();
+        assert_eq!(e.text(), "my draft", "the draft was overwritten");
+    }
+
+    /// Restoring the draft empties the slot, so the next walk parks the line as
+    /// it stands now rather than handing back a stale copy of it.
+    #[test]
+    fn the_draft_slot_is_refilled_by_the_next_walk_through_the_history() {
+        let mut e = Editor::default();
+        e.set("first");
+        e.submit();
+        e.set("second");
+        e.submit();
+
+        e.set("draft one");
+        e.history_prev();
+        e.history_prev();
+        assert_eq!(e.text(), "first");
+        e.history_next();
+        e.history_next();
+        assert_eq!(e.text(), "draft one");
+
+        // Same buffer, edited, and away again: the slot holds the new text.
+        e.insert('!');
+        e.history_prev();
+        assert_eq!(e.text(), "second");
+        e.history_next();
+        assert_eq!(e.text(), "draft one!");
+    }
+
+    /// The half that is deliberately *not* kept. An edit to a recalled comment
+    /// has no slot of its own — walking away with `C-p` discards it, and the
+    /// walk restarts from the newest entry rather than resuming where the edit
+    /// happened. Both are simplifications a full readline would not make; they
+    /// cost an edit that is still on screen, not a draft that is not.
+    #[test]
+    fn walking_away_from_an_edited_comment_discards_the_edit() {
+        let mut e = Editor::default();
+        for c in ["first", "second"] {
+            e.set(c);
+            e.submit();
+        }
+
+        e.set("draft");
+        e.history_prev();
+        e.history_prev();
+        assert_eq!(e.text(), "first");
+        e.insert('!');
+        assert_eq!(e.text(), "first!");
+
+        e.history_prev();
+        assert_eq!(e.text(), "second", "the walk did not restart at the newest");
+        e.history_next();
+        assert_eq!(e.text(), "draft");
+        assert!(!e.history.iter().any(|h| h == "first!"));
     }
 
     #[test]
