@@ -19,7 +19,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use app::{App, Mode, Sel};
 
-const USAGE: &str = "usage: marginal [--dump-blocks] [--raw] [--result PATH] [--label NAME] FILE";
+const USAGE: &str =
+    "usage: marginal [--dump-blocks] [--raw] [--result[=]PATH] [--label[=]NAME] [--] FILE";
 
 struct Args {
     file: String,
@@ -49,10 +50,17 @@ fn argv_utf8(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<Strin
 /// `--label --result o.json` swallowed the result path so nothing was saved at
 /// all. The `starts_with('-')` guard in the match only ever saw tokens that
 /// reached it, and `ok_or` fired only when the flag was the very last argument.
-fn value(next: Option<String>, missing: &str) -> Result<String, String> {
+///
+/// The guard is a refusal, not a rule about what a value may contain: the
+/// `flag=value` spelling takes whatever it is given, and the message points at
+/// it — a label is free text, and `-WIP` is a perfectly ordinary thing to call
+/// one.
+fn value(next: Option<String>, flag: &str, needs: &str) -> Result<String, String> {
     match next {
-        None => Err(missing.to_string()),
-        Some(v) if v.starts_with('-') => Err(format!("{missing}, not {v}")),
+        None => Err(format!("{flag} needs {needs}")),
+        Some(v) if v.starts_with('-') => Err(format!(
+            "{flag} needs {needs}, not {v} (write {flag}={v} to mean it)"
+        )),
         Some(v) => Ok(v),
     }
 }
@@ -68,16 +76,45 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut label = None;
     let mut dump = false;
     let mut pretty = true;
+    // Two escape hatches, because a value that starts with a dash was otherwise
+    // not expressible at all and the refusal blamed the wrong token.
+    //
+    // `--` ends the flags: everything after it is the FILE, however it is
+    // spelled. It used to reach the unknown-flag arm, so nothing is being taken
+    // away. Only the first one is the marker — a second `--` is by then an
+    // ordinary operand, the same as under every getopt.
+    //
+    // `--flag=VALUE` is a spelling of `--flag VALUE` and nothing more: the value
+    // is taken verbatim, dashes, `=` signs, empty and all, so `--label=-WIP`
+    // says what no pair of tokens could. `--result=o.json` used to be reported
+    // as `unknown flag: --result=o.json`, which named the flag *and* the value
+    // and blamed both. An `=` after any other flag is still an unknown flag:
+    // `--raw=1` and `--=x` are typos, not requests.
+    let mut ended = false;
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
+        if ended {
+            file = Some(a);
+            continue;
+        }
         match a.as_str() {
+            "--" => ended = true,
             "--dump-blocks" => dump = true,
             "--raw" => pretty = false,
-            "--result" => result = Some(value(it.next(), "--result needs a path")?),
-            "--label" => label = Some(value(it.next(), "--label needs a name")?),
+            "--result" => result = Some(value(it.next(), "--result", "a path")?),
+            "--label" => label = Some(value(it.next(), "--label", "a name")?),
             "-h" | "--help" => return Ok(None),
-            other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
-            other => file = Some(other.to_string()),
+            _ => {
+                if let Some(v) = a.strip_prefix("--result=") {
+                    result = Some(v.to_string());
+                } else if let Some(v) = a.strip_prefix("--label=") {
+                    label = Some(v.to_string());
+                } else if a.starts_with('-') {
+                    return Err(format!("unknown flag: {a}"));
+                } else {
+                    file = Some(a);
+                }
+            }
         }
     }
     Ok(Some(Args {
@@ -629,6 +666,90 @@ mod tests {
         assert_eq!(a.result.as_deref(), Some("o.json"));
         assert_eq!(a.label.as_deref(), Some("PLAN.md"));
         assert_eq!(a.file, "f.md");
+
+        // The refusal now says how to mean it, which is the whole reason the
+        // guard is tolerable: it is a spelling rule, not a ban.
+        let e = argv(&["--label", "-WIP", "f.md"]).err().unwrap();
+        assert!(e.contains("--label=-WIP"), "{e}");
+    }
+
+    /// A file whose name starts with a dash could not be named at all: every
+    /// such token reached the unknown-flag arm. `--` sat in that same arm, so
+    /// giving it the end-of-flags meaning every getopt already gives it takes
+    /// nothing away.
+    #[test]
+    fn a_double_dash_ends_the_flags() {
+        let file = |a: &[&str]| argv(a).unwrap().unwrap().file;
+
+        assert_eq!(file(&["--", "-notes.md"]), "-notes.md");
+        // Past the marker, a flag is a filename — including `-h`, which would
+        // otherwise print the usage and exit 0 with nothing read.
+        assert_eq!(file(&["--", "-h"]), "-h");
+        assert_eq!(file(&["--", "--label"]), "--label");
+        // Only the first `--` is the marker; the second is an ordinary operand,
+        // and the last operand is the file, as it has always been.
+        assert_eq!(file(&["--", "--", "f.md"]), "f.md");
+        // Flags before it are still flags.
+        let a = argv(&["--raw", "--label", "PLAN.md", "--", "-f.md"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.file, "-f.md");
+        assert_eq!(a.label.as_deref(), Some("PLAN.md"));
+        assert!(!a.pretty);
+
+        // On its own it names no file, which is the same error as no arguments.
+        assert!(argv(&["--"]).is_err());
+        // And it is not a value: `--result --` is the mistake the value guard
+        // exists to catch, not a request for a file named `--`. Say
+        // `--result=--` if that is really what you meant.
+        assert!(argv(&["--result", "--", "f.md"]).is_err());
+    }
+
+    /// `--result=o.json` failed with `unknown flag: --result=o.json`, blaming a
+    /// flag that exists for the shape of the token. The `=` form is also the
+    /// only way to give a flag a value that starts with a dash — a path can
+    /// dodge with `./-x`, but a label is free text and `-WIP` is a name.
+    #[test]
+    fn a_flag_takes_its_value_after_an_equals_sign_too() {
+        let ok = |a: &[&str]| argv(a).unwrap().unwrap();
+
+        let a = ok(&["--result=o.json", "--label=PLAN.md", "f.md"]);
+        assert_eq!(a.result.as_deref(), Some("o.json"));
+        assert_eq!(a.label.as_deref(), Some("PLAN.md"));
+        assert_eq!(a.file, "f.md");
+
+        // Verbatim: dashes, a second `=`, and the empty value all pass through.
+        // `--label=` is exactly `--label ''`, which has always been accepted;
+        // an empty `--result` is refused later, by the pre-flight, exactly as
+        // `--result ''` is.
+        assert_eq!(ok(&["--label=-WIP", "f.md"]).label.as_deref(), Some("-WIP"));
+        assert_eq!(
+            ok(&["--label=-- draft --", "f.md"]).label.as_deref(),
+            Some("-- draft --")
+        );
+        assert_eq!(
+            ok(&["--result=--label", "f.md"]).result.as_deref(),
+            Some("--label")
+        );
+        assert_eq!(ok(&["--label=a=b", "f.md"]).label.as_deref(), Some("a=b"));
+        assert_eq!(ok(&["--label=", "f.md"]).label.as_deref(), Some(""));
+        assert_eq!(ok(&["--result=", "f.md"]).result.as_deref(), Some(""));
+
+        // An `=` is not suddenly special everywhere. The flags that take no
+        // value do not start taking one, an empty flag name is not the
+        // end-of-flags marker wearing a value, and a filename may contain `=`.
+        for bad in [
+            &["--raw=1", "f.md"],
+            &["--dump-blocks=1", "f.md"],
+            &["--=x", "f.md"],
+            &["--help=me", "f.md"],
+        ] {
+            let e = argv(bad).err().unwrap();
+            assert_eq!(e, format!("unknown flag: {}", bad[0]), "{bad:?}");
+        }
+        assert_eq!(ok(&["a=b.md"]).file, "a=b.md");
+        // Past `--` it is a filename like any other.
+        assert_eq!(ok(&["--", "--label=x"]).file, "--label=x");
     }
 
     const DOC: &str = "# Steps\n\n- one\n- two\n";
