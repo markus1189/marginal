@@ -16,7 +16,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::app::{Anchor, App, Mode};
-use crate::wrap::{cells, wrap, Piece, Row};
+use crate::wrap::{cells_claimed, wrap, Piece, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
@@ -361,7 +361,8 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 // A cursor past the edge leaves no cursor cell on screen at all.
                 // The marker takes the cursor's colour in that case, so the screen
                 // still says where you are — `w`/`b`, `0` and `z` get you back to it.
-                let hidden = on_cursor_line && cells(&text[..cursor_byte(app, &text)]) >= body_w;
+                let hidden =
+                    on_cursor_line && cells_claimed(&text[..cursor_byte(app, &text)]) >= body_w;
                 let dim = Style::default().fg(Color::DarkGray);
                 overflow.push((idx, if hidden { cur_style } else { dim }));
             }
@@ -397,10 +398,10 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 //
                 // It is `Cell::cell_width` that has to answer "is this wide?",
                 // because that is the function `Buffer::diff` itself asks. It
-                // is not `wrap::cells`: `cells` is plain `unicode-width`, while
+                // is not `wrap::cells_claimed`: `cells_claimed` is plain `unicode-width`, while
                 // `cell_width` adds one column per halfwidth katakana dakuten
                 // (U+FF9E/U+FF9F), which `unicode-width` calls zero-width and
-                // terminals draw as a column of its own. `cells("ｶﾞ")` is 1 and
+                // terminals draw as a column of its own. `cells_claimed("ｶﾞ")` is 1 and
                 // `"ｶﾞ".cell_width()` is 2, so the old guard left every such
                 // line unblanked and the marker was dropped by `diff`. Asking
                 // the `Cell` rather than its symbol also honours a
@@ -454,7 +455,7 @@ fn source_title(app: &App, width: u16) -> String {
     );
     // Two of the three are the border corners, the third is the pad space that
     // `format!` appends below.
-    let budget = usize::from(width).saturating_sub(cells(&rest) + 3);
+    let budget = usize::from(width).saturating_sub(cells_claimed(&rest) + 3);
     format!("{rest}{} ", shorten_path(app.display_name(), budget))
 }
 
@@ -468,10 +469,10 @@ fn source_title(app: &App, width: u16) -> String {
 /// ellipsis to say it had happened.
 ///
 /// The cut walks **grapheme clusters** and measures the retained tail **whole**,
-/// with the same `cells` the caller applies to the finished title. Neither half
+/// with the same `cells_claimed` the caller applies to the finished title. Neither half
 /// of that is decoration:
 ///
-/// - `cells` reads sequences, so a per-character sum is a different number.
+/// - `cells_claimed` reads sequences, so a per-character sum is a different number.
 ///   `"✔\u{FE0F}"` and `"1\u{FE0F}\u{20E3}"` are two cells each as a string and
 ///   one summed per char; `"👩‍👩‍👧‍👦"` is two as a string and eight summed. The
 ///   under-counting kind is the same overrun this function exists to prevent,
@@ -480,17 +481,17 @@ fn source_title(app: &App, width: u16) -> String {
 ///   `"日\u{301}ab"` after `日` leaves the combining acute to attach to the
 ///   ellipsis that gets prepended, so the cut mark comes out as `…́`.
 ///
-/// `cells`, not `str::cell_width`, because a block title is measured twice and
-/// the *outer* of the two is `cells`. `Block::render_left_titles` sizes the
+/// `cells_claimed`, not `str::cell_width`, because a block title is measured twice and
+/// the *outer* of the two is `cells_claimed`. `Block::render_left_titles` sizes the
 /// title's `Rect` at `Line::width()` — plain `unicode-width`, the same function
-/// `cells` is — and only inside that rect does the span loop advance by
-/// `cell_width`. So `cells` is what decides whether the whole title gets a rect
+/// `cells_claimed` is — and only inside that rect does the span loop advance by
+/// `cell_width`. So `cells_claimed` is what decides whether the whole title gets a rect
 /// to live in, and being stricter than it buys nothing: the one string where
 /// the two disagree, halfwidth katakana plus dakuten, is clipped by ratatui
 /// whatever budget it is given, because the rect it is handed is derived from
 /// the title itself and is a column short per pair.
 fn shorten_path(path: &str, max: usize) -> String {
-    if cells(path) <= max {
+    if cells_claimed(path) <= max {
         return path.to_string();
     }
     // One column goes to the ellipsis that marks the cut. With no column at all
@@ -501,13 +502,13 @@ fn shorten_path(path: &str, max: usize) -> String {
     }
     let budget = max - 1;
     // Longest suffix that fits, measured as a string at every candidate cut.
-    // `cells` never shrinks as the suffix grows, so the first cut that does not
+    // `cells_claimed` never shrinks as the suffix grows, so the first cut that does not
     // fit ends the search.
     let start = path
         .grapheme_indices(true)
         .map(|(i, _)| i)
         .rev()
-        .take_while(|&i| cells(&path[i..]) <= budget)
+        .take_while(|&i| cells_claimed(&path[i..]) <= budget)
         .last()
         .unwrap_or(path.len());
     format!("…{}", &path[start..])
@@ -583,7 +584,7 @@ const PROMPT: &str = "> ";
 ///   was asked for. Rounding **up** to an offset the truncator can reach is what
 ///   keeps the arithmetic here and the arithmetic on screen the same one.
 ///
-/// Widths come from `str::cell_width`, not `wrap::cells`, for the reason
+/// Widths come from `str::cell_width`, not `wrap::cells_claimed`, for the reason
 /// `cac34c1` gives: they disagree by one column per halfwidth katakana dakuten,
 /// and only the former is what ratatui lays the row out with.
 fn caret_hscroll(prompt: &str, before: &str, caret: &str, inner_w: u16) -> u16 {
@@ -846,7 +847,7 @@ const STATUS_W: u16 = 28;
 
 /// What a rung costs on its own: one column of leading space, then the hints.
 fn hints_w(keys: &str) -> usize {
-    1 + cells(keys)
+    1 + cells_claimed(keys)
 }
 
 /// …and what it costs with the status field beside it, one column between the
@@ -908,7 +909,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     // therefore *removed* the key hints.
     //
     // Testing affordability against the rung *just chosen* brought the same
-    // fault back on the other axis: `cells(keys)` jumps a whole rung gap at each
+    // fault back on the other axis: `cells_claimed(keys)` jumps a whole rung gap at each
     // boundary, so the right-hand side of that test outran the left and the
     // field vanished by *widening* — on at 94 columns, gone at 95. At and above
     // the floor the field is therefore reserved outright and the rung is picked
@@ -1197,7 +1198,7 @@ mod tests {
     }
 
     /// Comment texts whose caret arithmetic differs. `ｶﾞ` is here because
-    /// `wrap::cells` and ratatui's `cell_width` disagree about it by one column
+    /// `wrap::cells_claimed` and ratatui's `cell_width` disagree about it by one column
     /// (see `cac34c1`), so a scroll measured with the former is short by a
     /// column per pair.
     const CARET_TEXTS: [(&str, &str); 5] = [
@@ -1434,7 +1435,7 @@ mod tests {
     /// to 36 columns removed `c comment · x remove` from the screen.
     ///
     /// Status: testing the field against the rung just chosen moved the same
-    /// fault to the other axis. `cells(keys)` jumps 31 and 38 cells at the
+    /// fault to the other axis. `cells_claimed(keys)` jumps 31 and 38 cells at the
     /// `KEYS` rung boundaries, so the field was on at 94 columns and gone at 95,
     /// on at 132 and gone at 133 — absent at 80 and 140, the two commonest
     /// terminal widths, and it is the only confirmation `x remove` gives.
@@ -1536,11 +1537,11 @@ mod tests {
     }
 
     /// File names whose cell width is neither their character count nor the sum
-    /// of their characters' widths. `cells` reads sequences: `✔\u{FE0F}` and the
+    /// of their characters' widths. `cells_claimed` reads sequences: `✔\u{FE0F}` and the
     /// keycap `1\u{FE0F}\u{20E3}` are two cells whole and one summed per char,
     /// and the ZWJ family is two whole and eight summed. `日` is the plain
     /// East-Asian-Wide case where char and cluster coincide; `ｶﾞ` is the case
-    /// where `cells` and ratatui's own `cell_width` disagree (see `cac34c1`);
+    /// where `cells_claimed` and ratatui's own `cell_width` disagree (see `cac34c1`);
     /// ASCII is the control that must not regress.
     const TITLE_NAMES: [(&str, &str); 6] = [
         ("ascii", "a-perfectly-ordinary-but-quite-long-file-name.md"),
@@ -1565,7 +1566,7 @@ mod tests {
     fn narrowest_usable_width() -> u16 {
         let mut bare = App::new("x.md".into(), DOC);
         bare.label = Some(String::new());
-        let fixed = cells(&source_title(&bare, u16::MAX));
+        let fixed = cells_claimed(&source_title(&bare, u16::MAX));
         u16::try_from(fixed + 2).unwrap()
     }
 
@@ -1576,7 +1577,7 @@ mod tests {
     /// no ellipsis to show it had happened.
     ///
     /// Counting *cells* per char fixed the East-Asian-Wide half and left the
-    /// other half in place, because `cells` is a measure of a string and the cut
+    /// other half in place, because `cells_claimed` is a measure of a string and the cut
     /// summed it over chars. Two different answers to "how wide is this?" cannot
     /// both be the budget.
     ///
@@ -1590,7 +1591,7 @@ mod tests {
         // The cut itself, in cells rather than characters.
         assert_eq!(shorten_path("日本語日本語日本.md", 9), "…日本.md");
         assert_eq!(shorten_path("仕様/設計メモ.md", 20), "仕様/設計メモ.md");
-        assert!(cells(&shorten_path("日本語日本語日本.md", 9)) <= 9);
+        assert!(cells_claimed(&shorten_path("日本語日本語日本.md", 9)) <= 9);
         // …and in cells of the sequence, not cells summed over its chars. Both
         // directions: summing gives one cell per VS16 sequence where the string
         // is two, so this one used to come back a cell over budget —
@@ -1615,9 +1616,9 @@ mod tests {
                 let title = source_title(&app, w);
                 let slot = usize::from(w) - 2;
                 assert!(
-                    cells(&title) <= slot,
+                    cells_claimed(&title) <= slot,
                     "{kind} title is {} cells in a {slot}-cell slot at width {w}: {title:?}",
-                    cells(&title)
+                    cells_claimed(&title)
                 );
 
                 // What the string says has to be what the screen shows. It was
@@ -1629,7 +1630,7 @@ mod tests {
                 let buf = render_buf(&mut app, w, 24);
                 let row = top_row(&buf);
                 // ratatui measures the title twice: `Block` sizes its rect at
-                // `Line::width()` — plain `unicode-width`, the function `cells`
+                // `Line::width()` — plain `unicode-width`, the function `cells_claimed`
                 // is — and then fills the rect with a loop that advances by
                 // `cell_width`. Halfwidth katakana sound marks are the only
                 // characters where the two disagree (`cac34c1`), and the
@@ -1688,10 +1689,10 @@ mod tests {
     /// only place the difference shows.
     ///
     /// Both characters here are two cells on screen, but only one of them is
-    /// two cells according to `wrap::cells`. `cells` is plain `unicode-width`,
+    /// two cells according to `wrap::cells_claimed`. `cells_claimed` is plain `unicode-width`,
     /// which calls the halfwidth dakuten U+FF9E zero-width; ratatui adds the
-    /// column back, so `cells("ｶﾞ")` is 1 where `"ｶﾞ".cell_width()` is 2. The
-    /// guard asked `cells`, saw a narrow cell, blanked nothing, and left the
+    /// column back, so `cells_claimed("ｶﾞ")` is 1 where `"ｶﾞ".cell_width()` is 2. The
+    /// guard asked `cells_claimed`, saw a narrow cell, blanked nothing, and left the
     /// original bug untouched on every dakuten line at every even width. Hence
     /// the sweep: one width is not a test of a layout rule, and it is the even
     /// ones that land the wide grapheme on the last two columns. `日` stays in
@@ -1805,6 +1806,77 @@ mod tests {
             screen.contains("at the end."),
             "the tail of the line should be on screen: {screen}"
         );
+    }
+
+    /// Wrapping is the mode whose whole promise is that nothing runs off the
+    /// edge, and on a halfwidth-katakana line it broke that promise silently.
+    /// `wrap_line` packed rows to `cells_claimed`, which calls `U+FF9E`
+    /// zero-width; ratatui's `LineTruncator` cut them at `cell_width`, which does
+    /// not. Every row went to the pane at twice its budget and came back halved,
+    /// with no `›` to say so — the marker's own guard is `Line::width()`, the
+    /// same short measure, so it agreed the row fitted.
+    ///
+    /// The assertion is on the backend buffer and it is a *census*: read the
+    /// body columns back out of the buffer and require them to spell the head of
+    /// the file, character for character, with no gap. Asserting "no `›`" would
+    /// pass on the bug, and asserting one row's width would pass on a row that
+    /// silently dropped its tail.
+    ///
+    /// The line is one word with no break point in it — no separator, and
+    /// halfwidth katakana is not wide — so it goes to `wrap_line`'s hard cut,
+    /// which packs a character at a time. `ｶ`, `ﾞ` and a digit are one drawn cell
+    /// each, so a correct row is exactly `body_w` characters and the count is
+    /// exact rather than a bound. That a cluster may be split across two rows is
+    /// the price of a pane with an odd number of columns, and it costs no cell.
+    ///
+    /// The counter between the clusters is not decoration. A line of one
+    /// repeated cluster cannot fail `starts_with`: every window of it is a
+    /// prefix, so a screen that skipped half of every row would still spell a
+    /// prefix of the file — and at an even body width it spells one of exactly
+    /// the right length too. Only text that says where it came from can tell
+    /// "the next `n` characters" from "some later `n` characters".
+    #[test]
+    fn every_cluster_of_a_wrapped_halfwidth_katakana_line_reaches_the_screen() {
+        // Long enough to fill the viewport at the widest pane swept, so a short
+        // count is always dropped text and never the end of the document.
+        let line: String = (0..500).map(|i| format!("ｶﾞ{i}")).collect();
+        let doc = format!("{line}\n");
+        // `draw` gives the annotations pane six rows and the footer one, and the
+        // source block spends two more of what is left on its border.
+        let h = 20u16;
+        let last_body_row = h - 6 - 1 - 2;
+        for w in 20u16..=80 {
+            let mut app = App::new("kana.md".into(), &doc);
+            app.pretty = true;
+            app.cursor = Pos::new(1, 1);
+            let buf = render_buf(&mut app, w, h);
+            let body_x = 7u16; // one border column, then the six-cell gutter
+            let body_w = w - body_x - 1;
+            // A wide grapheme's continuation cell is a space, and this document
+            // has no space of its own, so dropping them leaves only file bytes.
+            let shown: String = (1..=last_body_row)
+                .flat_map(|y| (body_x..body_x + body_w).map(move |x| (x, y)))
+                .map(|p| buf[p].symbol())
+                .collect::<String>()
+                .replace(' ', "");
+            assert!(
+                line.starts_with(&shown),
+                "width {w}: the screen is not a prefix of the line: {shown:?}"
+            );
+            assert_eq!(
+                shown.chars().count(),
+                usize::from(body_w) * usize::from(last_body_row),
+                "width {w}: {} characters on {last_body_row} rows of a {body_w}-cell body — \
+                 a short count is text that never reached the terminal",
+                shown.chars().count()
+            );
+            // Wrapping's promise: nothing runs off the edge, so nothing is
+            // marked as running off it either.
+            assert!(
+                (1..=last_body_row).all(|y| buf[(w - 2, y)].symbol() != "›"),
+                "width {w}: a wrapped row is marked truncated"
+            );
+        }
     }
 
     /// A repeated line number reads as a repeated line. The number and the

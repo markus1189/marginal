@@ -11,12 +11,71 @@
 //! row count to clamp a scroll and ratatui exposes no stable way to ask;
 //! `Wrap { trim: true }` also eats the indentation that makes nested
 //! markdown readable.
+//!
+//! # Two measures of width, and the rule for picking one
+//!
+//! ratatui measures a string with two functions that do not agree, and every
+//! width in this crate is one of them. Which one is not a matter of taste:
+//!
+//! - [`cells_claimed`] is `Span::width()`, which is plain `unicode-width`. It
+//!   is what `Line::width()` sums, so it is the number ratatui uses when a
+//!   string's own width **decides how big an area is**.
+//! - [`cells_drawn`] is `str::cell_width`, which is `unicode-width` plus one
+//!   column per halfwidth katakana dakuten or handakuten (`U+FF9E`/`U+FF9F`).
+//!   `unicode-width` calls those zero-width and terminals draw them as a column
+//!   of their own. It is what `LineTruncator` and `WordWrapper` advance by and
+//!   what `Buffer::diff` reads a cell's occupancy with, so it is the number
+//!   that says **what reaches the screen**.
+//!
+//! `ｶﾞ` (`U+FF76 U+FF9E`) is the whole of the disagreement: one grapheme
+//! cluster, `cells_claimed` 1, `cells_drawn` 2, and two columns on the glass.
+//!
+//! A new call site picks between them by asking one question — **where does the
+//! width on the other side of the comparison come from?**
+//!
+//! - **From outside the string**: a pane, a table column, a `Rect` that was
+//!   already fixed when the string arrived. ratatui will lay the string into
+//!   that area and cut what does not fit, and it cuts by [`cells_drawn`]. Any
+//!   other measure over-fills the area, and the overflow is dropped silently —
+//!   there is no mark and no error, the characters simply never appear.
+//! - **From the string itself**: a block title, whose `Rect`
+//!   `Block::render_left_titles` sizes at `Line::width()`. Then
+//!   [`cells_claimed`] is the *outer* of the two measures and the one that
+//!   decides whether the string is given an area at all. Being stricter than it
+//!   buys nothing, because the rect the string is handed is derived the same
+//!   short way whatever budget the caller picked. `452b2c8` established this
+//!   for `shorten_path`; it is not an oversight to be tidied up.
+//!
+//! The short form: **fit it to a pane with [`cells_drawn`], size a title with
+//! [`cells_claimed`]**.
 
+use ratatui::buffer::CellWidth as _;
 use ratatui::text::Span;
 
-/// Display width of `s` in terminal cells.
-pub fn cells(s: &str) -> usize {
+/// Cells `s` *claims*: `Span::width()`, the number `Line::width()` sums and the
+/// one a block title's `Rect` is sized from. See the module doc for when this is
+/// the measure a call site wants — most of the time it is not.
+pub fn cells_claimed(s: &str) -> usize {
     Span::raw(s).width()
+}
+
+/// Cells `s` is *drawn* in: `str::cell_width`, the number ratatui lays out and
+/// truncates by. The measure for anything being fitted into a pane whose width
+/// was decided elsewhere. See the module doc.
+pub fn cells_drawn(s: &str) -> usize {
+    // `str::cell_width` fast-paths a one-byte string to 1, behind a
+    // `debug_assert!` that the byte is not an ASCII control — a guard for
+    // callers who were meant to have filtered controls out already. The callers
+    // here cannot: they measure the file under review one character at a time,
+    // `source_lines` ends a line only at `\r` or `\n`, and `display_line`
+    // substitutes only `\t`, so the other thirty ASCII control bytes reach this
+    // function intact. Taking the fast path here is the same answer `cell_width`
+    // gives — 1 for any one-byte string, control or not — without the panic a
+    // debug build would otherwise take on a file with a stray `\x0c` in it.
+    if s.len() == 1 {
+        return 1;
+    }
+    usize::from(s.cell_width())
 }
 
 /// One piece of a rendered row.
@@ -159,14 +218,23 @@ fn units(line: &str) -> Vec<(usize, usize, usize)> {
     out
 }
 
-/// Byte length of the longest prefix of `s` that fits in `limit` cells. Always
-/// a char boundary: it is accumulated a character at a time, never by slicing at
-/// a computed byte.
+/// Byte length of the longest prefix of `s` that fits in `limit` cells of pane.
+/// Always a char boundary: it is accumulated a character at a time, never by
+/// slicing at a computed byte.
+///
+/// `limit` is a pane, so the measure is [`cells_drawn`]. Charging it per `char`
+/// is exact for the pair the two measures disagree about — [`cells_drawn`] adds
+/// its column per *occurrence* of `U+FF9E`/`U+FF9F`, so a halfwidth katakana and
+/// its dakuten cost 1 apiece whether they are measured together or apart, and
+/// the pane is not over-filled either way. It is **not** exact for a sequence whose
+/// width is a property of the sequence: `"✔\u{FE0F}"` is two cells whole and one
+/// summed per char, the under-count `452b2c8` removed from `shorten_path`. That
+/// gap survives here and is not this function's to close on its own.
 fn prefix_cells(s: &str, limit: usize) -> usize {
     let mut buf = [0u8; 4];
     let (mut n, mut w) = (0usize, 0usize);
     for ch in s.chars() {
-        let cw = cells(ch.encode_utf8(&mut buf));
+        let cw = cells_drawn(ch.encode_utf8(&mut buf));
         if w + cw > limit {
             break;
         }
@@ -179,12 +247,18 @@ fn prefix_cells(s: &str, limit: usize) -> usize {
 /// Byte offsets inside `word` where a break is acceptable without a space:
 /// after a URL or path separator, and between two adjacent wide characters,
 /// which is the only break CJK offers since it is written without spaces.
+///
+/// "Wide" is [`cells_drawn`] because the question is about the screen, and the
+/// answer has to be the one the row-packing loop below will act on. Halfwidth
+/// katakana is not wide under either measure, so a dakuten run offers no break
+/// point of its own and falls to the hard cut — which is the path that has to
+/// charge the right number of cells.
 fn break_points(word: &str) -> Vec<usize> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4];
     let mut prev_wide = false;
     for (i, ch) in word.char_indices() {
-        let wide = cells(ch.encode_utf8(&mut buf)) > 1;
+        let wide = cells_drawn(ch.encode_utf8(&mut buf)) > 1;
         if wide && prev_wide && i > 0 {
             out.push(i);
         }
@@ -244,7 +318,7 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                 // share, so it spills into rows of its own first; only the
                 // remainder rides along with the content.
                 let mut p = start;
-                while cells(&line[p..$at]) >= limit {
+                while cells_drawn(&line[p..$at]) >= limit {
                     let n = prefix_cells(&line[p..$at], limit);
                     if n == 0 {
                         break;
@@ -255,13 +329,13 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                 }
                 start = p;
                 cur_end = p;
-                w = cells(&line[p..$at]);
+                w = cells_drawn(&line[p..$at]);
             }
         };
     }
 
     for (s, e, sp) in units {
-        let ww = cells(&line[s..e]);
+        let ww = cells_drawn(&line[s..e]);
         if w > 0 && w + ww > limit {
             brk!(s);
         }
@@ -276,7 +350,7 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                 .map(|b| s + b)
                 .chain(std::iter::once(e));
             for bp in stops {
-                let sw = cells(&line[prev..bp]);
+                let sw = cells_drawn(&line[prev..bp]);
                 if w > 0 && w + sw > limit {
                     brk!(prev);
                 }
@@ -288,7 +362,7 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                     let mut j = prev;
                     let mut buf = [0u8; 4];
                     for ch in line[prev..bp].chars() {
-                        let cw = cells(ch.encode_utf8(&mut buf));
+                        let cw = cells_drawn(ch.encode_utf8(&mut buf));
                         // Not `brk!`: the loop sets `cur_end` itself on every
                         // character, so seeding it here would be a dead store.
                         if w > 0 && w + cw > limit {
@@ -323,6 +397,96 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
 mod tests {
     use super::*;
 
+    /// The two measures, and the single character class that separates them.
+    /// Anything that makes them agree everywhere has deleted the distinction the
+    /// module doc is about.
+    #[test]
+    fn the_two_measures_part_company_at_the_halfwidth_sound_marks() {
+        // Agreement is the common case: ASCII, East-Asian-Wide, combining
+        // marks, and the *combining* dakuten U+3099, which ratatui leaves alone.
+        for s in [
+            "",
+            "abc",
+            "日本語",
+            "e\u{301}",
+            "ｶ\u{3099}",
+            "ガ",
+            "✔\u{FE0F}",
+        ] {
+            assert_eq!(
+                cells_claimed(s),
+                cells_drawn(s),
+                "the two measures should agree on {s:?}"
+            );
+        }
+        // And the exception, in both spellings ratatui adjusts for.
+        for (s, claimed, drawn) in [("ｶﾞ", 1, 2), ("ﾊﾟ", 1, 2), ("あﾞ", 2, 3)] {
+            assert_eq!(cells_claimed(s), claimed, "claimed width of {s:?}");
+            assert_eq!(cells_drawn(s), drawn, "drawn width of {s:?}");
+        }
+    }
+
+    /// `cells_drawn` is `str::cell_width` with its one-byte fast path taken
+    /// here instead, because that path is guarded by a `debug_assert!` against
+    /// ASCII control bytes and this crate cannot promise there are none: the
+    /// file under review is whatever the user opened, `source_lines` ends a line
+    /// only at `\r` or `\n`, and `display_line` substitutes only `\t`. Every
+    /// other control byte arrives intact at the per-character loops in
+    /// `prefix_cells`, `break_points` and `wrap_line`'s hard cut.
+    ///
+    /// So: the whole of ASCII, one byte at a time, must answer rather than
+    /// panic — and must answer the same 1 the fast path would have.
+    #[test]
+    fn cells_drawn_answers_for_a_control_byte_rather_than_asserting_on_it() {
+        for b in 0u8..=0x7f {
+            let mut buf = [0u8; 4];
+            let s = char::from(b).encode_utf8(&mut buf);
+            assert_eq!(cells_drawn(s), 1, "one-byte {b:#04x}");
+        }
+        // The same bytes reaching the wrapper, which is how they get here.
+        let line: String = (0u8..0x20)
+            .filter(|&b| b != b'\r' && b != b'\n')
+            .map(char::from)
+            .collect();
+        let rows = wrap_line(&line, 4, 4);
+        let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
+        assert_eq!(kept, line, "control bytes dropped by the wrapper");
+    }
+
+    /// Half of every row of a halfwidth-katakana line never reached the screen.
+    /// `wrap_line` measured with `unicode-width`, which calls `U+FF9E`
+    /// zero-width, so it packed 34 clusters into a 34-cell pane — 68 drawn
+    /// cells — and ratatui's `LineTruncator`, which advances by `cell_width`,
+    /// stopped at 34. The other 17 clusters were dropped with no marker, and the
+    /// row count was halved with them, so the anchor, the cursor row and the
+    /// paging step were all short on such a line too.
+    #[test]
+    fn a_wrapped_row_fits_the_pane_in_the_cells_the_terminal_draws() {
+        let line = "ｶﾞ".repeat(200);
+        // The headline number first: 200 clusters at two cells each is 400
+        // cells, which is 12 rows of 34 — not the 6 the claimed measure asked
+        // for, and `row_count` is what the anchor, the cursor row and the paging
+        // step are all counted in.
+        assert_eq!(
+            wrap_line(&line, 34, 34).len(),
+            12,
+            "200 two-cell clusters do not fit in 6 rows of 34 cells"
+        );
+        for width in 1usize..=60 {
+            let rows = wrap_line(&line, width, width);
+            for &(s, e) in &rows {
+                let seg = &line[s..e];
+                assert!(
+                    cells_drawn(seg) <= width || seg.chars().count() == 1,
+                    "width {width}: a row of {} drawn cells in a {width}-cell pane",
+                    cells_drawn(seg)
+                );
+            }
+            let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
+            assert_eq!(kept, line, "dropped bytes at width {width}");
+        }
+    }
+
     #[test]
     fn wrap_preserves_every_character_and_the_indentation() {
         for width in [1usize, 3, 12, 40] {
@@ -335,7 +499,10 @@ mod tests {
                 "lost indent at {width}"
             );
             for r in &rows {
-                assert!(cells(r) <= width || width == 0, "row over width: {r:?}");
+                assert!(
+                    cells_drawn(r) <= width || width == 0,
+                    "row over width: {r:?}"
+                );
             }
         }
     }
@@ -368,7 +535,7 @@ mod tests {
         assert_eq!(rows[0], "    - a nested item");
         for r in &rows[1..] {
             assert!(r.starts_with("      "), "{r:?}");
-            assert!(cells(r) <= 20, "{r:?}");
+            assert!(cells_drawn(r) <= 20, "{r:?}");
         }
         assert_eq!(wrap("12. ordered item here", 12)[1], "    item");
         assert_eq!(wrap("> quoted text that runs on", 12)[1], "  text that");
@@ -381,7 +548,7 @@ mod tests {
         let rows = wrap("see https://example.dev/a/very/long/path here", 12);
         assert!(rows.iter().any(|r| r.ends_with('/')), "{rows:?}");
         for r in &rows {
-            assert!(cells(r) <= 12, "{r:?}");
+            assert!(cells_drawn(r) <= 12, "{r:?}");
         }
         // No separator to break at: cutting mid-token is still the fallback.
         assert!(wrap(&"x".repeat(30), 10).len() >= 3);
@@ -411,7 +578,7 @@ mod tests {
                     // A character wider than the whole pane cannot be split, so
                     // it goes out alone and overflows by design.
                     assert!(
-                        cells(&line[s..e]) <= width || line[s..e].chars().count() == 1,
+                        cells_drawn(&line[s..e]) <= width || line[s..e].chars().count() == 1,
                         "over width: {:?}",
                         &line[s..e]
                     );
@@ -449,7 +616,7 @@ mod tests {
             for (i, &(s, e)) in rows.iter().enumerate() {
                 let limit = if i == 0 { first } else { rest };
                 assert!(
-                    cells(&line[s..e]) <= limit,
+                    cells_drawn(&line[s..e]) <= limit,
                     "over width, {line:?} at {first}/{rest}: row {i} is {:?}",
                     &line[s..e]
                 );
@@ -494,7 +661,11 @@ mod tests {
         let kept: String = rows.iter().map(|&(s, e)| &line[s..e]).collect();
         assert_eq!(kept, line);
         for &(s, e) in &rows {
-            assert!(cells(&line[s..e]) <= 4, "over width: {:?}", &line[s..e]);
+            assert!(
+                cells_drawn(&line[s..e]) <= 4,
+                "over width: {:?}",
+                &line[s..e]
+            );
         }
     }
 
@@ -503,7 +674,7 @@ mod tests {
         let rows = wrap("see https://example.dev/a/very/long/path/indeed here", 12);
         assert!(rows.len() > 3, "{rows:?}");
         for r in &rows {
-            assert!(cells(r) <= 12, "{r:?}");
+            assert!(cells_drawn(r) <= 12, "{r:?}");
         }
     }
 
@@ -512,7 +683,7 @@ mod tests {
         assert!(wrap("Prüfen köde — ✓ fertig", 0).is_empty());
         let rows = wrap("Prüfen köde — ✓ fertig", 7);
         for r in &rows {
-            assert!(cells(r) <= 7, "{r:?}");
+            assert!(cells_drawn(r) <= 7, "{r:?}");
         }
     }
 }

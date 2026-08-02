@@ -20,7 +20,7 @@
 
 use crate::app::chrome_counts;
 use crate::blocks::Block;
-use crate::wrap::{cells, Piece, Row};
+use crate::wrap::{cells_claimed, Piece, Row};
 
 /// Cells the screen shows that no byte of the file accounts for: `n` of `fill`,
 /// spliced in at byte `at` of the source line.
@@ -313,7 +313,7 @@ fn pads_for(text: &str, cells_of: &[Cell], delim: bool, g: &Grid) -> Vec<Pad> {
         }
     };
     for (j, c) in cells_of.iter().enumerate().take(g.aligns.len()) {
-        let (w, cw) = (g.width[j], cells(&text[c.cs..c.ce]));
+        let (w, cw) = (g.width[j], cells_claimed(&text[c.cs..c.ce]));
         // The two ends of the cell, which is where both of its gaps take their
         // style from — see `Pad`.
         let (head, tail) = (c.cs - c.lead, (c.ce + c.trail).saturating_sub(1));
@@ -372,7 +372,7 @@ fn align(texts: &[String]) -> Option<Vec<Option<Padding>>> {
         for (j, c) in r.iter().enumerate().take(g.aligns.len()) {
             g.lead[j] = g.lead[j].max(c.lead);
             g.trail[j] = g.trail[j].max(c.trail);
-            let cw = cells(&texts[i][c.cs..c.ce]);
+            let cw = cells_claimed(&texts[i][c.cs..c.ce]);
             g.width[j] = g.width[j].max(match g.aligns[j] {
                 Align::Left => cw + c.trail,
                 Align::Right => c.lead + cw,
@@ -402,7 +402,7 @@ fn align(texts: &[String]) -> Option<Vec<Option<Padding>>> {
     let width = pads
         .iter()
         .zip(texts)
-        .map(|(p, t)| cells(t.trim_end()) + p.iter().map(|p| p.n).sum::<usize>())
+        .map(|(p, t)| cells_claimed(t.trim_end()) + p.iter().map(|p| p.n).sum::<usize>())
         .max()
         .unwrap_or(0);
 
