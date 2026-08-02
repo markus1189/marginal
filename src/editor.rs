@@ -166,6 +166,24 @@ impl Editor {
         self.browsing = None;
     }
 
+    /// Delete `start..end` and leave the cursor where the text was, ending
+    /// history browsing — but only if there was anything there to delete.
+    ///
+    /// The invariant is that *editing* ends browsing, not that pressing an
+    /// edit key does. Every kill below can be aimed at an empty range, and
+    /// `history_prev` parks the cursor at `text.len()`, which is exactly where
+    /// `C-k` and `M-d` have nothing to take. Clearing `browsing` there changed
+    /// the screen not at all and stranded the draft: `history_next` returns
+    /// early without a `browsing` index, so `C-n` answered with nothing.
+    fn kill_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        self.browsing_off();
+    }
+
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -178,43 +196,28 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let p = self.prev(self.cursor);
-        self.text.replace_range(p..self.cursor, "");
-        self.cursor = p;
-        self.browsing_off();
+        self.kill_range(self.prev(self.cursor), self.cursor);
     }
 
     /// `C-d`
     pub fn delete_forward(&mut self) {
-        if self.cursor >= self.text.len() {
-            return;
-        }
-        let n = self.next(self.cursor);
-        self.text.replace_range(self.cursor..n, "");
-        self.browsing_off();
+        self.kill_range(self.cursor, self.next(self.cursor));
     }
 
     /// `C-k` — to end of line, or swallow the newline when already there.
     pub fn kill_to_end(&mut self) {
         let e = self.line_end();
-        if e == self.cursor && e < self.text.len() {
-            self.text.replace_range(e..=e, "");
+        if e == self.cursor {
+            self.kill_range(e, self.next(e));
         } else {
-            self.text.replace_range(self.cursor..e, "");
+            self.kill_range(self.cursor, e);
         }
-        self.browsing_off();
     }
 
     /// `C-u` — readline's `unix-line-discard`: back to the start of the line,
     /// leaving whatever sits after the cursor.
     pub fn kill_to_start(&mut self) {
-        let s = self.line_start();
-        self.text.replace_range(s..self.cursor, "");
-        self.cursor = s;
-        self.browsing_off();
+        self.kill_range(self.line_start(), self.cursor);
     }
 
     /// `C-w` — whitespace-delimited, so it takes punctuation with it.
@@ -226,18 +229,14 @@ impl Editor {
         while i > 0 && !self.char_before(i).is_some_and(char::is_whitespace) {
             i = self.prev(i);
         }
-        self.text.replace_range(i..self.cursor, "");
-        self.cursor = i;
-        self.browsing_off();
+        self.kill_range(i, self.cursor);
     }
 
     /// `M-DEL`
     pub fn kill_word_back(&mut self) {
         let start = self.cursor;
         self.word_left();
-        let i = self.cursor;
-        self.text.replace_range(i..start, "");
-        self.browsing_off();
+        self.kill_range(self.cursor, start);
     }
 
     /// `M-d`
@@ -246,8 +245,7 @@ impl Editor {
         self.word_right();
         let end = self.cursor;
         self.cursor = start;
-        self.text.replace_range(start..end, "");
-        self.browsing_off();
+        self.kill_range(start, end);
     }
 
     // ---- history --------------------------------------------------------
@@ -497,6 +495,87 @@ mod tests {
             e.history_next();
             assert_eq!(e.text(), "my new draft", "draft lost by a cursor motion");
         }
+    }
+
+    /// The other half of the same invariant. A kill aimed at an empty range
+    /// deletes nothing and redraws the same screen, so it is not an edit — but
+    /// all five kills cleared `browsing` unconditionally, and `history_prev`
+    /// leaves the cursor at `text.len()`, which is precisely where `C-k` and
+    /// `M-d` have nothing to take. `backspace` and `delete_forward` were the
+    /// only two that already returned early. Each pair below is a real key
+    /// sequence: the cursor sits where the recall put it, or on the line start
+    /// after a `C-a`.
+    #[test]
+    fn a_kill_that_kills_nothing_does_not_throw_away_the_stashed_draft() {
+        let home = Editor::home as fn(&mut Editor);
+        for (name, aim, kill) in [
+            (
+                "C-k at the end",
+                None,
+                Editor::kill_to_end as fn(&mut Editor),
+            ),
+            ("M-d at the end", None, Editor::kill_word_forward),
+            ("C-u at the start", Some(home), Editor::kill_to_start),
+            ("M-DEL at the start", Some(home), Editor::kill_word_back),
+            ("C-w at the start", Some(home), Editor::kill_word_back_ws),
+            ("C-d at the end", None, Editor::delete_forward),
+            ("BS at the start", Some(home), Editor::backspace),
+        ] {
+            let mut e = Editor::default();
+            e.set("old comment");
+            e.submit();
+
+            e.set("my new draft");
+            e.history_prev();
+            assert_eq!(e.text(), "old comment");
+            if let Some(motion) = aim {
+                motion(&mut e);
+            }
+            kill(&mut e);
+            assert_eq!(e.text(), "old comment", "{name} was not a no-op");
+            e.history_next();
+            assert_eq!(e.text(), "my new draft", "draft lost by {name}");
+        }
+    }
+
+    /// …and a kill that does kill still ends browsing, so `C-n` restores
+    /// nothing behind the user's back. This is the line the guard must not
+    /// move: every one of these leaves visibly different text.
+    #[test]
+    fn a_kill_that_kills_something_still_ends_browsing() {
+        for (name, kill) in [
+            ("C-k", Editor::kill_to_end as fn(&mut Editor)),
+            ("C-u", Editor::kill_to_start),
+            ("C-w", Editor::kill_word_back_ws),
+            ("M-DEL", Editor::kill_word_back),
+            ("C-d", Editor::delete_forward),
+            ("BS", Editor::backspace),
+        ] {
+            let mut e = Editor::default();
+            e.set("old comment");
+            e.submit();
+
+            e.set("my new draft");
+            e.history_prev();
+            e.word_left(); // "old |comment" — every kill above has a target
+            kill(&mut e);
+            assert_ne!(e.text(), "old comment", "{name} killed nothing");
+            let after = e.text().to_string();
+            e.history_next();
+            assert_eq!(e.text(), after, "{name} left browsing on");
+        }
+
+        // `M-d` needs the cursor before the word rather than after it.
+        let mut e = Editor::default();
+        e.set("old comment");
+        e.submit();
+        e.set("my new draft");
+        e.history_prev();
+        e.home();
+        e.kill_word_forward();
+        assert_eq!(e.text(), " comment");
+        e.history_next();
+        assert_eq!(e.text(), " comment", "M-d left browsing on");
     }
 
     #[test]

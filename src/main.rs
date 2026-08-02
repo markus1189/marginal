@@ -1250,6 +1250,49 @@ mod tests {
         }
     }
 
+    /// `C-p` leaves the cursor at the end of the recalled entry, which is
+    /// exactly where `C-k` and `M-d` have nothing to kill — and the five kill
+    /// keys ended history browsing whether or not they killed anything. The
+    /// screen did not change, nothing was edited, and the draft parked by the
+    /// `C-p` became unreachable by any key. Every row here is a sequence a hand
+    /// actually types: recall an old comment, decide against reusing it, and
+    /// press the key that clears a line.
+    ///
+    /// `editor.rs` could not see it. Its tests call the methods and assert on
+    /// the buffer, and the buffer is identical either way; what differs is the
+    /// key you have to press next.
+    #[test]
+    fn a_kill_key_that_kills_nothing_leaves_the_draft_recallable() {
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let plain = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let chord = |c: char, m| key(c, m);
+        let home = chord('a', ctrl);
+
+        for (name, keys) in [
+            ("C-p C-k", vec![chord('k', ctrl)]),
+            ("C-p M-d", vec![chord('d', alt)]),
+            ("C-p C-a C-u", vec![home, chord('u', ctrl)]),
+            (
+                "C-p C-a M-DEL",
+                vec![home, KeyEvent::new(KeyCode::Backspace, alt)],
+            ),
+            ("C-p C-a C-w", vec![home, chord('w', ctrl)]),
+            ("C-p C-d", vec![chord('d', ctrl)]),
+            ("C-p C-a BS", vec![home, plain(KeyCode::Backspace)]),
+        ] {
+            let mut app = editing();
+            handle_key(&mut app, chord('p', ctrl));
+            assert_eq!(app.editor.text(), "older note", "{name}: setup failed");
+            for k in keys {
+                handle_key(&mut app, k);
+            }
+            assert_eq!(app.editor.text(), "older note", "{name}: killed something");
+            handle_key(&mut app, chord('n', ctrl));
+            assert_eq!(app.editor.text(), INPUT_TEXT, "{name}: draft lost");
+        }
+    }
+
     /// The other half of "a bad `--result` must not cost the session", and the
     /// half that was never tested. `preflight` catches an unwritable path before
     /// a word is written, but it cannot catch a disk that fills up, a directory
