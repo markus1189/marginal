@@ -210,14 +210,31 @@ fi
 # ---------------------------------------------------------------- feedback
 #
 # The result file is the verdict; $rc is only ever a diagnostic. marginal writes
-# the file on every run that reached the TUI, before deciding its own exit code
-# (src/main.rs:117), so its absence means the TUI never ran — a popup that could
-# not open, a second popup on a client that already has one, a binary that
-# failed to start. Reading $rc for the annotated/clean split would report "no
-# annotations" over real feedback on the alacritty path, where rc is always 0.
+# it in `finish` — after the last keypress, before it picks its own exit code —
+# on every run that reached the TUI. Reading $rc for the annotated/clean split
+# would report "no annotations" over real feedback on the alacritty path, where
+# rc is always 0.
+#
+# A missing file does NOT mean the TUI never ran. It usually does — a popup that
+# could not open, a second popup on a client that already has one, a binary that
+# failed to start — but `finish`'s write can also fail after a complete session,
+# and then marginal exits 2 and prints the review to stdout instead, because the
+# markdown is the last copy of the annotations. Measured, in a 90x30 pane:
+# annotate, delete the --result directory, quit -> no file, the full
+# "# Review feedback" on stdout, rc=2. `display-popup -E` closes that pane on
+# exit, so nothing here ever sees it.
+#
+# So the message below says what is actually known — no verdict — rather than
+# claiming nothing happened. Exiting 2 stays correct either way: a gate with no
+# verdict must not answer for the human. What is NOT handled is rescuing the
+# review in that lost-write case; that needs the popup's stdout captured to a
+# file and read back here, which is a change to what this script does and wants
+# its own commit.
 
 [ -f "$result_json" ] \
-  || die "marginal wrote no result file (launcher rc=$rc) — it never ran, or could not start"
+  || die "no result file from marginal (launcher rc=$rc) — no verdict is available." \
+         "It most likely never started, but a session that ran and could not write its" \
+         "result looks identical from here, and takes the review with it."
 
 count="$(jq -r '.annotations | length' "$result_json")"
 feedback="$(jq -r '.feedbackMarkdown // ""' "$result_json")"

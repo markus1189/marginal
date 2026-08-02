@@ -26,10 +26,22 @@ oniguruma **C** library — none of it used. Dropping it with
 `default-features = false` is worth roughly a third of the dependency graph and
 half the binary.
 
-Measured 2026-07-30 — `cargo tree --prefix none | awk '{print $1}' | sort -u |
-wc -l` reports **93** crates, and the release binary is **2,079,608 bytes**.
-The pre-diet figures recorded on 2026-07-29 (142 crates, 4.01 MB) are kept only
-as the reason for the change; they are not reproducible from this tree.
+Don't quote the current figures, measure them — the binary size in this
+paragraph had already drifted by ~148 KB before anyone re-ran the command:
+
+```sh
+cargo tree --prefix none | awk '{print $1}' | sort -u | wc -l   # crates
+cargo build --release && stat -c %s target/release/marginal     # bytes
+```
+
+The pre-diet figures recorded on 2026-07-29 (142 crates, 4.01 MB) are kept as
+the reason for the change; they are not reproducible from this tree, and they
+are the only numbers here that are supposed to stay fixed.
+
+`unicode-segmentation` is a direct dependency and costs **no** crate: ratatui
+segments every span with it and crossterm reaches it through `derive_more`, so
+it was already in the graph (`cargo tree -i unicode-segmentation` shows both
+paths). Adding it did not move the crate count.
 
 ## Highlighting code inside fences
 

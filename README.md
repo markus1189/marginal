@@ -189,12 +189,31 @@ neither, the launcher fails — a gate that cannot reach the human must say so
 rather than answer for them.
 
 **The result file is the verdict; the exit status is only a diagnostic.**
-marginal writes the file on every run that reached the TUI, before deciding its
-own exit code (`src/main.rs:117`), so its absence means the TUI never ran. That
-is not a stylistic preference: `alacritty -e sh -c 'exit 7'` returns **0**, so a
-launcher that reads the exit status for the annotated/clean split announces "no
-annotations" over real feedback on that path. Terminals that fork outright
-(ghostty, gnome-terminal) are not used, because they would not block either.
+marginal writes it in `finish` — after the last keypress, before it picks its own
+exit code — on every run that reached the TUI. That is not a stylistic
+preference: `alacritty -e sh -c 'exit 7'` returns **0**, so a launcher that reads
+the exit status for the annotated/clean split announces "no annotations" over
+real feedback on that path. Terminals that fork outright (ghostty,
+gnome-terminal) are not used, because they would not block either.
+
+**A missing result file does not mean the TUI never ran.** The write can fail
+*after* a full session — the directory went away, the disk filled, the path was
+replaced — and `finish` answers that by exiting `2` and printing the review to
+stdout anyway, because at that point the markdown is the only copy of the
+annotations there is. Driven in a 90×30 tmux pane to check it: annotate the code
+span on line 3, delete the `--result` directory mid-session, press `q`. Result:
+no file, `marginal: cannot write …: No such file or directory` on stderr, the
+complete `# Review feedback` block on stdout, `rc=2`. Under the
+`tmux display-popup -E` this launcher uses, that pane closes when the process
+exits — so by the time the launcher looks, the rescued review is already gone.
+
+The only thing a consumer may conclude from a missing result file is therefore
+**that no verdict is available**: not that nothing happened, and not that the
+human did not comment. The launcher's response is right in shape — refuse, exit
+`2`, never answer for the human — and it now says "no verdict" rather than "it
+never ran". What it still cannot do is *recover* the review in the lost-write
+case, because nothing captures the popup's stdout. That is a code change and has
+not been made.
 
 Four behaviours the code has to defend against, all measured:
 
