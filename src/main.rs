@@ -280,31 +280,42 @@ fn main() -> ExitCode {
         }
     }
 
-    let mut write_failed = false;
-    if let Some(path) = &args.result {
-        let json = serde_json::to_string_pretty(&app.result()).expect("serialize");
-        if let Err(e) = std::fs::write(path, json) {
-            eprintln!("marginal: cannot write {path}: {e}");
-            write_failed = true;
-        }
-    }
-
-    // Printed even when the write failed, because that is exactly when it is
-    // the last copy of the annotations. Returning early here used to take the
-    // whole session with it.
-    let feedback = app.feedback_markdown();
+    let (feedback, code) = finish(&app, args.result.as_deref());
     if !feedback.is_empty() {
         print!("{feedback}");
     }
-    if write_failed {
-        return ExitCode::from(2);
+    ExitCode::from(code)
+}
+
+/// Everything after the last keypress: write the result file if one was asked
+/// for, then say what belongs on stdout and what the exit code is.
+///
+/// Returning the feedback rather than printing it is the whole point of the
+/// split. The failed-write path is the one where the markdown *is* the review —
+/// the annotations have no other copy left — and an early `return` here once
+/// took a whole session with it. That regression was fixed with no test, because
+/// the only seam was `main`, which needs a terminal to reach. This is the seam:
+/// exit code and rescued text come back together, both assertable, and the
+/// caller cannot print one without the other.
+fn finish(app: &App, result: Option<&str>) -> (String, u8) {
+    let mut failed = false;
+    if let Some(path) = result {
+        let json = serde_json::to_string_pretty(&app.result()).expect("serialize");
+        if let Err(e) = std::fs::write(path, json) {
+            eprintln!("marginal: cannot write {path}: {e}");
+            failed = true;
+        }
     }
 
-    if app.annotations.is_empty() {
-        ExitCode::SUCCESS
+    let feedback = app.feedback_markdown();
+    // 2 for a failed write, but the markdown still travels with it, because
+    // that is exactly when it is the last copy of the annotations.
+    let code = if failed {
+        2
     } else {
-        ExitCode::from(1)
-    }
+        u8::from(!app.annotations.is_empty())
+    };
+    (feedback, code)
 }
 
 fn run(app: &mut App) -> io::Result<()> {
@@ -1237,5 +1248,65 @@ mod tests {
             handle_key(&mut app, cancel);
             assert_eq!(app.annotations.len(), 1, "{cancel:?} committed the comment");
         }
+    }
+
+    /// The other half of "a bad `--result` must not cost the session", and the
+    /// half that was never tested. `preflight` catches an unwritable path before
+    /// a word is written, but it cannot catch a disk that fills up, a directory
+    /// removed mid-session or a path that only fails on the real write — and on
+    /// that path the feedback markdown is the last copy of the annotations in
+    /// existence. An early `return` here once threw a whole session away; the
+    /// fix went in with no test, because the only seam was `main` and `main`
+    /// needs a terminal.
+    #[test]
+    fn a_failed_result_write_still_hands_back_the_feedback() {
+        let bad = tmp("finish-no-such-dir").join("out.json");
+        let (feedback, code) = finish(&annotated(), Some(bad.to_str().unwrap()));
+        assert_eq!(code, 2, "a failed write must still exit 2");
+        assert!(
+            feedback.contains("keep me"),
+            "the rescued annotations went with the failed write: {feedback:?}"
+        );
+        assert!(!bad.exists(), "the write was supposed to fail");
+    }
+
+    /// …and the ordinary endings it shares its code with, so that "still prints
+    /// the feedback" cannot be met by printing it unconditionally and calling
+    /// every session a failure. The exit code is the diagnostic: 0 approved,
+    /// 1 changes requested, 2 the review is only in the text above.
+    #[test]
+    fn finish_writes_the_result_and_grades_the_session() {
+        let dir = scratch("finish");
+
+        let out = dir.join("out.json");
+        let (feedback, code) = finish(&annotated(), Some(out.to_str().unwrap()));
+        assert_eq!(code, 1, "annotations are changes-requested");
+        assert!(feedback.contains("keep me"));
+        let json = std::fs::read_to_string(&out).unwrap();
+        assert!(json.contains("keep me"), "{json}");
+        assert!(json.contains("changes-requested"), "{json}");
+
+        // A clean review prints nothing and exits 0 — but still writes the
+        // file, because the result file is the verdict and "no annotations" is
+        // a verdict. Only stdout is allowed to be empty here.
+        let clean = dir.join("clean.json");
+        let app = App::new("t.md".into(), DOC);
+        let (feedback, code) = finish(&app, Some(clean.to_str().unwrap()));
+        assert_eq!(code, 0);
+        assert!(feedback.is_empty(), "{feedback:?}");
+        assert!(std::fs::read_to_string(&clean)
+            .unwrap()
+            .contains("approved"));
+
+        // With no `--result` there is nothing to fail: stdout is the only output
+        // and the exit code still splits clean from annotated.
+        let (feedback, code) = finish(&annotated(), None);
+        assert_eq!(code, 1);
+        assert!(feedback.contains("keep me"));
+        let (feedback, code) = finish(&App::new("t.md".into(), DOC), None);
+        assert_eq!(code, 0);
+        assert!(feedback.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
