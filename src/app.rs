@@ -1638,7 +1638,13 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn move_row_survives_an_indented_line_whose_first_word_overflows() {
         let doc = "- item\n\n    https://example.dev/docs/reference/config/advanced#section-42\n";
-        for width in [20usize, 42, 72] {
+        // Line 3 is 65 cells wide, so every width here wraps it. 72 was in this
+        // list and does not: the line fitted, `rows.len() > 1` was false, and
+        // the landing assertion below — the only one that exercises the motion
+        // rather than the row shape — was skipped while the case still counted
+        // as covered. The wrap is asserted now rather than tested for, so a
+        // fixture that stops wrapping fails instead of going quiet.
+        for width in [20usize, 42, 64] {
             let mut a = App::new("w.md".into(), doc);
             a.body_width = width;
 
@@ -1651,17 +1657,166 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
                 );
             }
 
+            let (rows, _) = a.line_rows(3);
+            assert!(
+                rows.len() > 1,
+                "the fixture no longer wraps at width {width}: the move below is a no-op"
+            );
+
             a.cursor = Pos::new(3, 1);
             a.move_row(1);
-            let (rows, _) = a.line_rows(3);
-            if rows.len() > 1 {
-                assert_eq!(
-                    a.cursor.col,
-                    wrap::row_start(&rows[1]) + 1,
-                    "C-n landed off the row start at width {width}"
+            assert_eq!(
+                (a.cursor.line, a.cursor.col),
+                (3, wrap::row_start(&rows[1]) + 1),
+                "C-n landed off the row start at width {width}"
+            );
+        }
+    }
+
+    /// The property `move_row`'s subtraction actually stands on, pinned where
+    /// `move_row` reads it.
+    ///
+    /// Not "rows are a partition of the line" — they are not, and `ui.rs`'s
+    /// `snap_to_rendered` says so in as many words: the space a row broke at and
+    /// any trailing run of spaces are outside every row. The narrower property
+    /// is the true one and the one the subtraction needs: **row 0 starts at byte
+    /// 0, and row starts ascend**. Together they say `cursor_row`'s `rposition`
+    /// always finds a row — its `unwrap_or(0)` fallback is unreachable — and
+    /// that the row it finds is the last one starting at or before the cursor,
+    /// so `col - 1 - row_start` cannot go negative and is the offset it claims
+    /// to be.
+    ///
+    /// `wrap.rs` pins this for `wrap_line`. Nothing pinned it for `line_rows`,
+    /// which is what `move_row` and `cursor_row` actually call and which is
+    /// wider in two ways: it also takes the *table* path, whose rows come from
+    /// `table::row` and can open with a `Pad` instead of a `Src`, and it feeds
+    /// `display_line` rather than the raw source. The one property test at this
+    /// level, `pretty_rows_concatenate_to_the_source_line`, cannot see the
+    /// difference — it compares `.replace(' ', "")` on both sides, and a row 0
+    /// that starts past the line's leading whitespace differs from a correct one
+    /// in nothing but spaces. That blindness is exactly how the original bug got
+    /// in past `wrap_preserves_every_character_and_the_indentation`.
+    ///
+    /// The second half drives `C-n` off every row of every shape rather than
+    /// only asserting the shape, because the release-build symptom was not a
+    /// crash: the wrapped offset was clamped by the `min` and the cursor landed
+    /// on the target row's *end*. Starting on a row start makes the offset zero,
+    /// so "lands on the next row's start" tells the two apart.
+    #[test]
+    fn row_zero_starts_at_byte_zero_in_every_shape_move_row_can_meet() {
+        let docs = [
+            // The original: an indented line whose first word overflows the row,
+            // so the wrapper has to break with nothing placed yet.
+            "- item\n\n    https://example.dev/docs/reference/config/advanced#section-42\n",
+            // Indentation wider than the pane, which spills into rows of its own.
+            "para\n\n              x y z\n",
+            // A table that aligns, so `line_rows` takes the `table::row` path and
+            // the first piece of the row is a `Pad`.
+            "| id | a very long description of the thing | ok |\n\
+             |---|:---:|--:|\n\
+             | 1 | short | y |\n\
+             | 22 | a much longer description than the first one | n |\n",
+            // Wide characters: a row can be forced to break between two of them,
+            // and one wider than the pane goes out alone.
+            "> 日本語のテキストはここで折り返す、もっと長い行\n",
+            // Tabs, which `display_line` substitutes before anything measures.
+            "1.\ttabbed\titem with a fairly long body that has to wrap\n",
+            // Trailing spaces and an all-space line: the bytes that live in no
+            // row at all.
+            "trailing spaces here          \n          \n\nx\n",
+            // A blockquoted list, for a hanging indent built from both prefixes.
+            "> - a nested item with several words and then several more\n",
+        ];
+
+        let mut inner = 0usize;
+        for (d, doc) in docs.iter().enumerate() {
+            for pretty in [true, false] {
+                let mut a = App::new("p.md".into(), doc);
+                a.pretty = pretty;
+
+                // The shape, at every width the pane can have. 0 is pretty
+                // mode's "do not wrap" and the whole of raw mode.
+                let mut tallest = 1;
+                for width in 0..=80 {
+                    a.body_width = width;
+                    for line in 1..=a.line_count() {
+                        let (rows, _) = a.line_rows(line);
+                        tallest = tallest.max(rows.len());
+                        assert!(!rows.is_empty(), "d{d} p{pretty} w{width} L{line}: no rows");
+                        assert_eq!(
+                            wrap::row_start(&rows[0]),
+                            0,
+                            "d{d} p{pretty} w{width} L{line}: row 0 starts past byte 0, so a \
+                             cursor before it has no row and `move_row` subtracts a larger \
+                             number from a smaller one: {rows:?}"
+                        );
+                        let mut prev = 0;
+                        for (i, r) in rows.iter().enumerate() {
+                            let s = wrap::row_start(r);
+                            assert!(
+                                s >= prev,
+                                "d{d} p{pretty} w{width} L{line}: row {i} starts at {s}, \
+                                 behind the row above it at {prev}: {rows:?}"
+                            );
+                            prev = s;
+                        }
+                    }
+                }
+                // Raw mode is the identity — one row per line, by construction.
+                // Pretty mode is the whole point, so a fixture that never wraps
+                // in it is a fixture that pins nothing.
+                assert!(
+                    !pretty || tallest > 1,
+                    "d{d}: nothing in this fixture wraps at any width"
                 );
+
+                // …and the motion that reads it. Fewer widths: this walks every
+                // row of every line, so it is quadratic in the pane's height.
+                for width in [0usize, 1, 2, 3, 5, 8, 13, 20, 31, 39, 55, 72] {
+                    a.body_width = width;
+                    for line in 1..=a.line_count() {
+                        let (rows, _) = a.line_rows(line);
+                        for row in 0..rows.len() {
+                            a.cursor = Pos::new(line, wrap::row_start(&rows[row]) + 1);
+                            assert_eq!(
+                                a.cursor_row(),
+                                row,
+                                "d{d} p{pretty} w{width} L{line}: a cursor on row {row}'s \
+                                 own start was found on another row: {rows:?}"
+                            );
+                            let Some(to) = a.step_row(Anchor { line, row }, true) else {
+                                continue; // the last row of the last line
+                            };
+                            let (target, _) = a.line_rows(to.line);
+                            a.move_row(1);
+                            assert_eq!(
+                                (a.cursor.line, a.cursor.col),
+                                (to.line, wrap::row_start(&target[to.row]) + 1),
+                                "d{d} p{pretty} w{width}: C-n from L{line} row {row} missed \
+                                 the start of L{} row {}",
+                                to.line,
+                                to.row
+                            );
+                            // Counted separately from the moves that cross into
+                            // the next line, because only this kind exists at
+                            // all when a line wraps — a document of one-row
+                            // lines yields zero of them, and `move_row` is then
+                            // being asked nothing `move_line` could not answer.
+                            if to.line == line {
+                                inner += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
+        // The sweep is only worth its runtime if it ran: a fixture that stops
+        // wrapping collapses every line to one row and takes the coverage with
+        // it, which is how the width-72 case above went quiet.
+        assert!(
+            inner > 500,
+            "the sweep went vacuous: only {inner} moves within a line"
+        );
     }
 
     /// `viewport` counts rows, so paging must too — paging by lines while
