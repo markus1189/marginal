@@ -2049,6 +2049,40 @@ mod tests {
 | 22 | a much longer description | n |
 ";
 
+    /// `table.rs` asserts the columns it computed; this asserts the columns the
+    /// terminal ended up with, which is the only place the claim "the pipes line
+    /// up" is true or false. Reading them back off the backend buffer also means
+    /// the assertion cannot be satisfied by the same arithmetic that produced
+    /// the padding — the bug was exactly an arithmetic that disagreed with the
+    /// renderer.
+    #[test]
+    fn a_padded_table_puts_every_rows_pipes_in_the_same_screen_column() {
+        let doc = "\
+| id | name | ok |
+|---|---|---|
+| 1 | ｶﾞｶﾞｶﾞ | y |
+| 22 | plain | n |
+";
+        let mut app = App::new("t.md".into(), doc);
+        app.pretty = true;
+        let (w, h) = (60u16, 16u16);
+        let buf = render_buf(&mut app, w, h);
+        let pipes = |y: u16| -> Vec<u16> {
+            (7..w - 1)
+                .filter(|&x| buf[(x, y)].symbol() == "|")
+                .collect()
+        };
+        let want = pipes(1);
+        assert_eq!(want.len(), 4, "the header row did not render four pipes");
+        for y in 2..=4u16 {
+            assert_eq!(
+                pipes(y),
+                want,
+                "screen row {y} puts its pipes in different columns from the header's"
+            );
+        }
+    }
+
     /// Aligning a table puts cells on the screen that no byte of the file
     /// accounts for. Columns are still bytes of the *source*, so the same
     /// selection must emit the same JSON with pretty on and off — and the

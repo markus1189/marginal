@@ -17,10 +17,24 @@
 //! * Every other tool that aligns markdown tables — prettier, mdformat,
 //!   vim-table-mode — does it by editing the file. marginal cannot: the file is
 //!   the thing under review.
+//!
+//! Every width in this module is `wrap::cells_drawn`, and by the rule in
+//! `wrap`'s module doc it can be nothing else. A column's width is decided by
+//! the widest cell in it and then every other cell is padded out to reach it —
+//! so for all but one row of the column the width on the other side of the
+//! comparison came from somewhere else, and what has to line up is the column
+//! the *terminal* draws. `cells_claimed` calls a halfwidth dakuten zero-width,
+//! so a cell containing one was costed a column short per pair and then padded
+//! out as if it were that narrow. The padding is real and the content is wider
+//! than it was charged for, so the cell overran by exactly the undercount and
+//! its closing `|` landed that many columns right of every other row's — in the
+//! mode whose entire purpose is that they agree. The table's total width is the
+//! same measure for the same reason: `Tables::pads` compares it against the body
+//! pane.
 
 use crate::app::chrome_counts;
 use crate::blocks::Block;
-use crate::wrap::{cells_claimed, Piece, Row};
+use crate::wrap::{cells_drawn, Piece, Row};
 
 /// Cells the screen shows that no byte of the file accounts for: `n` of `fill`,
 /// spliced in at byte `at` of the source line.
@@ -313,7 +327,7 @@ fn pads_for(text: &str, cells_of: &[Cell], delim: bool, g: &Grid) -> Vec<Pad> {
         }
     };
     for (j, c) in cells_of.iter().enumerate().take(g.aligns.len()) {
-        let (w, cw) = (g.width[j], cells_claimed(&text[c.cs..c.ce]));
+        let (w, cw) = (g.width[j], cells_drawn(&text[c.cs..c.ce]));
         // The two ends of the cell, which is where both of its gaps take their
         // style from — see `Pad`.
         let (head, tail) = (c.cs - c.lead, (c.ce + c.trail).saturating_sub(1));
@@ -372,7 +386,7 @@ fn align(texts: &[String]) -> Option<Vec<Option<Padding>>> {
         for (j, c) in r.iter().enumerate().take(g.aligns.len()) {
             g.lead[j] = g.lead[j].max(c.lead);
             g.trail[j] = g.trail[j].max(c.trail);
-            let cw = cells_claimed(&texts[i][c.cs..c.ce]);
+            let cw = cells_drawn(&texts[i][c.cs..c.ce]);
             g.width[j] = g.width[j].max(match g.aligns[j] {
                 Align::Left => cw + c.trail,
                 Align::Right => c.lead + cw,
@@ -402,7 +416,7 @@ fn align(texts: &[String]) -> Option<Vec<Option<Padding>>> {
     let width = pads
         .iter()
         .zip(texts)
-        .map(|(p, t)| cells_claimed(t.trim_end()) + p.iter().map(|p| p.n).sum::<usize>())
+        .map(|(p, t)| cells_drawn(t.trim_end()) + p.iter().map(|p| p.n).sum::<usize>())
         .max()
         .unwrap_or(0);
 
@@ -454,6 +468,46 @@ mod tests {
             .map(|l| super::bars(l))
             .collect();
         assert!(bars.windows(2).all(|w| w[0] == w[1]), "{out:#?}");
+    }
+
+    /// `a_table_that_fits_lines_its_pipes_up` compares *byte* offsets, which is
+    /// only the same question for a table whose every character is one byte and
+    /// one cell — and every fixture in this module was ASCII. A `|` lines up
+    /// with another `|` when the terminal puts them in the same column, so this
+    /// asks in columns.
+    ///
+    /// The row that told the two apart is one with a halfwidth katakana and its
+    /// dakuten in it. `cells_claimed` calls `U+FF9E` zero-width, so `ｶﾞｶﾞｶﾞ` was
+    /// costed at 3 cells where the terminal draws 6; the cell was then padded to
+    /// fill a column sized for 3, drew 3 columns wider than that, and put its
+    /// closing pipe three places right of every other row's.
+    #[test]
+    fn a_table_lines_its_pipes_up_in_the_columns_the_terminal_draws() {
+        // One cell of one row is the whole difference; everything else is ASCII,
+        // so a column that moves has moved because of this cell.
+        let src = "\
+| id | name | ok |
+|---|---|---|
+| 1 | ｶﾞｶﾞｶﾞ | y |
+| 22 | plain | n |
+";
+        let out = render(src, 80);
+        assert_ne!(out, src.lines().collect::<Vec<_>>(), "left unaligned");
+        // Where the terminal puts each `|`, rather than which byte it is.
+        let columns = |l: &str| -> Vec<usize> {
+            super::bars(l)
+                .into_iter()
+                .map(|b| cells_drawn(&l[..b]))
+                .collect()
+        };
+        let want = columns(&out[0]);
+        for l in &out {
+            assert_eq!(
+                columns(l),
+                want,
+                "the pipes of {l:?} are in different columns from the header's: {out:#?}"
+            );
+        }
     }
 
     /// Aligning widens a table. Past the pane it would have to wrap, and a
