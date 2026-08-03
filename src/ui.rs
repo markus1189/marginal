@@ -251,7 +251,6 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         .borders(Borders::ALL)
         .title(source_title(app, area.width));
     let inner = block.inner(area);
-    f.render_widget(block, area);
 
     // The gutter is its own column. Nothing that happens to the body — running
     // off the edge, or one day scrolling sideways — can push the line number,
@@ -269,6 +268,16 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
     // the width actually on screen this frame.
     app.body_width = body_w;
     keep_cursor_visible(app, scroll, viewport);
+
+    // Rendered here rather than at the top of the function: the bottom border
+    // carries a readout of where the viewport is, and neither the width the
+    // rows were measured at nor the anchor it reports is settled until the two
+    // lines above have run. Borders and body do not overlap, so the order the
+    // two are painted in is free.
+    f.render_widget(
+        scroll_readout(app, *scroll, viewport, area.width, block),
+        area,
+    );
 
     let mut gutter: Vec<Line> = Vec::with_capacity(viewport);
     let mut body: Vec<Line> = Vec::with_capacity(viewport);
@@ -454,6 +463,47 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
     }
 
     draw_scrollbar(f, area, app, *scroll);
+}
+
+/// `block` with the viewport's position added to its bottom border, where there
+/// is a document to have a position in and room on the border to say it.
+///
+/// `{first}-{last}/{total}` is the format the peek overlay already uses for the
+/// same question, so the app answers "what part of this am I looking at" the
+/// same way twice. Labelled `rows`, and the label is not decoration: the top
+/// border says `5959 lines`, which in pretty mode is a different number
+/// entirely — 9,084 on the corpus file — and two unlabelled totals on one
+/// border is a puzzle rather than a readout. It is also the number the
+/// scrollbar is drawn from, so the two agree by construction.
+///
+/// This is what the bar cannot say. A track cell is hundreds of rows, so the
+/// thumb touches the bottom for the whole last screenful; only the readout
+/// distinguishes "nearly at the end" from "at the end".
+///
+/// Nothing when the document fits — the same rule the bar follows, for the same
+/// reason — and nothing when the border is too short to hold it, measured with
+/// `cells_claimed` because a title's `Rect` is sized by `Line::width()`. See
+/// the rule in `wrap`'s module doc.
+fn scroll_readout<'a>(
+    app: &mut App,
+    scroll: Anchor,
+    viewport: usize,
+    width: u16,
+    block: Block<'a>,
+) -> Block<'a> {
+    let total = app.total_rows();
+    if viewport == 0 || total <= viewport {
+        return block;
+    }
+    let first = app.row_of(scroll) + 1;
+    let text = format!(
+        " rows {first}-{}/{total} ",
+        (first + viewport - 1).min(total)
+    );
+    if cells_claimed(&text) > usize::from(width).saturating_sub(2) {
+        return block;
+    }
+    block.title_bottom(Line::styled(text, Style::default().fg(Color::DarkGray)).right_aligned())
 }
 
 /// Which cell of a `h`-cell track the document's row `row` falls in.
@@ -1853,6 +1903,82 @@ mod tests {
                 buf[(marker, y)].symbol(),
                 "█",
                 "thumb reached the body column on row {y}"
+            );
+        }
+    }
+
+    /// The source pane's bottom border, as text.
+    fn bottom_border(buf: &ratatui::buffer::Buffer) -> String {
+        let y = track_height(buf.area) + 1;
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    /// The one thing the bar cannot say: a thumb at the bottom of the track
+    /// means "somewhere in the last screenful", because a cell is hundreds of
+    /// rows. The readout is what tells the two apart.
+    #[test]
+    fn the_bottom_border_says_which_rows_are_on_screen() {
+        let mut app = App::open("b.md".into(), &para_doc(250), Format::Markdown);
+        let buf = render_buf(&mut app, 60, 24);
+        let track_h = usize::from(track_height(buf.area));
+        assert!(
+            bottom_border(&buf).contains(&format!("rows 1-{track_h}/500")),
+            "{}",
+            bottom_border(&buf)
+        );
+
+        app.goto_last();
+        let buf = render_buf(&mut app, 60, 24);
+        assert!(
+            bottom_border(&buf).contains(&format!("rows {}-500/500", 501 - track_h)),
+            "{}",
+            bottom_border(&buf)
+        );
+    }
+
+    /// Rows, and labelled as rows, because in pretty mode they are not lines:
+    /// the top border's `N lines` and the bottom border's total are different
+    /// numbers about the same document, and the bar is drawn from the second.
+    #[test]
+    fn the_readout_counts_rows_and_the_title_counts_lines() {
+        let src = format!("{}\n", "word ".repeat(400));
+        let mut app = App::open("w.md".into(), &src, Format::Markdown);
+        let buf = render_buf(&mut app, 60, 24);
+        assert!(top_row(&buf).contains("1 lines"), "{}", top_row(&buf));
+        let bottom = bottom_border(&buf);
+        assert!(bottom.contains("rows 1-"), "{bottom}");
+        assert!(
+            !bottom.contains("/1 "),
+            "one line, but many rows to scroll: {bottom}"
+        );
+    }
+
+    /// Nothing to scroll, nothing to say — the same rule the bar follows.
+    #[test]
+    fn a_document_that_fits_gets_no_readout() {
+        let mut app = App::open("s.md".into(), DOC, Format::Markdown);
+        let buf = render_buf(&mut app, 60, 24);
+        assert!(
+            !bottom_border(&buf).contains("rows"),
+            "{}",
+            bottom_border(&buf)
+        );
+    }
+
+    /// A readout wider than the border is not truncated by ratatui into a
+    /// half-number — it is not drawn. The title above it shortens a path to
+    /// fit; this has nothing it could drop and still be true.
+    #[test]
+    fn a_border_too_short_for_the_readout_shows_none_of_it() {
+        for w in 4u16..=30 {
+            let mut app = App::open("b.md".into(), &para_doc(250), Format::Markdown);
+            let buf = render_buf(&mut app, w, 24);
+            let bottom = bottom_border(&buf);
+            assert!(
+                bottom.contains("/500 ") || !bottom.contains('/'),
+                "a partial readout at width {w}: {bottom}"
             );
         }
     }
