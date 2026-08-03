@@ -94,10 +94,14 @@ Put it behind a cargo feature so the lean build stays the default.
   grammar; the hand-rolled scanner is the option that keeps the dependency diet
   above, and tree-sitter is the one that does not.
 - **horizontal scrolling** — deliberately, now. See below.
-- the annotations pane is a fixed six rows and does not scroll. The comment
-  editor still caps at eight, but it scrolls both ways now, so the row being
-  typed on is always on screen — except below a nine-row terminal, where the
-  fixed six leave the box no content row at all to put it on.
+- the annotations pane is still a fixed six rows with no scroll keys, but it no
+  longer hides entries silently: the window ends on the annotation the `▸` is
+  on, and the title counts what is off screen (`annotations 5-8/8`). What is
+  missing is a way to read an entry the cursor is nowhere near without moving
+  the cursor to it. The comment editor still caps at eight, but it scrolls both
+  ways, so the row being typed on is always on screen — except below a nine-row
+  terminal, where the fixed six leave the box no content row at all to put it
+  on.
 
 ## Pretty mode — soft wrap and aligned tables
 
@@ -140,6 +144,33 @@ Measured over the `~/Stuff` corpus at a body width of 87: wrapping costs
 **1.307x** more rows than lines, 16.1% of lines wrap at all, and the worst
 single line takes 2,476 rows. The amplification is cheap; that one line is what
 rules out keeping `scroll` a line index.
+
+## The scrollbar, and the one document-wide measurement
+
+The source pane's right border is a scrollbar; its bottom border says
+`rows 3289-3309/8847`; the track carries the mark glyphs for the whole file.
+All three are drawn from rows, not lines, and that is the entire design
+question. Pretty mode is on by default and 16.1% of the corpus wraps, so a
+line-measured thumb would sit still for the 2,476 rows of the worst line above
+— the "is this scrolled or is it not" ambiguity the overflow marker exists to
+remove, on the other axis.
+
+Rows over the whole document is exactly what the `Anchor` design avoids
+computing, so `RowIndex` in `app.rs` caches it: a prefix sum of `row_count` per
+line, keyed by `body_width` and `pretty`. The source never changes — there is
+no editing — so those two are the whole of the invalidation, and it rebuilds on
+a resize or a `P` press rather than on a keystroke. Measured on the 422 KB,
+5,959-line file: 9,084 rows at a body width of 87, ~3 ms to rebuild, against
+the ~20 ms `App::open` already spends parsing it. Both readers take `&mut self`
+and reconcile before answering, so there is no way to read a stale total.
+
+Nothing else may use it. Motion stays anchor-addressed and O(viewport); a
+second caller wanting "the row index of line N" is one that should be walking.
+
+What the bar cannot do is say *exactly* where you are: a track cell is
+`total / h` rows, 430-odd here, so the thumb touches the bottom for the whole
+last screenful. That is what the bottom-border readout is for, and why it is
+not decoration.
 
 ## Why long lines are not solved by scrolling sideways
 

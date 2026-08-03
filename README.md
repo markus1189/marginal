@@ -299,6 +299,10 @@ the fringe is a worklist that drains as you work down the message. The status
 field reports where you are in the ring — `question 2/5` — which is also how you
 notice the detector has found more than you expected.
 
+The **right border of the source pane carries the same two glyphs for the whole
+file**, so a mark four hundred lines down is visible without pressing `]` to
+find it. See below.
+
 A question is a `?` followed by whitespace or end-of-line, optionally through a
 run of closing punctuation, and not inside a code block, code span or raw HTML.
 So `Is it (really?) so?` is two, and `docs.rs/?q=1`, `ls *.rs?` and a `?:` in a
@@ -311,6 +315,30 @@ Questions are derived from the source, not authored by you: they never appear in
 
 Raw mode delivers `C-c` as a keystroke and no `SIGINT` is ever raised, so it is
 bound explicitly. Without that binding there is no way out but `q`.
+
+### Where you are in a large file
+
+Three readouts, and they all count the same thing.
+
+The **right border of the source pane is a scrollbar**. A dark thumb marks the
+rows on screen; the rest of the track is the rest of the document. It is drawn
+only when there is something to scroll.
+
+The track is also a **map of the fringe**: a magenta `●` where you have
+annotated and a cyan `?` where the document asks something you have not, at the
+cell that part of the file falls in — the same glyphs as the gutter, the same
+set of marks `]` and `[` walk. A cell is many rows on a large file, so marks
+collide; the open question wins, because the dot is work finished and the `?` is
+work outstanding. Where a mark is on screen it keeps its glyph and takes the
+thumb's grey background, so the cell says both things at once.
+
+The **bottom border** says exactly: `rows 3289-3309/8847`. Rows and not lines,
+because with pretty mode on they are different numbers — the top border's `5959
+lines` is the same document as the bottom border's 8,847 rows. Rows are what the
+bar is drawn from, and what a screenful is measured in.
+
+The scrollbar therefore moves while you scroll through a single line that wraps
+to thousands of rows, which a line-measured one would not.
 
 ### Lines wider than the pane
 
