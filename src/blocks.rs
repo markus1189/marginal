@@ -791,12 +791,20 @@ const CLOSERS: [char; 12] = [')', ']', '}', '"', '\'', '»', '”', '’', '*', 
 /// Takes the already-parsed tree rather than re-parsing, as `highlight::marks`
 /// does: one comrak pass per document, no second parser to disagree with the
 /// first.
+///
+/// The line vector comes from [`source_lines`], like every other one addressed
+/// by a `sourcepos` line number. `str::lines` was the obvious thing to reach for
+/// and is the wrong split: it ends a line on `\n` alone, so a document holding a
+/// bare `\r` yields fewer lines than comrak counted and everything below that
+/// byte is numbered one short per `\r` — while the `\r` stays *inside* its line,
+/// pushing every column after it right as well. Both axes wrong at once, and the
+/// resulting position can name a column past the end of the line it names.
 pub fn questions(root: &TreeNode, src: &str) -> Vec<Pos> {
     let mut skip = Vec::new();
     verbatim_spans(root, &mut skip);
 
     let mut out = Vec::new();
-    for (i, text) in src.lines().enumerate() {
+    for (i, text) in source_lines(src).into_iter().enumerate() {
         // '?' is one byte, so `b + 1` is always a character boundary.
         for (b, _) in text.char_indices().filter(|&(_, c)| c == '?') {
             let pos = Pos::new(i + 1, b + 1);
@@ -1520,5 +1528,63 @@ Really??
         let src = "Wieso Ünicode?\n";
         let q = questions(&parse_tree(src), src);
         assert_eq!(q, vec![Pos::new(1, src.find('?').unwrap() + 1)]);
+    }
+
+    /// A question position is addressed by a `sourcepos` line number, so it has
+    /// to be measured against `source_lines` — and it was measured against
+    /// `str::lines`, which ends a line only on `\n`. On `"x\ry? yes\n"` that
+    /// reported `1:4`: one line short, because the `\r` did not end a line, and
+    /// three columns right, because it stayed inside one. Line 1 is `"x"`, so
+    /// the position named a column past the end of the line it named — the
+    /// gutter marked the wrong row and `]` jumped the cursor off the end of it.
+    #[test]
+    fn a_question_after_a_bare_carriage_return_is_on_the_line_it_is_on() {
+        let src = "x\ry? yes\n";
+        assert_eq!(questions(&parse_tree(src), src), vec![Pos::new(2, 2)]);
+        // All three endings in one document, which is what a file edited on two
+        // machines looks like.
+        let src = "# Heading\r\n\r\nIs it?\rAnd this one?\n";
+        assert_eq!(
+            questions(&parse_tree(src), src),
+            vec![Pos::new(3, 6), Pos::new(4, 13)]
+        );
+    }
+
+    /// The oracle the fix was found with, and the shape of check that would have
+    /// caught it: every position handed back has to *be* a `?` in the line
+    /// vector the rest of the crate indexes. A position measured against a
+    /// different split fails this without anyone having to predict which line it
+    /// would land on.
+    #[test]
+    fn every_reported_position_names_a_question_mark_in_the_line_it_names() {
+        let corpus: Vec<String> = MIXED_ENDINGS
+            .iter()
+            .map(|s| format!("{s}\nAnd a trailing question?\n"))
+            .chain(
+                [
+                    QDOC,
+                    "x\ry? yes\n",
+                    "Is it?\rReally?\r\nOr not?\n",
+                    "prüfen — köde?\rzweite Zeile ö?\n",
+                    "no questions here at all\r\n",
+                ]
+                .iter()
+                .map(ToString::to_string),
+            )
+            .collect();
+
+        for src in &corpus {
+            let lines = source_lines(src);
+            for p in questions(&parse_tree(src), src) {
+                let line = lines
+                    .get(p.line - 1)
+                    .unwrap_or_else(|| panic!("{src:?}: {p:?} names no line"));
+                assert_eq!(
+                    line.as_bytes().get(p.col - 1).copied(),
+                    Some(b'?'),
+                    "{src:?}: {p:?} names {line:?}"
+                );
+            }
+        }
     }
 }
