@@ -6,8 +6,10 @@ emit the result as prose an agent can act on. Markdown gets all of that; any
 other text file gets paragraphs and lines, through the plain backend below.
 
 POC scope: open a file, navigate, select, comment, emit JSON + feedback
-markdown. No gate semantics yet; two launchers exist, one per host style — see
-`STATUS.md` for what exists, what does not, and why.
+markdown. No gate semantics yet; three launchers exist — two for annotating an
+agent's reply, one per host style, and one that reviews a git diff and hands
+back comments anchored to real files. See `STATUS.md` for what exists, what does
+not, and why.
 
 ## Run
 
@@ -261,6 +263,62 @@ marginal's `0`/`1` split is deliberately not propagated to the agent: a tool cal
 that exits non-zero reads as a broken command, and "the human commented" is not a
 failure. The launcher exits `0` for both and puts the distinction in stdout,
 which is what the agent actually reads; `2` is every failure, jq's included.
+
+## Reviewing a git diff — `/marginal-diff`
+
+`launchers/claude-code-diff/marginal-diff` reviews changes rather than prose:
+the usual case is an agent that just did some work, committed or not, and a
+human who would rather comment on the diff than describe the problem.
+
+```sh
+ln -s "$PWD/launchers/claude-code-diff" ~/.claude/skills/marginal-diff
+```
+
+Its own directory, because the symlink above targets a skill and
+`launchers/claude-code` is already spoken for by `marginal-last`.
+
+Every argument goes to `git diff` verbatim, so there is no second vocabulary:
+nothing means `HEAD` (staged and unstaged together, which is what "what has
+changed" usually means), `--cached` is staged only, `main...HEAD` is a branch,
+`HEAD~3` the last three commits.
+
+**There is no diff backend.** The launcher renders each hunk into a fenced
+` ```diff ` block under a `##` file heading and a `###` hunk heading, and the
+markdown backend opens that. Four granularities come out of it for free — the
+two headings and the fence are navigation units, and `V` reaches any run of
+lines *inside* the fence, because `Sel::Lines` is line arithmetic on the cursor
+and never consults the block list.
+
+What makes the result usable is that the launcher rendered the document, so it
+knows what every line of it was. It writes a sidecar map — one row per document
+line, carrying the file and line number on each side of the diff — and resolves
+the annotations through it on the way back out. The human comments on a diff;
+the agent is told `src/app.rs:312-314 (new)`.
+
+Deleted lines resolve to the **old** side and are labelled as such. They are not
+in the working tree, and naming a nearby line for them would be a guess wearing
+a fact's clothing. A selection crossing a hunk boundary comes back as separate
+ranges rather than one spanning range, because the new-side numbering has a gap
+there and a single range would claim lines nobody selected.
+
+Both dumps are headless, the same trick as `--dump-blocks`:
+
+```sh
+launchers/claude-code-diff/marginal-diff --cached --dump      # the document
+launchers/claude-code-diff/marginal-diff --cached --dump-map  # the line map
+```
+
+The map is worth printing because it is the one part that can be wrong without
+looking wrong: a bad line number renders as a perfectly ordinary line number.
+
+Five of git's own configuration knobs are overridden on the way in —
+`--no-ext-diff`, `--no-color`, `--no-textconv`, `core.quotepath=false` and an
+explicit `--src-prefix=a/ --dst-prefix=b/`. The last is not decoration: this was
+written on a machine with `diff.mnemonicPrefix` set, where git emits
+`--- c/keep.txt`, and under `diff.noprefix` the prefix strip would have eaten
+the first two characters of every path. Combined (merge) diffs are refused
+outright — `@@@` headers carry two prefix columns, and every counter here
+assumes one.
 
 ## Keys
 

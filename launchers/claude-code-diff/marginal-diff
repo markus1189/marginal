@@ -1,0 +1,480 @@
+#!/usr/bin/env bash
+#
+# marginal-diff — review a git diff in marginal, and get comments back anchored
+# to real files and real line numbers.
+#
+# The sibling of marginal-last: same host, same tty-borrowing, same contract on
+# stdout. What differs is where the document comes from and what happens to the
+# annotations afterwards.
+#
+#   marginal-diff                 uncommitted work (git diff HEAD)
+#   marginal-diff --cached        just what is staged
+#   marginal-diff main...HEAD     a branch's commits
+#   marginal-diff HEAD~3          the last three commits
+#   marginal-diff --dump          print the assembled document, launch nothing
+#   marginal-diff --dump-map      print the document→file line map, launch nothing
+#
+# Every argument that is not --dump is passed through to `git diff` verbatim, so
+# there is no second vocabulary to learn: git already owns this one.
+#
+# ---------------------------------------------------------------------------
+# Why the document is markdown and not a diff
+#
+# marginal has no diff backend. Rendering each hunk into a fenced ```diff block
+# under a heading gives the markdown backend something it understands, and gives
+# the reviewer four granularities to comment at: the file heading, the hunk
+# heading, the fence as a whole (all of them navigation units), and any run of
+# lines inside it via `V`.
+#
+# That last one is the important one, and it is not obvious: `Sel::Lines` in
+# app.rs is pure line arithmetic on the cursor and never consults the block
+# list, so line-wise selection reaches inside a fence that block motion treats
+# as opaque. Per-line commenting therefore works, and the annotation carries the
+# document line numbers that make it resolvable.
+#
+# ---------------------------------------------------------------------------
+# Why a comment on document line 47 is not useless
+#
+# Because this script rendered the document, it knows what every line of it
+# was. It writes a sidecar map alongside — one row per document line, carrying
+# the file and line number on each side of the diff — and resolves the
+# annotations through it on the way back out. The reviewer comments on a diff;
+# the agent receives `src/app.rs:312-314 (new)`.
+#
+# Deleted lines resolve to the OLD side and say so. They are not in the working
+# tree, and inventing a nearby line number for them would be a guess wearing a
+# fact's clothing.
+#
+# ---------------------------------------------------------------------------
+# The diff is a snapshot
+#
+# It is taken once, here, and the agent may keep working while the human reads.
+# The blob shas git puts in each `index` line are recorded in the document
+# header so staleness is at least detectable; nothing in this script prevents it.
+#
+# Exit codes:
+#   0  handled — stdout is the feedback, "No annotations", or "No changes"
+#   2  the gate could not run, at any stage, for any reason
+
+set -euo pipefail
+trap 'exit 2' ERR   # every failure leaves by the documented door, awk's included
+
+die() { printf 'marginal-diff: %s\n' "$*" >&2; exit 2; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly REPO_BUILD="$SCRIPT_DIR/../../target/release/marginal"
+
+# ---------------------------------------------------------------- arguments
+
+dump_only=0
+dump_map=0
+git_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --dump)     dump_only=1 ;;
+    # The map is the only part of this script that can be wrong without looking
+    # wrong: a bad line number renders as a perfectly ordinary line number. It
+    # is printable for the same reason marginal has --dump-blocks.
+    --dump-map) dump_map=1 ;;
+    *) git_args+=("$arg") ;;
+  esac
+done
+# `git diff` alone is unstaged-only, which silently hides everything an agent
+# just staged. HEAD is the honest default for "what has changed".
+[ ${#git_args[@]} -gt 0 ] || git_args=(HEAD)
+
+command -v jq  >/dev/null || die "jq is required"
+command -v git >/dev/null || die "git is required"
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+
+# ---------------------------------------------------------------- the diff
+#
+# Four flags, all defending against the user's own git config rather than
+# against git:
+#   --no-ext-diff   diff.external would return something that is not a unified
+#                   diff at all, and every assumption below would be wrong
+#   --no-color      color.ui = always sprays SGR escapes through text whose
+#                   byte columns marginal is about to compute
+#   --no-textconv   textconv filters rewrite content, so the line numbers would
+#                   describe a rendering nobody can edit
+#   core.quotepath  octal-escapes every non-ASCII path, so the file name in the
+#                   feedback would not be the file name on disk
+#
+# --src-prefix/--dst-prefix are not decoration. This was written on a machine
+# with diff.mnemonicPrefix set, where git writes `--- c/keep.txt` and `+++
+# i/keep.txt` rather than a/ and b/; stripping two characters happens to survive
+# that, and would silently eat the first two characters of every real path under
+# diff.noprefix. Pinning both prefixes makes the strip below correct by
+# construction rather than by the author's luck.
+#
+# `git diff` exits 0 with no changes and 1 only under --exit-code, so a
+# non-zero status here is a real failure (bad revision, ambiguous ref) and the
+# ERR trap is correct to take it.
+
+workdir="$(mktemp -d -t claude-code.marginal-diff.XXXXXX)"
+trap 'rm -rf "$workdir"' EXIT
+raw="$workdir/raw.diff"
+doc="$workdir/git diff.md"          # the space is deliberate: --label shows it
+map="$workdir/map.tsv"
+result_json="$workdir/result.json"
+
+git -c core.quotepath=false diff --no-ext-diff --no-color --no-textconv \
+    --src-prefix=a/ --dst-prefix=b/ "${git_args[@]}" > "$raw"
+
+if [ ! -s "$raw" ]; then
+  echo "No changes to review — \`git diff ${git_args[*]}\` is empty."
+  exit 0
+fi
+
+# A combined diff has two prefix columns and `@@@` headers. Every counter below
+# assumes one column, so reading it as one would produce line numbers that look
+# entirely plausible and are entirely wrong. Refuse instead.
+if grep -qE '^(diff --cc |diff --combined |@@@ )' "$raw"; then
+  die "combined (merge) diffs are not supported — review the parents individually"
+fi
+
+# marginal loads the document with read_to_string, so invalid UTF-8 anywhere in
+# it kills the session with an error about a temp path. Say which files instead.
+if ! iconv -f UTF-8 -t UTF-8 "$raw" >/dev/null 2>&1; then
+  die "this diff is not valid UTF-8 — marginal cannot open it." \
+      "Narrow the range, or exclude the offending path with a pathspec."
+fi
+
+label="git diff ${git_args[*]}"
+
+# ---------------------------------------------------------------- render
+#
+# Two outputs from one pass: the markdown document, and a row per document line
+# recording what that line was.
+#
+# map.tsv columns:
+#   docline  kind  oldfile  oldline  newfile  newline  oldend  newend
+#
+#   kind=file   a `## path` heading; newfile is the display path
+#   kind=hunk   a `### @@ …` heading; {old,new}line are the hunk starts and
+#               {old,new}end its ends, so a comment on the heading alone still
+#               resolves to the hunk's range. Both sides are recorded because a
+#               hunk that deletes a whole file has no new-side range at all —
+#               its end would come out one BELOW its start.
+#   kind=ctx    a context line: present on both sides
+#   kind=add    only on the new side
+#   kind=del    only on the old side
+#   kind=meta   `\ No newline at end of file`, and anything else structural
+#
+# A `-` in any column means "does not exist on that side".
+
+render_awk='
+function out(s) { docline++; print s > DOC }
+# The two end columns are only ever meaningful on a hunk row, so every other
+# call omits them and gets "-". awk leaves an unpassed parameter empty.
+function map(kind, of, ol, nf, nl, oe, ne) {
+  if (oe == "") oe = "-"
+  if (ne == "") ne = "-"
+  printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", docline, kind, of, ol, nf, nl, oe, ne > MAP
+}
+function strip(p) { return (p == "/dev/null") ? p : substr(p, 3) }
+
+# The file heading is emitted lazily, at the first thing that needs it, because
+# the path is not known until the ---/+++ pair and a rename may change it.
+function ensure_file(   name) {
+  if (file_open) return
+  if (newpath == "/dev/null")      name = oldpath " (deleted)"
+  else if (oldpath == "/dev/null") name = newpath " (new file)"
+  else if (oldpath != newpath)     name = oldpath " → " newpath
+  else                             name = newpath
+  out("")
+  out("## `" name "`")
+  if (blobs != "") { out(""); out("`" blobs "`") }
+  map("file", oldpath, "-", newpath, "-", "-")
+  file_open = 1
+}
+
+function close_fence() { if (fence) { out("```"); map("meta","-","-","-","-","-"); fence = 0 } }
+
+# A rename or mode change with no content difference reaches neither @@ nor
+# "Binary files", so nothing ever calls ensure_file and the file would vanish
+# from the document entirely — the reviewer would have no way to say "do not
+# rename this". Flush the pending one before starting the next, and at EOF.
+function flush_file() {
+  close_fence()
+  if (file_seen && !file_open) {
+    ensure_file()
+    out("")
+    map("meta","-","-","-","-","-")
+    out("*(no content change)*")
+    map("file", oldpath, "-", newpath, "-", "-")
+  }
+}
+
+function reset_file() {
+  flush_file()
+  oldpath = "?"; newpath = "?"; blobs = ""; file_open = 0; in_hunk = 0; file_seen = 1
+}
+
+BEGIN {
+  docline = 0; fence = 0; in_hunk = 0; file_open = 0; file_seen = 0
+  oldpath = "?"; newpath = "?"; blobs = ""
+  out("# Review: " LABEL)
+  map("meta","-","-","-","-","-")
+  out("")
+  map("meta","-","-","-","-","-")
+  out("Select a hunk with `J`/`K`, or any run of lines inside one with `V` and")
+  map("meta","-","-","-","-","-")
+  out("`j`/`k`. Comments come back anchored to the real file and line.")
+  map("meta","-","-","-","-","-")
+}
+
+# ---- inside a hunk body ---------------------------------------------------
+#
+# Body lines are consumed by COUNT, taken from the hunk header, never by
+# pattern. A deletion of a line that itself began with "--" is spelled "---" and
+# is indistinguishable by pattern from a file header; counting cannot be fooled
+# by it.
+in_hunk {
+  c = substr($0, 1, 1)
+  if (c == "\\") { out($0); map("meta","-","-","-","-","-"); next }
+  out($0)
+  if (c == "+")      { map("add", "-", "-", newpath, newline, "-"); newline++; nrem-- }
+  else if (c == "-") { map("del", oldpath, oldline, "-", "-", "-"); oldline++; orem-- }
+  else {
+    # " " or a genuinely empty line, which git writes for an empty context line.
+    # Reading that as anything but context puts every later line in the hunk off
+    # by one, silently, and only after the first blank line in the file.
+    map("ctx", oldpath, oldline, newpath, newline, "-")
+    oldline++; newline++; orem--; nrem--
+  }
+  if (orem <= 0 && nrem <= 0) { in_hunk = 0; close_fence() }
+  next
+}
+
+# ---- structure ------------------------------------------------------------
+
+/^diff --git / { reset_file(); next }
+
+/^index / {
+  blobs = $2
+  next
+}
+
+/^rename from /  { oldpath = substr($0, 13); next }
+/^rename to /    { newpath = substr($0, 11); next }
+/^--- /          { oldpath = strip(substr($0, 5)); next }
+/^\+\+\+ /       { newpath = strip(substr($0, 5)); next }
+
+/^Binary files / || /^GIT binary patch/ {
+  ensure_file()
+  out("")
+  map("meta","-","-","-","-","-")
+  out("*(binary — no line-level diff)*")
+  map("file", oldpath, "-", newpath, "-", "-")
+  next
+}
+
+/^@@ / {
+  ensure_file()
+  split($0, p, " ")
+  o = substr(p[2], 2); n = substr(p[3], 2)
+  i = index(o, ","); if (i) { oldline = substr(o,1,i-1)+0; orem = substr(o,i+1)+0 } else { oldline = o+0; orem = 1 }
+  i = index(n, ","); if (i) { newline = substr(n,1,i-1)+0; nrem = substr(n,i+1)+0 } else { newline = n+0; nrem = 1 }
+
+  hunk_old_start = oldline; hunk_old_end = oldline + orem - 1
+  hunk_new_start = newline; hunk_new_end = newline + nrem - 1
+
+  close_fence()
+  out("")
+  map("meta","-","-","-","-","-")
+  out("### " p[1] " " p[2] " " p[3] " " p[4])
+  map("hunk", oldpath, hunk_old_start, newpath, hunk_new_start, hunk_old_end, hunk_new_end)
+  out("")
+  map("meta","-","-","-","-","-")
+  out("```diff")
+  map("meta","-","-","-","-","-")
+  fence = 1
+
+  # A hunk header declaring zero lines on both sides has no body to consume, so
+  # the counter test below would never fire and the next header would be eaten
+  # as a body line.
+  in_hunk = (orem > 0 || nrem > 0)
+  if (!in_hunk) close_fence()
+  next
+}
+
+/^(old|new) mode |^(new|deleted) file mode |^similarity index |^dissimilarity index /  { next }
+
+END { flush_file(); out(""); map("meta","-","-","-","-","-") }
+'
+
+awk -v DOC="$doc" -v MAP="$map" -v LABEL="$label" "$render_awk" "$raw"
+
+if [ "$dump_only" -eq 1 ]; then
+  cat "$doc"
+  exit 0
+fi
+
+if [ "$dump_map" -eq 1 ]; then
+  printf 'docline\tkind\toldfile\toldline\tnewfile\tnewline\textra\n'
+  cat "$map"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- binary
+
+binary=""
+if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
+  binary="$MARGINAL_BIN"
+elif [ -x "$REPO_BUILD" ]; then
+  binary="$REPO_BUILD"
+elif command -v marginal >/dev/null; then
+  binary="$(command -v marginal)"
+fi
+[ -n "$binary" ] || die "marginal not found — build it (cargo build --release) or set \$MARGINAL_BIN"
+
+# ---------------------------------------------------------------- the tty
+#
+# Identical to marginal-last, and for the same reasons: this script has no tty,
+# a tmux popup is one on a client already showing the agent's pane, and a gate
+# that cannot reach the human must say so rather than answer on their behalf.
+# See that script's comments for the three measured gotchas (detached servers,
+# the popup's environment, alacritty swallowing exit status).
+
+rc=0
+if [ -n "${TMUX:-}" ]; then
+  [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
+    || die "this tmux session has no attached client — nobody could see the popup"
+
+  popup=(-E -w 90% -h 90% -T " marginal · $label ")
+  if [ -n "${TMUX_PANE:-}" ];  then popup+=(-t "$TMUX_PANE"); fi
+  if [ -n "${LANG:-}" ];       then popup+=(-e "LANG=$LANG"); fi
+  if [ -n "${LC_ALL:-}" ];     then popup+=(-e "LC_ALL=$LC_ALL"); fi
+  if [ -n "${COLORTERM:-}" ];  then popup+=(-e "COLORTERM=$COLORTERM"); fi
+
+  tmux display-popup "${popup[@]}" \
+    -- "$binary" --result "$result_json" --label "$label" "$doc" || rc=$?
+elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v alacritty >/dev/null; then
+  alacritty --title "marginal · $label" \
+    -e "$binary" --result "$result_json" --label "$label" "$doc" || rc=$?
+else
+  die "no way to reach a terminal — run Claude Code inside tmux, or install alacritty"
+fi
+
+[ -f "$result_json" ] \
+  || die "no result file from marginal (launcher rc=$rc) — no verdict is available." \
+         "It most likely never started, but a session that ran and could not write its" \
+         "result looks identical from here, and takes the review with it."
+
+count="$(jq -r '.annotations | length' "$result_json")"
+if [ "$count" -eq 0 ]; then
+  echo "No annotations — nothing to address."
+  exit 0
+fi
+
+# ---------------------------------------------------------------- resolve
+#
+# A document line range becomes a list of real file ranges. Three rules, each
+# there because the obvious alternative lies:
+#
+#   * runs are broken on a discontinuity, not min/max'd. A selection spanning
+#     two hunks has a GAP in new-side numbering, and a single range across it
+#     would claim lines nobody selected.
+#   * context lines always feed the new side. They exist now; that is where
+#     someone would go to look.
+#   * context lines feed the old side only when the selection also contains a
+#     deletion. Otherwise every ordinary "this addition is wrong" comment drags
+#     a redundant old-side range along behind it.
+#
+# A pure-deletion selection therefore resolves to the old side alone, labelled.
+# That is the honest answer: the lines are not in the working tree, and naming a
+# nearby one would be a guess presented as a fact.
+
+resolve_awk='
+BEGIN { FS = "\t"; nn = 0; no = 0; nh = 0; hasdel = 0 }
+$1 >= S && $1 <= E {
+  k = $2
+  if (k == "add" || k == "ctx") { nn++; nf[nn] = $5; nl[nn] = $6 }
+  if (k == "del")               { hasdel = 1 }
+  if (k == "del" || k == "ctx") { no++; of[no] = $3; ol[no] = $4 }
+  if (k == "hunk") {
+    nh++
+    hf[nh] = $5; hs[nh] = $6; he[nh] = $8      # new side
+    ho[nh] = $3; hos[nh] = $4; hoe[nh] = $7    # old side
+  }
+  if (k == "file" && nh == 0) { ff = ($5 != "/dev/null") ? $5 : $3 }
+}
+function runs(cnt, f, l, side,    i, out, sf, ss, se) {
+  out = ""
+  for (i = 1; i <= cnt; i++) {
+    if (i > 1 && f[i] == sf && l[i] == se + 1) { se = l[i]; continue }
+    if (i > 1) out = out (out == "" ? "" : ", ") fmt(sf, ss, se, side)
+    sf = f[i]; ss = l[i]; se = l[i]
+  }
+  if (cnt > 0) out = out (out == "" ? "" : ", ") fmt(sf, ss, se, side)
+  return out
+}
+function fmt(f, s, e, side) {
+  return f ":" s (s == e ? "" : "-" e) " (" side ")"
+}
+END {
+  parts = ""
+  if (hasdel && no > 0) parts = runs(no, of, ol, "old")
+  if (nn > 0) parts = parts (parts == "" ? "" : ", ") runs(nn, nf, nl, "new")
+  # Nothing but headings was selected: fall back to what the heading names.
+  # A hunk that deletes a whole file has an empty new side, whose "end" is one
+  # below its start; reporting that would be a range no file has ever had.
+  if (parts == "" && nh > 0) {
+    if (he[1] >= hs[1] && hf[1] != "/dev/null")        parts = fmt(hf[1], hs[1], he[1], "new")
+    else if (hoe[1] >= hos[1] && ho[1] != "/dev/null") parts = fmt(ho[1], hos[1], hoe[1], "old")
+  }
+  if (parts == "" && ff != "") parts = ff
+  print parts
+}
+'
+
+resolve() { awk -v S="$1" -v E="$2" "$resolve_awk" "$map"; }
+
+# The comment is fenced only when it contains a line that would restructure the
+# document around it — the same judgement marginal makes, applied here because
+# the markdown is being rebuilt rather than passed through. Fenced or not, it is
+# the human's comment and not a code sample.
+needs_fence() {
+  printf '%s\n' "$1" | grep -qE '^(#|>|[-*+] |[0-9]+[.)] |```|    )'
+}
+
+cat <<HDR
+The user reviewed \`$label\` in marginal. Each \`##\` heading below is a real
+location in the working tree — file, line range, and which side of the diff the
+selected lines live on:
+
+  * **(new)** — the lines are in the file now, at those numbers. Go there.
+  * **(old)** — the lines were DELETED. They are not in the working tree at all;
+    the numbers are their position before the change, and the blockquote is the
+    only copy. Do not go looking for them on disk.
+
+The blockquote is the exact diff text they selected, \`+\`/\`-\` markers and all.
+What follows it is their comment. Address every comment.
+
+Line numbers were resolved against the diff as it was when review started. If
+you have changed these files since, re-read them before editing.
+
+HDR
+
+for i in $(seq 0 $((count - 1))); do
+  a="$(jq -c ".annotations[$i]" "$result_json")"
+  s="$(jq -r '.startLine'   <<<"$a")"
+  e="$(jq -r '.endLine'     <<<"$a")"
+  kind="$(jq -r '.blockKind' <<<"$a")"
+  orig="$(jq -r '.originalText' <<<"$a")"
+  text="$(jq -r '.text' <<<"$a")"
+
+  loc="$(resolve "$s" "$e")"
+  [ -n "$loc" ] || loc="$label:$s${e:+-$e}"
+
+  printf '## %s · %s\n\n' "$loc" "$kind"
+  printf '%s\n' "$orig" | sed 's/^/> /'
+  printf '\n'
+  if needs_fence "$text"; then
+    printf '```\n%s\n```\n\n' "$text"
+  else
+    printf '%s\n\n' "$text"
+  fi
+done
