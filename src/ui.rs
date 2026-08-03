@@ -1000,6 +1000,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::blocks::Pos;
+    use crate::format::Format;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -1041,7 +1042,7 @@ mod tests {
 
     #[test]
     fn renders_source_with_gutter_and_header() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         let screen = render(&mut app, 100, 24);
         assert!(screen.contains("6 lines · 4 units · 0 annotations · PLAN.md"));
         assert!(screen.contains("   1 ▍# Steps"));
@@ -1053,7 +1054,7 @@ mod tests {
 
     #[test]
     fn renders_a_multi_block_selection_and_its_annotation() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.move_block(1);
         app.toggle_blocks();
         app.move_block(1);
@@ -1080,7 +1081,7 @@ mod tests {
 
     #[test]
     fn a_mid_line_selection_still_renders_the_whole_line() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.cursor = Pos::new(6, 6);
         app.contract(); // paragraph -> the code span, columns 5..20
         let screen = render(&mut app, 100, 24);
@@ -1091,7 +1092,11 @@ mod tests {
 
     #[test]
     fn multibyte_lines_survive_segmentation() {
-        let mut app = App::new("u.md".into(), "Prüfen `köde` hier — ✓ fertig.\n");
+        let mut app = App::open(
+            "u.md".into(),
+            "Prüfen `köde` hier — ✓ fertig.\n",
+            Format::Markdown,
+        );
         app.cursor = Pos::new(1, 10);
         app.contract();
         let screen = render(&mut app, 100, 12);
@@ -1100,7 +1105,7 @@ mod tests {
 
     #[test]
     fn input_mode_shows_the_target_range() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.move_block(1);
         app.toggle_blocks();
         app.move_block(1);
@@ -1114,7 +1119,7 @@ mod tests {
 
     #[test]
     fn a_multi_line_comment_renders_every_row() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.begin_comment();
         for c in "first".chars() {
             app.editor.insert(c);
@@ -1132,7 +1137,7 @@ mod tests {
     fn syntax_marks_do_not_disturb_the_rendered_text() {
         // Highlighting adds styles, never characters.
         let src = "## Steps\n\n- [ ] Use `parse_document` and **mind** the [docs](https://x.dev)\n";
-        let mut app = App::new("PLAN.md".into(), src);
+        let mut app = App::open("PLAN.md".into(), src, Format::Markdown);
         let screen = render(&mut app, 100, 16);
         assert!(screen.contains("## Steps"));
         assert!(
@@ -1143,7 +1148,7 @@ mod tests {
     #[test]
     fn scrolls_to_keep_the_cursor_visible_on_a_long_file() {
         let src: String = (1..=500).map(|i| format!("para {i}\n\n")).collect();
-        let mut app = App::new("big.md".into(), &src);
+        let mut app = App::open("big.md".into(), &src, Format::Markdown);
         app.goto_last();
         let screen = render(&mut app, 80, 24);
         assert!(screen.contains("para 500"));
@@ -1152,14 +1157,14 @@ mod tests {
 
     #[test]
     fn renders_an_empty_file_without_panicking() {
-        let mut app = App::new("empty.md".into(), "");
+        let mut app = App::open("empty.md".into(), "", Format::Markdown);
         let screen = render(&mut app, 80, 24);
         assert!(screen.contains("0 units"));
     }
 
     #[test]
     fn survives_a_tiny_terminal() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         render(&mut app, 20, 6);
         render(&mut app, 10, 3);
     }
@@ -1171,7 +1176,7 @@ mod tests {
     fn a_long_path_never_costs_the_selection_readout_in_the_title() {
         let long = "/tmp/claude-1000/-home-markus-Stuff-2026-07-27-scratch-marginal/\
                     7d415313-bed3-412e-8fed-f0dd60064d/scratchpad/review.md";
-        let mut app = App::new(long.into(), DOC);
+        let mut app = App::open(long.into(), DOC, Format::Markdown);
         app.cursor = Pos::new(6, 6);
         app.contract();
         let screen = render(&mut app, 95, 24);
@@ -1186,7 +1191,7 @@ mod tests {
 
     #[test]
     fn a_short_path_is_left_alone() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         let screen = render(&mut app, 95, 24);
         assert!(screen.contains("PLAN.md"));
         assert!(!screen.contains('…'), "{screen}");
@@ -1198,7 +1203,7 @@ mod tests {
     fn a_label_replaces_the_path_in_the_title() {
         let long = "/tmp/claude-1000/-home-markus-Stuff-2026-07-27-scratch-marginal/\
                     7d415313-bed3-412e-8fed-f0dd60064d/scratchpad/review.md";
-        let mut app = App::new(long.into(), DOC);
+        let mut app = App::open(long.into(), DOC, Format::Markdown);
         app.label = Some("assistant-message".into());
         let screen = render(&mut app, 95, 24);
         assert!(screen.contains("assistant-message"), "{screen}");
@@ -1299,7 +1304,7 @@ mod tests {
         for (tname, text) in CARET_TEXTS {
             for (pname, pos) in CARET_POSITIONS {
                 for w in 4u16..=120 {
-                    let mut app = App::new("PLAN.md".into(), DOC);
+                    let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
                     app.begin_comment();
                     app.editor.set(text);
                     pos(&mut app.editor);
@@ -1324,7 +1329,7 @@ mod tests {
         for g in ["a", "漢", "👨‍👩‍👧‍👦", "❤️", "👍🏽", "ｶﾞ"] {
             let text = g.repeat(20);
             for w in 6u16..=60 {
-                let mut app = App::new("PLAN.md".into(), DOC);
+                let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
                 app.begin_comment();
                 app.editor.set(&text);
                 app.editor.home();
@@ -1358,7 +1363,7 @@ mod tests {
     fn the_row_being_typed_on_is_visible_however_many_rows_the_comment_has() {
         for h in 9u16..=30 {
             for n in 1usize..=12 {
-                let mut app = App::new("PLAN.md".into(), DOC);
+                let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
                 app.begin_comment();
                 app.editor.set(&comment_of_rows(n));
                 let buf = render_buf(&mut app, 40, h);
@@ -1379,7 +1384,7 @@ mod tests {
     /// ending on the row being typed on, not just that row.
     #[test]
     fn a_scrolled_comment_box_still_fills_itself_with_the_rows_above() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.begin_comment();
         app.editor.set(&comment_of_rows(12));
         let buf = render_buf(&mut app, 40, 30);
@@ -1411,7 +1416,7 @@ mod tests {
     #[test]
     fn the_caret_past_the_end_of_a_line_is_a_space() {
         for g in ["a", "漢", "👨‍👩‍👧‍👦"] {
-            let mut app = App::new("PLAN.md".into(), DOC);
+            let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
             app.begin_comment();
             app.editor.set(&g.repeat(20));
             let buf = render_buf(&mut app, 30, 20);
@@ -1456,7 +1461,7 @@ mod tests {
     /// when none of them is there at all — barer than any real rung, which is
     /// what a pane too narrow for even `q quit` deserves.
     fn footer_at(setup: fn(&mut App), table: &[&str], w: u16) -> (usize, bool) {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         setup(&mut app);
         app.status = STATUS_PROBE.into();
         let buf = render_buf(&mut app, w, 14);
@@ -1542,7 +1547,7 @@ mod tests {
     /// the fringe is a worklist that drains as you answer.
     #[test]
     fn an_unanswered_question_shows_in_the_gutter_and_becomes_a_dot_when_answered() {
-        let mut app = App::new("REVIEW.md".into(), QDOC);
+        let mut app = App::open("REVIEW.md".into(), QDOC, Format::Markdown);
         // Row 0 is the border, so row N is source line N. Height 20, not 12:
         // the annotations pane is a fixed six rows, and at 12 the body pane is
         // three lines tall and row 5 is that pane's border rather than line 5.
@@ -1563,8 +1568,8 @@ mod tests {
     /// lining up with the body column beside it.
     #[test]
     fn the_gutter_question_mark_does_not_shift_the_body_column() {
-        let mut plain = App::new("R.md".into(), "The parser is fine.\n");
-        let mut asking = App::new("R.md".into(), "Is the parser fine?\n");
+        let mut plain = App::open("R.md".into(), "The parser is fine.\n", Format::Markdown);
+        let mut asking = App::open("R.md".into(), "Is the parser fine?\n", Format::Markdown);
         let (a, b) = (
             render_buf(&mut plain, 80, 8),
             render_buf(&mut asking, 80, 8),
@@ -1581,7 +1586,7 @@ mod tests {
     #[test]
     fn narrow_footers_fall_back_to_shorter_key_hints() {
         for w in [120u16, 95, 60, 30, 12] {
-            let mut app = App::new("PLAN.md".into(), DOC);
+            let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
             let screen = render(&mut app, w, 12);
             assert!(
                 screen.contains("q quit"),
@@ -1598,7 +1603,7 @@ mod tests {
     #[test]
     fn the_mark_keys_are_documented_at_every_usable_width() {
         for w in [120u16, 95, 90, 80] {
-            let mut app = App::new("PLAN.md".into(), DOC);
+            let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
             let screen = render(&mut app, w, 12);
             assert!(
                 screen.contains("[/] marks"),
@@ -1616,7 +1621,7 @@ mod tests {
 
     #[test]
     fn a_line_that_runs_past_the_edge_says_so() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.pretty = false;
         let buf = render_buf(&mut app, 60, 12);
         let row: String = (0..buf.area.width).map(|x| buf[(x, 3)].symbol()).collect();
@@ -1635,7 +1640,7 @@ mod tests {
     /// renderer never drew, so no cell on screen had the cursor style at all.
     #[test]
     fn the_cursor_is_never_silently_off_screen() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.pretty = false;
         app.cursor = Pos::new(3, 1);
         app.goto_line_end();
@@ -1679,7 +1684,7 @@ mod tests {
     /// Below it the prefix alone overruns, which is a different problem:
     /// `source_title` shortens the path and nothing else.
     fn narrowest_usable_width() -> u16 {
-        let mut bare = App::new("x.md".into(), DOC);
+        let mut bare = App::open("x.md".into(), DOC, Format::Markdown);
         bare.label = Some(String::new());
         let fixed = cells_claimed(&source_title(&bare, u16::MAX));
         u16::try_from(fixed + 2).unwrap()
@@ -1726,7 +1731,7 @@ mod tests {
             // fail here rather than skip its way to green.
             let mut checked = 0usize;
             for w in narrowest_usable_width()..=160 {
-                let mut app = App::new("x.md".into(), DOC);
+                let mut app = App::open("x.md".into(), DOC, Format::Markdown);
                 app.label = Some(name.into());
                 let title = source_title(&app, w);
                 let slot = usize::from(w) - 2;
@@ -1784,7 +1789,7 @@ mod tests {
         let doc = "aaaa bbbb cccc dddd eeee ffff gggg hhhh\nline one  \n";
         for (line, text) in doc.lines().enumerate() {
             for col in 1..=text.len() {
-                let mut app = App::new("w.md".into(), doc);
+                let mut app = App::open("w.md".into(), doc, Format::Markdown);
                 app.cursor = Pos::new(line + 1, col);
                 let buf = render_buf(&mut app, 40, 10);
                 assert!(
@@ -1818,7 +1823,7 @@ mod tests {
         for ch in ["日", "ｶﾞ"] {
             let doc = format!("{}\n", ch.repeat(200));
             for w in 10u16..=120 {
-                let mut app = App::new("cjk.md".into(), &doc);
+                let mut app = App::open("cjk.md".into(), &doc, Format::Markdown);
                 app.pretty = false;
                 app.cursor = Pos::new(1, 1);
                 let buf = render_buf(&mut app, w, 6);
@@ -1838,7 +1843,7 @@ mod tests {
     fn a_cursor_past_the_edge_is_still_marked_on_a_wide_line() {
         let doc = format!("{}\n", "日".repeat(200));
         for w in 20u16..=40 {
-            let mut app = App::new("cjk.md".into(), &doc);
+            let mut app = App::open("cjk.md".into(), &doc, Format::Markdown);
             app.pretty = false;
             app.cursor = Pos::new(1, 150);
             let buf = render_buf(&mut app, w, 6);
@@ -1873,7 +1878,7 @@ mod tests {
         let doc = format!("{}\n", "ｶﾞ".repeat(34));
         for w in 43u16..=73 {
             let body_w = w - 8; // two border columns and the six-cell gutter
-            let mut app = App::new("kana.md".into(), &doc);
+            let mut app = App::open("kana.md".into(), &doc, Format::Markdown);
             app.pretty = false;
             app.cursor = Pos::new(1, 1);
             let buf = render_buf(&mut app, w, 6);
@@ -1923,7 +1928,7 @@ mod tests {
 
     #[test]
     fn the_title_reports_the_cursor_column_even_when_the_cursor_is_not_drawn() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.goto_line_end();
         let screen = render(&mut app, 60, 12);
@@ -1934,7 +1939,7 @@ mod tests {
     /// truncated: an annotation you could not see you had made.
     #[test]
     fn an_annotation_on_a_long_line_is_still_visible() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.begin_comment();
         app.editor.set("too long");
@@ -1946,7 +1951,7 @@ mod tests {
     #[test]
     fn the_gutter_widens_for_five_digit_line_numbers() {
         let src: String = (1..=10_050).map(|i| format!("p{i}\n\n")).collect();
-        let mut app = App::new("huge.md".into(), &src);
+        let mut app = App::open("huge.md".into(), &src, Format::Markdown);
         app.goto_last();
         let screen = render(&mut app, 60, 12);
         assert!(screen.contains("20099"), "{screen}");
@@ -1959,7 +1964,7 @@ mod tests {
     /// one — a silent off-by-one in a tool whose entire output is columns.
     #[test]
     fn a_tab_occupies_exactly_one_cell_so_columns_do_not_drift() {
-        let mut app = App::new("t.md".into(), "a\tb\tc END\n");
+        let mut app = App::open("t.md".into(), "a\tb\tc END\n", Format::Markdown);
         assert_eq!(app.line_len(1), 9);
         let buf = render_buf(&mut app, 40, 8);
         let row: String = (0..buf.area.width).map(|x| buf[(x, 1)].symbol()).collect();
@@ -1977,7 +1982,7 @@ mod tests {
 
     #[test]
     fn peek_wraps_the_selection_over_the_source_view() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.toggle_peek();
         let screen = render(&mut app, 60, 16);
@@ -1989,7 +1994,7 @@ mod tests {
 
     #[test]
     fn a_long_line_wraps_onto_the_rows_below_it() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         let screen = render(&mut app, 60, 16);
         assert!(!screen.contains('›'), "nothing runs off the edge: {screen}");
         assert!(
@@ -2036,7 +2041,7 @@ mod tests {
         let h = 20u16;
         let last_body_row = h - 6 - 1 - 2;
         for w in 20u16..=80 {
-            let mut app = App::new("kana.md".into(), &doc);
+            let mut app = App::open("kana.md".into(), &doc, Format::Markdown);
             app.pretty = true;
             app.cursor = Pos::new(1, 1);
             let buf = render_buf(&mut app, w, h);
@@ -2073,7 +2078,7 @@ mod tests {
     /// annotation dot mark the line, so they belong to its first row only.
     #[test]
     fn the_gutter_numbers_a_line_once_however_many_rows_it_takes() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         let screen = render(&mut app, 60, 16);
         let field = |l: &str| l.chars().skip(1).take(4).collect::<String>();
         let numbered = screen.lines().filter(|l| field(l) == "   3").count();
@@ -2086,7 +2091,7 @@ mod tests {
     /// Wrapped, there is no edge to be past: it is drawn where it is.
     #[test]
     fn the_cursor_at_the_end_of_a_wrapped_line_is_drawn_on_its_own_row() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.goto_line_end();
         assert!(has_cursor(&render_buf(&mut app, 60, 16)));
@@ -2098,7 +2103,7 @@ mod tests {
     /// drift. The selected line is highlighted on every row it occupies.
     #[test]
     fn a_selection_stays_highlighted_across_the_rows_it_wraps_to() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.toggle_lines();
         let buf = render_buf(&mut app, 60, 16);
@@ -2117,7 +2122,7 @@ mod tests {
     /// and must not notice.
     #[test]
     fn wrapping_does_not_reach_the_output_contract() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.toggle_lines();
         app.begin_comment();
@@ -2152,7 +2157,7 @@ mod tests {
 | 1 | ｶﾞｶﾞｶﾞ | y |
 | 22 | plain | n |
 ";
-        let mut app = App::new("t.md".into(), doc);
+        let mut app = App::open("t.md".into(), doc, Format::Markdown);
         app.pretty = true;
         let (w, h) = (60u16, 16u16);
         let buf = render_buf(&mut app, w, h);
@@ -2179,7 +2184,7 @@ mod tests {
     /// pad-aware column would be off by exactly the padding.
     #[test]
     fn alignment_does_not_reach_the_output_contract() {
-        let mut app = App::new("t.md".into(), TABLE_DOC);
+        let mut app = App::open("t.md".into(), TABLE_DOC, Format::Markdown);
         // `-` narrows onto the cell under the cursor — the shortest one in the
         // widest column, so the one carrying the most padding.
         app.cursor = Pos::new(3, 7);
@@ -2222,7 +2227,7 @@ mod tests {
     /// column. Both gaps belong to the cell, and so anchor to its two ends.
     #[test]
     fn padding_is_highlighted_with_its_cell_and_only_with_its_cell() {
-        let mut app = App::new("t.md".into(), TABLE_DOC);
+        let mut app = App::open("t.md".into(), TABLE_DOC, Format::Markdown);
         app.cursor = Pos::new(3, 8);
 
         app.contract();
@@ -2245,7 +2250,7 @@ mod tests {
     /// The whole point, on a real screen: the pipes land in one column.
     #[test]
     fn an_aligned_table_reaches_the_screen() {
-        let mut app = App::new("t.md".into(), TABLE_DOC);
+        let mut app = App::open("t.md".into(), TABLE_DOC, Format::Markdown);
         let screen = render(&mut app, 60, 16);
         // Character positions, not byte offsets: the gutter's selection bar is
         // three bytes wide and one cell, so bytes would say the rows disagree.
@@ -2273,7 +2278,7 @@ mod tests {
     /// strip of source still visible beside it — a `›` with no line attached.
     #[test]
     fn peek_suppresses_the_truncation_markers_underneath_it() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.pretty = false;
         app.cursor = Pos::new(3, 1);
         assert!(render(&mut app, 60, 16).contains('›'));
@@ -2284,7 +2289,7 @@ mod tests {
 
     #[test]
     fn peek_scroll_is_clamped_to_the_rows_it_has() {
-        let mut app = App::new("long.md".into(), &long_doc());
+        let mut app = App::open("long.md".into(), &long_doc(), Format::Markdown);
         app.cursor = Pos::new(3, 1);
         app.toggle_peek();
         render(&mut app, 60, 16);
@@ -2300,7 +2305,7 @@ mod tests {
 
     #[test]
     fn peek_needs_something_to_peek_at() {
-        let mut app = App::new("empty.md".into(), "");
+        let mut app = App::open("empty.md".into(), "", Format::Markdown);
         app.toggle_peek();
         assert!(!app.peek);
         render(&mut app, 60, 12);
@@ -2310,7 +2315,7 @@ mod tests {
     /// two-line comment as `onetwo`.
     #[test]
     fn a_multi_line_comment_keeps_its_break_visible_in_the_pane() {
-        let mut app = App::new("PLAN.md".into(), DOC);
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
         app.begin_comment();
         app.editor.set("one");
         app.editor.newline();

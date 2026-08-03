@@ -1,8 +1,9 @@
 # marginal
 
-Annotate markdown in a terminal at whatever granularity you actually mean —
+Annotate a document in a terminal at whatever granularity you actually mean —
 an inline code span, a table row, a range of list items, a whole section — and
-emit the result as prose an agent can act on.
+emit the result as prose an agent can act on. Markdown gets all of that; any
+other text file gets paragraphs and lines, through the plain backend below.
 
 POC scope: open a file, navigate, select, comment, emit JSON + feedback
 markdown. No gate semantics yet; two launchers exist, one per host style — see
@@ -24,7 +25,7 @@ nix run . -- PLAN.md
 ## Usage
 
 ```
-marginal FILE.md [--result PATH] [--label NAME] [--raw]
+marginal FILE.md [--result PATH] [--label NAME] [--format NAME] [--raw]
 marginal --dump-blocks FILE.md     # headless: print the navigation units
 marginal --help                    # exits 0 (2 if an argument is not UTF-8)
 ```
@@ -43,6 +44,38 @@ gets checked without a terminal:
   1  list-item    L3-3
   2  paragraph    L5-5
 ```
+
+## File formats
+
+Two backends. Which one runs is decided by the extension, once, before either
+the TUI or `--dump-blocks` sees a unit:
+
+| extension | backend | what you get |
+|---|---|---|
+| `.md`, `.markdown` | **markdown**, via comrak | everything below: headings, list items, table rows, the inline hierarchy, syntax colour |
+| anything else | **plain** | paragraphs, lines, comments, JSON |
+
+`--format markdown` and `--format plain` override the guess in either direction.
+It is the answer for a file with no extension, and for the `.txt` that is really
+markdown. An unknown name is refused before the session starts, because the
+wrong backend is otherwise silent — a `.tex` file parsed as markdown does not
+fail, it builds units out of `#` and `_` that mean nothing there and files every
+comment against the wrong lines.
+
+The plain backend knows exactly one rule: **a paragraph is a run of consecutive
+non-blank lines.** That is enough for `.tex`, `.rst`, `.org`, `.txt` and anything
+else to navigate by paragraph, narrow to a single line with `-`, select ranges,
+comment, and emit the same result JSON and feedback markdown as markdown does —
+the output format never follows the input format. What it does not give you is
+syntax colour (there is nothing to tag), table alignment (there are no table
+rows), or any structure a blank line does not reveal: a `\section{Intro}` on the
+line above its first sentence is one unit with that sentence, and no amount of
+staring at the bytes says otherwise.
+
+It is also, unlike the markdown backend, *universally* gapless: the units are a
+partition of the lines, so every non-blank line is in exactly one of them
+whatever the input. `blocks.rs` lists four shapes where markdown does not manage
+that.
 
 ## Output
 

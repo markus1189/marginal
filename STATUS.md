@@ -2,6 +2,9 @@
 
 ## In this POC
 
+- two parser backends behind one seam (`format.rs`), chosen by extension and
+  overridable with `--format`: markdown through comrak, and a plain-text
+  fallback for everything else
 - comrak-based structure extraction in two views: a flat list of navigation
   units, and the full containment hierarchy down to inline nodes
 - `(line, column)` spans throughout, byte-safe on multibyte input
@@ -83,6 +86,13 @@ Put it behind a cargo feature so the lean build stays the default.
   question below.
 - `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
   comments, approve-with-notes
+- **a format-specific backend for anything but markdown.** The seam is built and
+  the plain fallback stands behind it, so a `.tex` file navigates by paragraph
+  today. What it cannot do is see a `\section` that has no blank line under it,
+  an `\item`, a `tabular`, or a `\verb` a `?` should not stop inside. A real
+  LaTeX backend means producing the same four artifacts from a scanner or a
+  grammar; the hand-rolled scanner is the option that keeps the dependency diet
+  above, and tree-sitter is the one that does not.
 - **horizontal scrolling** — deliberately, now. See below.
 - the annotations pane is a fixed six rows and does not scroll. The comment
   editor still caps at eight, but it scrolls both ways now, so the row being

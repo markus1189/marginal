@@ -37,6 +37,14 @@ cargo test                       # enough for a tight loop; no test needs a tty
   `blocks.rs` module doc lists four shapes where it does not hold today.
 - `app.rs` holds no ratatui types, so it stays testable without a terminal.
   Colours belong in `ui.rs`, tags in `highlight.rs`.
+- **A backend is four artifacts and nothing else**: a flat unit list, a
+  containment tree, per-line marks, and the spans everything downstream slices
+  by. Every one of them is 1-based lines and 1-based **byte** columns, end
+  inclusive, whatever produced them. `App::slice` trims blockquote chrome off
+  continuation lines and asks no backend which it is serving — that is sound
+  only because every plain span starts at column 1, which
+  `a_plain_annotation_quotes_its_source_bytes_verbatim` pins. A backend emitting
+  a unit that starts mid-line has to revisit it.
 
 ## You probably have no tty
 
@@ -111,7 +119,9 @@ Clippy runs `pedantic` + `nursery`. Exceptions live in `[lints.clippy]` in
 
 | file | job |
 |---|---|
+| `format.rs` | which backend owns a file, and the only place that decides |
 | `blocks.rs` | comrak → flat units + containment tree; the sourcepos fixups |
+| `plain.rs` | the fallback backend: paragraphs by blank line, nothing else |
 | `highlight.rs` | same tree → per-line tagged byte ranges; no second parser |
 | `app.rs` | cursor, selection, annotations, JSON + markdown output |
 | `ui.rs` | ratatui only; tags → colours, composites syntax < selection < cursor |

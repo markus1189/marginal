@@ -16,7 +16,8 @@ use serde::Serialize;
 
 use crate::blocks::{self, Block, Pos, Span, TreeNode};
 use crate::editor::Editor;
-use crate::highlight::{self, LineMarks};
+use crate::format::Format;
+use crate::highlight::LineMarks;
 use crate::table::{self, Tables};
 use crate::wrap::{self, Row};
 
@@ -317,14 +318,19 @@ fn strictly_contains(outer: Span, inner: Span) -> bool {
 }
 
 impl App {
-    pub fn new(path: String, src: &str) -> Self {
+    /// The backend is a parameter, not something inferred from `path` here.
+    /// `main` resolves `--format` against the extension exactly once and hands
+    /// the answer to both this and `--dump-blocks`; a second inference on this
+    /// side is how the dump and the screen would come to disagree about what
+    /// they parsed.
+    pub fn open(path: String, src: &str, format: Format) -> Self {
         let lines: Vec<String> = blocks::source_lines(src)
             .into_iter()
             .map(std::string::ToString::to_string)
             .collect();
-        let blocks = blocks::parse(src);
-        let tree = blocks::parse_tree(src);
-        let marks = highlight::marks(&tree, src);
+        let blocks = format.parse(src);
+        let tree = format.parse_tree(src);
+        let marks = format.marks(&tree, src);
         // The source never changes, so this is scanned once and never
         // invalidated. Only the answered/unanswered split is dynamic.
         let questions = blocks::questions(&tree, src);
@@ -1078,7 +1084,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 ";
 
     fn app() -> App {
-        App::new("PLAN.md".into(), DOC)
+        App::open("PLAN.md".into(), DOC, Format::Markdown)
     }
 
     fn commit(a: &mut App, text: &str) {
@@ -1153,7 +1159,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         a.toggle_peek();
         assert!(!a.peek);
 
-        let mut empty = App::new("empty.md".into(), "");
+        let mut empty = App::open("empty.md".into(), "", Format::Markdown);
         empty.toggle_peek();
         assert!(!empty.peek);
         assert_eq!(empty.status, "nothing to peek at");
@@ -1162,7 +1168,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn paging_moves_by_half_and_whole_viewports() {
         let src: String = (1..=200).map(|i| format!("line {i}\n")).collect();
-        let mut a = App::new("big.md".into(), &src);
+        let mut a = App::open("big.md".into(), &src, Format::Markdown);
         a.viewport = 20;
         a.cursor = Pos::new(1, 1);
 
@@ -1188,7 +1194,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     /// wraps to more rows than the viewport has.
     #[test]
     fn move_row_walks_inside_a_line_while_move_line_steps_over_it() {
-        let mut a = App::new("w.md".into(), &wide_doc(3));
+        let mut a = App::open("w.md".into(), &wide_doc(3), Format::Markdown);
         a.body_width = 20;
         let (rows, _) = a.line_rows(1);
         assert!(rows.len() >= 4, "line did not wrap: {} rows", rows.len());
@@ -1212,7 +1218,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn a_multi_line_span_in_a_container_is_quoted_at_one_depth() {
         let src = "> Note: this only reproduces\n> under load, which is why CI\n> never saw it.\n";
-        let mut a = App::new("q.md".into(), src);
+        let mut a = App::open("q.md".into(), src, Format::Markdown);
         commit(&mut a, "why?");
 
         let quoted = &a.annotations[0].original_text;
@@ -1234,7 +1240,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         // An indented list item is the same shape with spaces instead of `>`.
         let nested = "- outer\n  - a nested item that\n    runs onto a second line\n";
-        let mut b = App::new("n.md".into(), nested);
+        let mut b = App::open("n.md".into(), nested, Format::Markdown);
         b.cursor = Pos::new(2, 3);
         commit(&mut b, "why?");
         let q = &b.annotations[0].original_text;
@@ -1243,7 +1249,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         // A tab after the marker is chrome too. It is not in the alphabet the
         // first version trimmed with, so the uneven depth survived verbatim.
         let tabbed = ">\tline one\n>\tline two\n";
-        let c = App::new("t.md".into(), tabbed);
+        let c = App::open("t.md".into(), tabbed, Format::Markdown);
         assert_eq!(c.slice(c.blocks[0].span), "line one\nline two");
     }
 
@@ -1257,7 +1263,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn a_mid_line_span_keeps_every_byte_of_its_later_lines() {
         let src = "alpha beta gamma\n  delta epsilon zeta\n";
-        let a = App::new("m.md".into(), src);
+        let a = App::open("m.md".into(), src, Format::Markdown);
         let span = Span {
             start: Pos::new(1, 7),
             end: Pos::new(2, 20),
@@ -1273,7 +1279,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn an_indented_fence_keeps_the_markers_of_the_diff_inside_it() {
         let src = "  ```diff\n> removed line\n< added line\n  ```\n";
-        let a = App::new("d.md".into(), src);
+        let a = App::open("d.md".into(), src, Format::Markdown);
         assert_eq!(
             a.slice(a.blocks[0].span),
             "```diff\n> removed line\n< added line\n```"
@@ -1282,7 +1288,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         // The same shape one level in: inside a blockquote the outer `>` is
         // chrome and the inner one is not, and only one of each may go.
         let quoted = "> ```diff\n> > removed line\n> < added line\n> ```\n";
-        let b = App::new("q.md".into(), quoted);
+        let b = App::open("q.md".into(), quoted, Format::Markdown);
         assert_eq!(
             b.slice(b.blocks[0].span),
             "```diff\n> removed line\n< added line\n```"
@@ -1298,7 +1304,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn an_inline_span_inside_a_blockquote_drops_the_marker_on_every_line() {
         let src = "> some **emphasised text that\n> runs onto a second line** here\n";
-        let mut a = App::new("s.md".into(), src);
+        let mut a = App::open("s.md".into(), src, Format::Markdown);
         a.cursor = Pos::new(1, 8);
         a.contract();
         assert_eq!(a.selection_kind(), "strong");
@@ -1308,7 +1314,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         );
 
         let code = "> call `parse_document(arena,\n> src)` before anything else\n";
-        let mut b = App::new("c.md".into(), code);
+        let mut b = App::open("c.md".into(), code, Format::Markdown);
         b.cursor = Pos::new(1, 8);
         b.contract();
         assert_eq!(b.selection_kind(), "code-span");
@@ -1330,7 +1336,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     fn a_lone_carriage_return_does_not_shift_what_a_span_quotes() {
         const SRC: &str =
             "# Title\n\n> quote line\rlazy continuation\n\n- list item alpha\n\nfinal para\n";
-        let a = App::new("t.md".into(), SRC);
+        let a = App::open("t.md".into(), SRC, Format::Markdown);
         let got: Vec<(&str, usize, usize, String)> = a
             .blocks
             .iter()
@@ -1379,7 +1385,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         for src in blocks::MIXED_ENDINGS {
             let want_lines = blocks::normalised_lines(src);
-            let a = App::new("t.md".into(), src);
+            let a = App::open("t.md".into(), src, Format::Markdown);
             assert_eq!(a.lines, want_lines, "line vector of {src:?}");
 
             let arena = comrak::Arena::new();
@@ -1444,7 +1450,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
             "|---|---|\n",
             "| `status` | Grep auf (`\"ERROR\" \\| \"TIMEOUT\" \\| \"500\"`) per E-Mail |\n"
         );
-        let mut a = App::new("t.md".into(), SRC);
+        let mut a = App::open("t.md".into(), SRC, Format::Markdown);
 
         // The code span itself, reached the way a reviewer reaches it.
         a.cursor = Pos::new(3, 30);
@@ -1458,7 +1464,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 
         // The prose after it, which is where the two dropped bytes accumulate.
         let after = a.line_text(3).find(") per").unwrap() + 1;
-        let mut b = App::new("t.md".into(), SRC);
+        let mut b = App::open("t.md".into(), SRC, Format::Markdown);
         b.cursor = Pos::new(3, after);
         b.contract();
         b.contract();
@@ -1498,7 +1504,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
             "para with `a span` and\n  an indented second line\n",
         ];
         for src in srcs {
-            let a = App::new("p.md".into(), src);
+            let a = App::open("p.md".into(), src, Format::Markdown);
             let mut spans: Vec<Span> = a.blocks.iter().map(|b| b.span).collect();
             walk(&a.tree, &mut spans);
             for span in spans {
@@ -1801,7 +1807,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         // as covered. The wrap is asserted now rather than tested for, so a
         // fixture that stops wrapping fails instead of going quiet.
         for width in [20usize, 42, 64] {
-            let mut a = App::new("w.md".into(), doc);
+            let mut a = App::open("w.md".into(), doc, Format::Markdown);
             a.body_width = width;
 
             for line in 1..=a.line_count() {
@@ -1887,7 +1893,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let mut inner = 0usize;
         for (d, doc) in docs.iter().enumerate() {
             for pretty in [true, false] {
-                let mut a = App::new("p.md".into(), doc);
+                let mut a = App::open("p.md".into(), doc, Format::Markdown);
                 a.pretty = pretty;
 
                 // The shape, at every width the pane can have. 0 is pretty
@@ -1979,7 +1985,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     /// wrapping overshoots by however far the lines wrap.
     #[test]
     fn paging_counts_rows_not_lines_when_wrapped() {
-        let mut a = App::new("w.md".into(), &wide_doc(50));
+        let mut a = App::open("w.md".into(), &wide_doc(50), Format::Markdown);
         a.body_width = 20;
         a.viewport = 20;
         a.cursor = Pos::new(1, 1);
@@ -1993,7 +1999,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         );
 
         // …and off it does the old thing, exactly.
-        let mut b = App::new("w.md".into(), &wide_doc(50));
+        let mut b = App::open("w.md".into(), &wide_doc(50), Format::Markdown);
         b.pretty = false;
         b.viewport = 20;
         b.cursor = Pos::new(1, 1);
@@ -2006,7 +2012,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
     #[test]
     fn row_walking_terminates_on_a_pathologically_tall_line() {
         let src = format!("short\n{}\nshort\n", "x ".repeat(20_000));
-        let mut a = App::new("huge.md".into(), &src);
+        let mut a = App::open("huge.md".into(), &src, Format::Markdown);
         a.body_width = 40;
         assert!(a.row_count(2) > 900, "expected a very tall line");
 
@@ -2041,7 +2047,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
 A paragraph long enough to wrap at any of the widths below, with a
 https://example.dev/a/very/long/path in it as well.
 ";
-        let mut a = App::new("t.md".into(), src);
+        let mut a = App::open("t.md".into(), src, Format::Markdown);
         for width in [0usize, 12, 39, 60, 200] {
             a.body_width = width;
             for line in 1..=a.line_count() {
@@ -2076,7 +2082,7 @@ https://example.dev/a/very/long/path in it as well.
     #[test]
     fn a_padded_row_is_always_exactly_one_row() {
         let src = "| id | description | ok |\n|---|---|---|\n| 1 | short | y |\n";
-        let mut a = App::new("t.md".into(), src);
+        let mut a = App::open("t.md".into(), src, Format::Markdown);
         for width in 1..=80 {
             a.body_width = width;
             for line in 1..=3 {
@@ -2093,7 +2099,7 @@ https://example.dev/a/very/long/path in it as well.
     #[test]
     fn paging_is_clamped_and_never_stalls() {
         let src: String = (1..=30).map(|i| format!("line {i}\n")).collect();
-        let mut a = App::new("big.md".into(), &src);
+        let mut a = App::open("big.md".into(), &src, Format::Markdown);
         a.cursor = Pos::new(1, 1);
 
         // a degenerate viewport must still advance by at least one line
@@ -2132,7 +2138,7 @@ https://example.dev/a/very/long/path in it as well.
     #[test]
     fn tier1_table_rows_are_separate_navigation_units() {
         let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
-        let a = App::new("t.md".into(), src);
+        let a = App::open("t.md".into(), src, Format::Markdown);
         let kinds: Vec<_> = a
             .blocks
             .iter()
@@ -2176,7 +2182,7 @@ https://example.dev/a/very/long/path in it as well.
 
     #[test]
     fn tier3_char_movement_steps_over_multibyte_characters() {
-        let mut a = App::new("u.md".into(), "Prüfen köde\n");
+        let mut a = App::open("u.md".into(), "Prüfen köde\n", Format::Markdown);
         a.cursor = Pos::new(1, 1);
         a.move_char(1); // P -> r
         assert_eq!(a.cursor.col, 2);
@@ -2200,7 +2206,7 @@ https://example.dev/a/very/long/path in it as well.
 
     #[test]
     fn tier3_selected_bytes_land_on_character_boundaries() {
-        let mut a = App::new("u.md".into(), "Prüfen `köde` hier.\n");
+        let mut a = App::open("u.md".into(), "Prüfen `köde` hier.\n", Format::Markdown);
         a.cursor = Pos::new(1, 10);
         a.contract(); // paragraph -> the code span
         let (s, e) = a.selected_bytes_on(1).unwrap();
@@ -2465,7 +2471,7 @@ Is `?` in a code span quiet?
 ";
 
     fn qapp() -> App {
-        App::new("REVIEW.md".into(), QDOC)
+        App::open("REVIEW.md".into(), QDOC, Format::Markdown)
     }
 
     #[test]
@@ -2603,7 +2609,7 @@ Is `?` in a code span quiet?
 
     #[test]
     fn an_empty_file_does_not_panic() {
-        let mut a = App::new("empty.md".into(), "");
+        let mut a = App::open("empty.md".into(), "", Format::Markdown);
         assert_eq!(a.current_block(), None);
         assert_eq!(a.selection(), None);
         a.begin_comment();
@@ -2621,7 +2627,7 @@ Is `?` in a code span quiet?
     /// `line_count()` is the only thing keeping that range well-ordered.
     #[test]
     fn vertical_motion_on_an_empty_file_does_not_panic() {
-        let mut a = App::new("empty.md".into(), "");
+        let mut a = App::open("empty.md".into(), "", Format::Markdown);
         assert_eq!(a.line_count(), 1, "the clamp upper bound must stay >= 1");
 
         a.move_line(1);
@@ -2631,5 +2637,116 @@ Is `?` in a code span quiet?
         a.goto_last();
         a.goto_first();
         assert_eq!(a.cursor, Pos::new(1, 1));
+    }
+
+    // ---- the plain-text backend, reached through App -----------------------
+
+    /// A `.tex` file holding the two shapes that decide whether the rest of
+    /// `App` needs to know which backend produced its spans: a line opening
+    /// with `>`, which markdown reads as container chrome and strips, and a
+    /// line opening with pipes, which markdown reads as a table and pads.
+    /// Neither is anything but text here.
+    const TEX: &str = "\
+\\section{Introduction}
+
+> not a blockquote, just a line
+  \\item indented, and the indent is kept
+
+| not | a table |
+";
+
+    fn tex() -> App {
+        App::open("paper.tex".into(), TEX, Format::Plain)
+    }
+
+    /// `App::slice` trims container chrome off the continuation lines of a span
+    /// that starts inside a blockquote, and it decides that from the bytes
+    /// *before* the span's start column. Every plain span starts at column 1,
+    /// so the lead is empty, so the chrome is `(0, 0)` and nothing is trimmed —
+    /// which is why `slice` needs no format of its own. That is a property of
+    /// the spans this backend emits, not an accident, so it is pinned here
+    /// rather than assumed: a future plain unit starting mid-line would silently
+    /// start eating `>` characters out of ordinary prose.
+    #[test]
+    fn a_plain_annotation_quotes_its_source_bytes_verbatim() {
+        let mut a = tex();
+        a.move_block(1); // onto the `>` paragraph, lines 3-4
+        commit(&mut a, "why is this indented");
+
+        let ann = &a.annotations[0];
+        assert_eq!((ann.start_line, ann.end_line), (3, 4));
+        assert_eq!(
+            ann.original_text,
+            "> not a blockquote, just a line\n  \\item indented, and the indent is kept"
+        );
+
+        // The contrast, and the reason this test exists: the same bytes through
+        // the markdown backend lose the marker, because there they *are* one.
+        let mut m = App::open("paper.tex".into(), TEX, Format::Markdown);
+        m.move_block(1);
+        commit(&mut m, "why is this indented");
+        assert!(
+            !m.annotations[0].original_text.contains('>'),
+            "markdown strips the chrome: {:?}",
+            m.annotations[0].original_text
+        );
+    }
+
+    /// Every unit is whole lines, so every annotation made without narrowing
+    /// quotes exactly the lines it names — the strongest form of the property
+    /// above, over the whole document rather than one paragraph.
+    #[test]
+    fn every_plain_unit_slices_exactly_the_lines_it_spans() {
+        for src in [
+            TEX,
+            "one\n\ntwo\nthree\n",
+            "prüfen — köde\n\nzweite ünit\n",
+            "no trailing newline",
+        ] {
+            let a = App::open("f.tex".into(), src, Format::Plain);
+            for b in &a.blocks {
+                let want: Vec<&str> = blocks::source_lines(src)[b.start() - 1..b.end()].to_vec();
+                assert_eq!(a.slice(b.span), want.join("\n"), "{src:?} {b:?}");
+                assert!(a.is_whole_lines(b.span), "{src:?} {b:?}");
+            }
+        }
+    }
+
+    /// Table alignment is driven by units of kind `table-row`, and this backend
+    /// emits none — so a line of pipes in a `.tex` file is padded by nothing and
+    /// reaches the screen as the bytes it is. Pretty mode still *wraps* it,
+    /// which is format-agnostic and wanted.
+    #[test]
+    fn pretty_mode_aligns_no_tables_in_a_document_that_has_no_table_units() {
+        let mut a = tex();
+        assert!(!a.blocks.iter().any(|b| b.kind == "table-row"));
+        for width in 1..=60 {
+            a.body_width = width;
+            for line in 1..=a.line_count() {
+                let (rows, _) = a.line_rows(line);
+                assert!(
+                    !rows
+                        .iter()
+                        .flatten()
+                        .any(|p| matches!(p, wrap::Piece::Pad { .. })),
+                    "L{line} w{width}: {rows:?}"
+                );
+            }
+        }
+    }
+
+    /// The deliverable, end to end: a comment on a `.tex` file comes out as a
+    /// markdown review naming the file, the lines and the unit kind. The output
+    /// format does not follow the input format — a consumer parses feedback the
+    /// same way whatever was reviewed.
+    #[test]
+    fn a_tex_review_still_emits_markdown_feedback() {
+        let mut a = tex();
+        commit(&mut a, "spell out what this section covers");
+        let md = a.feedback_markdown();
+        assert!(md.starts_with("# Review feedback: paper.tex\n"), "{md}");
+        assert!(md.contains("## paper.tex:1 · paragraph\n"), "{md}");
+        assert!(md.contains("> \\section{Introduction}\n"), "{md}");
+        assert_eq!(a.result().decision, "changes-requested");
     }
 }

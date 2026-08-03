@@ -1,13 +1,16 @@
-//! marginal — POC: open a markdown file, navigate by block, annotate ranges.
+//! marginal — POC: open a document, navigate by block, annotate ranges.
 //!
 //! Usage:
 //!   marginal FILE.md [--result PATH]
+//!   marginal --format plain FILE.tex   (any text file, paragraph-wise)
 //!   marginal --dump-blocks FILE.md     (headless; prints the block table)
 
 mod app;
 mod blocks;
 mod editor;
+mod format;
 mod highlight;
+mod plain;
 mod table;
 mod ui;
 mod wrap;
@@ -18,14 +21,18 @@ use std::process::ExitCode;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use app::{App, Mode, Sel};
+use format::Format;
 
-const USAGE: &str =
-    "usage: marginal [--dump-blocks] [--raw] [--result[=]PATH] [--label[=]NAME] [--] FILE";
+const USAGE: &str = "usage: marginal [--dump-blocks] [--raw] [--result[=]PATH] \
+                     [--label[=]NAME] [--format[=]NAME] [--] FILE";
 
 struct Args {
     file: String,
     result: Option<String>,
     label: Option<String>,
+    /// `None` means "ask the extension", resolved once in `main` so the dump
+    /// and the TUI cannot answer it differently.
+    format: Option<Format>,
     dump: bool,
     pretty: bool,
 }
@@ -81,10 +88,24 @@ fn parse_args(argv: impl Iterator<Item = std::ffi::OsString>) -> Result<Option<A
     parse_argv(argv_utf8(argv)?)
 }
 
+/// A `--format` value, or an error naming what would have worked. Unlike
+/// `--label`, this flag has a closed set of values, so a typo is worth catching
+/// before the session rather than after it — opening a `.tex` file through the
+/// markdown parser is quiet, and every unit in it is wrong.
+fn named_format(name: &str) -> Result<Format, String> {
+    Format::from_name(name).ok_or_else(|| {
+        format!(
+            "unknown format: {name} (known: {})",
+            format::NAMES.join(", ")
+        )
+    })
+}
+
 fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
     let mut file = None;
     let mut result = None;
     let mut label = None;
+    let mut format = None;
     let mut dump = false;
     let mut pretty = true;
     // Two escape hatches, because a value that starts with a dash was otherwise
@@ -114,12 +135,15 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
             "--raw" => pretty = false,
             "--result" => result = Some(value(it.next(), "--result", "a path")?),
             "--label" => label = Some(value(it.next(), "--label", "a name")?),
+            "--format" => format = Some(named_format(&value(it.next(), "--format", "a name")?)?),
             "-h" | "--help" => return Ok(None),
             _ => {
                 if let Some(v) = a.strip_prefix("--result=") {
                     result = Some(v.to_string());
                 } else if let Some(v) = a.strip_prefix("--label=") {
                     label = Some(v.to_string());
+                } else if let Some(v) = a.strip_prefix("--format=") {
+                    format = Some(named_format(v)?);
                 } else if a.starts_with('-') {
                     return Err(format!("unknown flag: {a}"));
                 } else {
@@ -132,6 +156,7 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
         file: file.ok_or("no input file")?,
         result,
         label,
+        format,
         dump,
         pretty,
     }))
@@ -245,11 +270,15 @@ fn main() -> ExitCode {
         }
     };
 
+    // One decision, made before either consumer, so `--dump-blocks` cannot
+    // report a parse the TUI would not have used.
+    let format = args.format.unwrap_or_else(|| Format::of_path(&args.file));
+
     if args.dump {
         use io::Write;
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        for b in blocks::parse(&src) {
+        for b in format.parse(&src) {
             let level = if b.level > 0 {
                 format!("  level={}", b.level)
             } else {
@@ -280,7 +309,7 @@ fn main() -> ExitCode {
         }
     }
 
-    let mut app = App::new(args.file.clone(), &src);
+    let mut app = App::open(args.file.clone(), &src, format);
     app.label = args.label;
     app.pretty = args.pretty;
     match run(&mut app) {
@@ -732,6 +761,46 @@ mod tests {
         assert!(e.contains("--label=-WIP"), "{e}");
     }
 
+    /// `--format` is the only flag with a closed set of values, so it is the
+    /// only one where a typo can be caught, and it must be: the wrong backend
+    /// is silent. Opening a `.tex` file as markdown does not fail, it produces
+    /// a unit list built from `#` and `_` that mean nothing there, and every
+    /// comment filed against it names lines the reviewer did not select.
+    #[test]
+    fn format_takes_a_known_name_in_both_spellings_and_nothing_else() {
+        let ok = |a: &[&str]| argv(a).unwrap().unwrap();
+
+        assert_eq!(ok(&["f.tex"]).format, None, "unset means ask the extension");
+        assert_eq!(
+            ok(&["--format", "plain", "f.tex"]).format,
+            Some(Format::Plain)
+        );
+        assert_eq!(
+            ok(&["--format=markdown", "f.tex"]).format,
+            Some(Format::Markdown)
+        );
+
+        // A name no backend answers to is refused, and the message says what
+        // would have worked — including through the `=` spelling, which takes
+        // its value verbatim and so is the one that reaches `named_format`
+        // without the dash guard in front of it.
+        for bad in [
+            vec!["--format", "latex", "f.tex"],
+            vec!["--format=latex", "f.tex"],
+            vec!["--format=", "f.tex"],
+            // Right idea, wrong spelling: the extension, not the format name.
+            vec!["--format=md", "f.md"],
+        ] {
+            let e = argv(&bad).err().unwrap_or_else(|| panic!("{bad:?} parsed"));
+            assert!(e.contains("unknown format"), "{bad:?}: {e}");
+            assert!(e.contains("markdown, plain"), "{bad:?}: {e}");
+        }
+
+        // And it obeys the rules every other valued flag obeys.
+        assert!(argv(&["--format", "--raw", "f.md"]).is_err());
+        assert!(argv(&["f.md", "--format"]).is_err());
+    }
+
     /// A file whose name starts with a dash could not be named at all: every
     /// such token reached the unknown-flag arm. `--` sat in that same arm, so
     /// giving it the end-of-flags meaning every getopt already gives it takes
@@ -823,7 +892,7 @@ mod tests {
     /// with no undo and no confirmation, and `M-q` quit.
     #[test]
     fn normal_mode_binds_no_alt_chord() {
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('c', KeyModifiers::NONE));
         app.editor.set("keep me");
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -843,7 +912,7 @@ mod tests {
     }
 
     fn annotated() -> App {
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('c', KeyModifiers::NONE));
         app.editor.set("keep me");
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -852,7 +921,7 @@ mod tests {
     }
 
     fn peeking() -> App {
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('z', KeyModifiers::NONE));
         assert!(app.peek, "setup failed");
         app.peek_rows = 10;
@@ -874,7 +943,7 @@ mod tests {
                 continue;
             }
 
-            let mut app = App::new("t.md".into(), DOC);
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
             handle_key(&mut app, key('c', m));
             assert!(app.quit, "normal mode: C-c with {m:?} did not quit");
 
@@ -885,7 +954,7 @@ mod tests {
             // In Input mode C-c is cancel, not quit — the escape hatch out of
             // the comment editor, and equally unreachable if a stray modifier
             // can turn it into an ordinary keystroke.
-            let mut app = App::new("t.md".into(), DOC);
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
             handle_key(&mut app, key('c', KeyModifiers::NONE));
             assert_eq!(app.mode, Mode::Input, "setup failed");
             app.editor.set("draft");
@@ -919,11 +988,11 @@ mod tests {
                 "x with {m:?} reached remove_at_cursor"
             );
 
-            let mut app = App::new("t.md".into(), DOC);
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
             handle_key(&mut app, key('q', m));
             assert_eq!(app.quit, bare, "q with {m:?}");
 
-            let mut app = App::new("t.md".into(), DOC);
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
             handle_key(&mut app, key('c', m));
             if m.contains(KeyModifiers::CONTROL) {
                 assert!(app.quit, "C-c with {m:?} is the exit");
@@ -933,7 +1002,7 @@ mod tests {
         }
 
         // …and the capitals, which only arrive with SHIFT set, still act.
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('J', KeyModifiers::SHIFT));
         assert!(app.cursor.line > 1, "S-J stopped moving a block");
         let pretty = app.pretty;
@@ -954,7 +1023,7 @@ mod tests {
     fn input_mode_inserts_only_an_unmodified_character() {
         for bits in 0..64u8 {
             let m = KeyModifiers::from_bits_truncate(bits);
-            let mut app = App::new("t.md".into(), DOC);
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
             handle_key(&mut app, key('c', KeyModifiers::NONE));
             assert_eq!(app.mode, Mode::Input, "setup failed");
             handle_key(&mut app, key('Z', m));
@@ -978,7 +1047,7 @@ mod tests {
                 KeyModifiers::CONTROL,
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
             ] {
-                let mut app = App::new("t.md".into(), &doc);
+                let mut app = App::open("t.md".into(), &doc, Format::Markdown);
                 app.viewport = 10;
                 app.move_line(40);
                 let start = app.cursor.line;
@@ -996,7 +1065,7 @@ mod tests {
     /// The peek overlay matches on `code` alone too.
     #[test]
     fn the_peek_overlay_binds_no_alt_chord() {
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('z', KeyModifiers::NONE));
         assert!(app.peek, "setup failed");
         handle_key(&mut app, key('q', KeyModifiers::ALT));
@@ -1053,7 +1122,7 @@ mod tests {
     /// Input mode, one comment already committed so the history is not empty,
     /// `INPUT_TEXT` in the buffer and the cursor at `INPUT_CURSOR`.
     fn editing() -> App {
-        let mut app = App::new("t.md".into(), DOC);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
         handle_key(&mut app, key('c', KeyModifiers::NONE));
         app.editor.set("older note");
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1414,7 +1483,7 @@ mod tests {
         // file, because the result file is the verdict and "no annotations" is
         // a verdict. Only stdout is allowed to be empty here.
         let clean = dir.join("clean.json");
-        let app = App::new("t.md".into(), DOC);
+        let app = App::open("t.md".into(), DOC, Format::Markdown);
         let (feedback, code) = finish(&app, Some(clean.to_str().unwrap()));
         assert_eq!(code, 0);
         assert!(feedback.is_empty(), "{feedback:?}");
@@ -1427,7 +1496,7 @@ mod tests {
         let (feedback, code) = finish(&annotated(), None);
         assert_eq!(code, 1);
         assert!(feedback.contains("keep me"));
-        let (feedback, code) = finish(&App::new("t.md".into(), DOC), None);
+        let (feedback, code) = finish(&App::open("t.md".into(), DOC, Format::Markdown), None);
         assert_eq!(code, 0);
         assert!(feedback.is_empty());
 
