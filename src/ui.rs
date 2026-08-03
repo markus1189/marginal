@@ -452,6 +452,73 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
             }
         }
     }
+
+    draw_scrollbar(f, area, app, *scroll);
+}
+
+/// Which cell of a `h`-cell track the document's row `row` falls in.
+///
+/// The one mapping the thumb and — later — anything else painted on the track
+/// go through, so two things about the same row can never disagree about which
+/// cell they belong on. Rounds down, so cell `c` holds the rows
+/// `[c * total / h, (c + 1) * total / h)`.
+///
+/// The last row maps to the last cell, so a thumb that reaches the bottom of
+/// the track means the last row of the document is on screen. The converse is
+/// not exact and cannot be: a cell is `total / h` rows tall, so the thumb also
+/// touches bottom for the screenful before the end. A bar cannot distinguish
+/// "nearly there" from "there" inside one cell — the readout beside it can,
+/// which is what the readout is for.
+fn track_cell(row: usize, total: usize, h: usize) -> usize {
+    debug_assert!(h > 0 && total > 0, "empty track or empty document");
+    row.saturating_mul(h)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(h.saturating_sub(1))
+}
+
+/// The source pane's right border, doubling as a scrollbar.
+///
+/// The border column is free: the gutter and the body are laid inside
+/// `block.inner(area)`, and the overflow markers stop one column short of it at
+/// `body_area.right() - 1`. The track is therefore the border itself — the
+/// `│` the block already drew — with a thumb painted over the rows in view.
+///
+/// **Rows, not lines.** Wrapping is on by default and 16% of the lines in the
+/// corpus wrap; one of them takes 2,476 rows. A bar measured in lines does not
+/// move at all while you scroll through that line — reintroducing, on the
+/// vertical axis, exactly the "is this scrolled or is it not" ambiguity the
+/// overflow marker exists to remove. `App::total_rows` and `App::row_of` are
+/// what make the honest version affordable; see `RowIndex`.
+///
+/// Nothing at all when the document fits: a full-height thumb says "there is a
+/// scrollbar and it is not doing anything", which is one more thing on screen
+/// than the pane needs. The peek overlay is inset two columns and never reaches
+/// this one, so the bar stays up underneath it and keeps meaning what it says.
+fn draw_scrollbar(f: &mut Frame, area: Rect, app: &mut App, scroll: Anchor) {
+    let h = usize::from(area.height.saturating_sub(2));
+    if h == 0 || area.width == 0 {
+        return;
+    }
+    let total = app.total_rows();
+    if total <= h {
+        return;
+    }
+    // The last row on screen, not one past it: `track_cell` maps the rows it is
+    // given, and `top + h` is a row the pane does not show.
+    let top = app.row_of(scroll);
+    let first = track_cell(top, total, h);
+    let last = track_cell((top + h - 1).min(total - 1), total, h);
+
+    let x = area.right() - 1;
+    let style = Style::default().fg(Color::DarkGray);
+    let buf = f.buffer_mut();
+    for cell in first..=last {
+        let Ok(dy) = u16::try_from(cell) else {
+            continue;
+        };
+        buf[(x, area.y + 1 + dy)].set_symbol("█").set_style(style);
+    }
 }
 
 /// The selection readout goes first: it is the only field that changes on every
@@ -1609,6 +1676,145 @@ mod tests {
                 screen.contains("[/] marks"),
                 "width {w} hid the mark keys:\n{screen}"
             );
+        }
+    }
+
+    // ---- the scrollbar -----------------------------------------------------
+
+    /// Track cells carrying the thumb, as offsets from the top of the track —
+    /// so 0 is the first scrollable row and `h - 1` the last. Empty when no bar
+    /// was drawn at all.
+    fn thumb(buf: &ratatui::buffer::Buffer) -> Vec<u16> {
+        let x = buf.area.width - 1;
+        (1..buf.area.height)
+            .filter(|&y| buf[(x, y)].symbol() == "█")
+            .map(|y| y - 1)
+            .collect()
+    }
+
+    /// A document of `n` short lines — more rows than any pane here is tall.
+    fn tall_doc(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    /// Cells the track has, from the same layout the renderer solves rather
+    /// than from arithmetic in the test that drifts the moment a pane changes
+    /// height. `Length(0)` is the comment box, which is closed here.
+    fn track_height(area: Rect) -> u16 {
+        Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(0),
+            Constraint::Length(6),
+            Constraint::Length(1),
+        ])
+        .split(area)[0]
+            .height
+            .saturating_sub(2)
+    }
+
+    #[test]
+    fn the_scrollbar_shows_up_only_when_the_document_outgrows_the_pane() {
+        let mut small = App::open("s.md".into(), &tall_doc(3), Format::Markdown);
+        assert!(
+            thumb(&render_buf(&mut small, 40, 24)).is_empty(),
+            "a document that fits needs no bar"
+        );
+
+        let mut big = App::open("b.md".into(), &tall_doc(500), Format::Markdown);
+        let t = thumb(&render_buf(&mut big, 40, 24));
+        assert!(!t.is_empty(), "no thumb on a 500-line document");
+        assert_eq!(t[0], 0, "at the top of the document, {t:?}");
+    }
+
+    /// Both ends, and the invariant that ties the bar to the pane: the thumb
+    /// reaches the last track cell exactly when the last row is on screen.
+    #[test]
+    fn the_thumb_walks_from_the_top_of_the_track_to_the_bottom() {
+        let mut app = App::open("b.md".into(), &tall_doc(500), Format::Markdown);
+        let track_h = track_height(Rect::new(0, 0, 40, 24));
+        let top = thumb(&render_buf(&mut app, 40, 24));
+        assert_eq!(*top.first().unwrap(), 0, "{top:?}");
+        assert!(
+            *top.last().unwrap() < track_h - 1,
+            "the thumb starts at the bottom too: {top:?}"
+        );
+
+        app.goto_last();
+        let bottom = thumb(&render_buf(&mut app, 40, 24));
+        assert_eq!(*bottom.last().unwrap(), track_h - 1, "{bottom:?}");
+        assert!(*bottom.first().unwrap() > 0, "{bottom:?}");
+    }
+
+    /// The reason the bar is measured in rows and not in lines, as a test that
+    /// a line-measured bar fails: one line, thousands of rows. Scrolling
+    /// through it moves the screen and moves nothing about the line number, so
+    /// a thumb positioned by `scroll.line` sits still for the whole journey —
+    /// the pane scrolling under a motionless bar is precisely the ambiguity the
+    /// bar was added to remove.
+    #[test]
+    fn the_thumb_moves_while_scrolling_inside_a_single_very_tall_line() {
+        let src = format!("short\n{}\nshort\n", "word ".repeat(4000));
+        let mut app = App::open("tall.md".into(), &src, Format::Markdown);
+        app.cursor = Pos::new(2, 1);
+        let at_start = thumb(&render_buf(&mut app, 40, 24));
+
+        // Halfway down the tall line, by byte — still line 2, so a line-wise
+        // bar cannot have moved.
+        app.cursor = Pos::new(2, src.lines().nth(1).unwrap().len() / 2);
+        let halfway = thumb(&render_buf(&mut app, 40, 24));
+
+        assert_eq!(app.cursor.line, 2, "still inside the same line");
+        assert!(
+            halfway[0] > at_start[0] + 2,
+            "the thumb barely moved inside a {}-row line: {at_start:?} -> {halfway:?}",
+            app.row_count(2)
+        );
+    }
+
+    /// Everything the bar paints has to be on the border and nowhere else. The
+    /// gutter and the body are laid inside `block.inner`, and the overflow
+    /// marker stops one column short of the border — so a thumb one column left
+    /// would sit on top of the marker, which is the one glyph that must survive.
+    #[test]
+    fn the_thumb_takes_the_border_column_and_leaves_the_body_alone() {
+        let src = format!("{}\n{}", "x".repeat(200), tall_doc(500));
+        let mut app = App::open("wide.md".into(), &src, Format::Markdown);
+        app.pretty = false;
+        let buf = render_buf(&mut app, 60, 24);
+        assert!(!thumb(&buf).is_empty(), "no bar to check");
+
+        let marker = buf.area.width - 2;
+        assert_eq!(
+            buf[(marker, 1)].symbol(),
+            "›",
+            "overflow marker overpainted"
+        );
+        for y in 1..buf.area.height {
+            assert_ne!(
+                buf[(marker, y)].symbol(),
+                "█",
+                "thumb reached the body column on row {y}"
+            );
+        }
+    }
+
+    /// The bar is bounded by the track, and the track by the pane. Every width
+    /// and height the other layout tests sweep, plus the degenerate ones.
+    #[test]
+    fn the_scrollbar_stays_inside_its_track_at_every_size() {
+        for h in 3u16..=40 {
+            for w in [4u16, 10, 40, 80, 120] {
+                let mut app = App::open("b.md".into(), &tall_doc(500), Format::Markdown);
+                app.goto_last();
+                let buf = render_buf(&mut app, w, h);
+                let track_h = track_height(buf.area);
+                for cell in thumb(&buf) {
+                    assert!(
+                        cell < track_h,
+                        "thumb cell {cell} outside a {track_h}-cell track at {w}x{h}"
+                    );
+                }
+            }
         }
     }
 

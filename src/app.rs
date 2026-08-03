@@ -135,7 +135,48 @@ pub struct App {
     /// nothing about the terminal, so it is computed once here and the width
     /// only decides whether to use it.
     tables: Tables,
+    /// Where every line starts in row space. Rebuilt when the geometry it was
+    /// measured at changes; see `RowIndex`.
+    rows: RowIndex,
     next_id: usize,
+}
+
+/// Rows before each line: `prefix[i]` is how many rows lines `1..=i` take, so
+/// `prefix[line - 1]` is the absolute row of line `line`'s first row and the
+/// last entry is the document's row total.
+///
+/// This is the one thing in the crate that measures the *whole* document in row
+/// space, and it exists for the scrollbar, which cannot say where you are
+/// without knowing how far there is to go. Nothing else may reach for it:
+/// motion stays anchor-addressed and O(viewport), and a second caller wanting
+/// "the row index of line N" is a caller that should be walking instead.
+///
+/// Keyed by the two things a row count depends on. The source never changes —
+/// there is no editing — so `body_width` and `pretty` are the whole of the
+/// invalidation, and `sync` is the only place that reconciles them. Measured on
+/// a 422 KB, 5,959-line markdown file: a full rebuild is ~3 ms against the
+/// ~20 ms `App::open` already spends parsing it, and it happens on a resize or
+/// a `P` press, not on a keystroke.
+struct RowIndex {
+    width: usize,
+    pretty: bool,
+    prefix: Vec<usize>,
+}
+
+impl RowIndex {
+    /// Deliberately not built here: `App::open` would have to wrap every line
+    /// at a width the renderer has not published yet, and then again on the
+    /// first frame. Empty means "not measured", which `sync` reads as stale
+    /// whatever the geometry, because no real document has a zero-length
+    /// prefix — `line_count()` has a floor of 1, so the shortest possible
+    /// prefix is two entries.
+    const fn new() -> Self {
+        Self {
+            width: 0,
+            pretty: false,
+            prefix: Vec::new(),
+        }
+    }
 }
 
 /// Top of the source viewport: a line, and how many of its wrapped rows sit
@@ -358,6 +399,7 @@ impl App {
             pretty: true,
             body_width: 0,
             tables,
+            rows: RowIndex::new(),
             next_id: 1,
         }
     }
@@ -393,6 +435,56 @@ impl App {
 
     pub fn row_count(&self, line: usize) -> usize {
         self.line_rows(line).0.len().max(1)
+    }
+
+    /// Bring the row index up to the current geometry, rebuilding it only when
+    /// the width or the mode it was measured at has changed.
+    ///
+    /// `&mut self` on the readers rather than a `sync` the caller must remember:
+    /// a stale row total is a scrollbar that lies about how far there is to go,
+    /// and the only way to make that unrepresentable is to leave no way to read
+    /// the index without reconciling it first.
+    fn sync_rows(&mut self) {
+        if self.rows.width == self.body_width
+            && self.rows.pretty == self.pretty
+            && !self.rows.prefix.is_empty()
+        {
+            return;
+        }
+        let mut prefix = Vec::with_capacity(self.line_count() + 1);
+        let mut at = 0;
+        prefix.push(at);
+        for line in 1..=self.line_count() {
+            at += self.row_count(line);
+            prefix.push(at);
+        }
+        self.rows = RowIndex {
+            width: self.body_width,
+            pretty: self.pretty,
+            prefix,
+        };
+    }
+
+    /// Rows the whole document takes at the current width. Never zero: the
+    /// shortest document is one empty line, which is one row.
+    pub fn total_rows(&mut self) -> usize {
+        self.sync_rows();
+        self.rows.prefix.last().copied().unwrap_or(1).max(1)
+    }
+
+    /// Absolute row of `at`, counting from 0 at the top of the document.
+    ///
+    /// Clamped to the last row rather than panicking on a line past the end:
+    /// the callers are a renderer and a status field, and neither has anything
+    /// useful to do with a crash. A `row` past what its line actually takes is
+    /// left alone — `keep_cursor_visible` produces anchors and never that.
+    pub fn row_of(&mut self, at: Anchor) -> usize {
+        self.sync_rows();
+        self.rows
+            .prefix
+            .get(at.line.saturating_sub(1))
+            .map_or_else(|| self.rows.prefix.last().copied().unwrap_or(0), |&r| r)
+            + at.row
     }
 
     /// Which of `line`'s rows holds byte `col - 1`. Padding cannot confuse this:
@@ -2023,6 +2115,96 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let top = a.walk_rows(Anchor { line: 3, row: 0 }, 5, false);
         assert_eq!(top.line, 2, "walking back should land inside the tall line");
         assert_eq!(top.row, a.row_count(2) - 5);
+    }
+
+    /// The row index is a summary of the walk, so the walk is what checks it:
+    /// stepping from the top must reach every anchor at the row the index
+    /// claims, and must run out of steps exactly at the total.
+    ///
+    /// A document with all four shapes that make rows and lines differ — prose
+    /// that wraps, a line that does not, an empty line, and a table whose
+    /// padded row must stay exactly one row however wide it is aligned to.
+    #[test]
+    fn the_row_index_agrees_with_walking_the_document_a_row_at_a_time() {
+        let src = "\
+# Heading
+
+Prose long enough that it has to wrap more than once at the widths below, which
+takes a few words.
+
+| id | a very long description of the thing | ok |
+|---|:---:|--:|
+| 1 | x | y |
+
+short
+";
+        for width in [0usize, 20, 40, 87] {
+            for pretty in [true, false] {
+                let mut a = App::open("w.md".into(), src, Format::Markdown);
+                a.body_width = width;
+                a.pretty = pretty;
+
+                let mut at = Anchor::default();
+                let mut walked = 1;
+                loop {
+                    assert_eq!(
+                        a.row_of(at),
+                        walked - 1,
+                        "width {width}, pretty {pretty}, anchor {at:?}"
+                    );
+                    match a.step_row(at, true) {
+                        Some(next) => at = next,
+                        None => break,
+                    }
+                    walked += 1;
+                }
+                assert_eq!(
+                    a.total_rows(),
+                    walked,
+                    "width {width}, pretty {pretty}: total is not what the walk counted"
+                );
+            }
+        }
+    }
+
+    /// Geometry is the whole of the invalidation, so both of its halves have to
+    /// move the total. A cache keyed on width alone survives `P` and reports the
+    /// wrapped row count for an unwrapped screen — a scrollbar claiming a third
+    /// more document than there is.
+    #[test]
+    fn the_row_index_follows_the_width_and_the_mode_it_was_measured_at() {
+        let src = format!("# H\n\n{}\n", "word ".repeat(60));
+        let mut a = App::open("w.md".into(), &src, Format::Markdown);
+
+        a.body_width = 0;
+        let unwrapped = a.total_rows();
+        a.body_width = 40;
+        let wrapped = a.total_rows();
+        assert!(
+            wrapped > unwrapped + 5,
+            "{wrapped} rows at width 40 vs {unwrapped} at width 0"
+        );
+
+        a.pretty = false;
+        assert_eq!(
+            a.total_rows(),
+            unwrapped,
+            "pretty off at width 40 must count the same rows as no width at all"
+        );
+        a.pretty = true;
+        assert_eq!(a.total_rows(), wrapped, "toggling back must restore it");
+    }
+
+    /// One row, not zero. The scrollbar divides by the total, and an empty file
+    /// is a real thing to open — `renders_an_empty_file_without_panicking`
+    /// opens one.
+    #[test]
+    fn the_row_index_of_an_empty_document_is_one_row() {
+        let mut a = App::open("empty.md".into(), "", Format::Markdown);
+        assert_eq!(a.total_rows(), 1);
+        assert_eq!(a.row_of(Anchor::default()), 0);
+        // Past the end, clamped rather than panicking.
+        assert_eq!(a.row_of(Anchor { line: 99, row: 0 }), 1);
     }
 
     /// The property everything in row space stands on, generalised from wrap's
