@@ -970,17 +970,59 @@ fn draw_peek(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(shown).block(block.title(title)), popup);
 }
 
+/// Whether the cursor is inside `i`'s lines — what the `▸` marker points at.
+fn annotation_here(app: &App, i: usize) -> bool {
+    app.annotations
+        .get(i)
+        .is_some_and(|a| app.cursor.line >= a.start_line && app.cursor.line <= a.end_line)
+}
+
+/// Which entry the pane must keep on screen, and the window that does it.
+///
+/// The pane is four content rows and the list is not scrollable, so a fifth
+/// annotation used to fall off the bottom with nothing to say it had: the
+/// count in the footer went to five and the list still ended at four, and the
+/// `▸` marker pointed at an entry that was not there. `STATUS.md` recorded
+/// that the pane does not scroll; what it did not record is that the pane did
+/// not admit it.
+///
+/// The entry to keep is the one the marker is on. Failing that — the cursor is
+/// somewhere unannotated — it is the last one, because the pane is a log and
+/// the useful end of a log is the newest entry. That is also the one just
+/// written, though `commit_comment` leaves the cursor on it and so reaches it
+/// by the first rule.
+///
+/// The window ends on that entry, the same arithmetic `draw_input` uses for the
+/// row being typed on. Deliberately not a scroll position of its own: a fifth
+/// piece of state to keep in step with a list that `x` can delete from, bought
+/// for a pane whose entire job is to be glanced at.
+fn annotation_window(app: &App, h: usize) -> (usize, usize) {
+    if h == 0 || app.annotations.is_empty() {
+        return (0, 0);
+    }
+    let focus = (0..app.annotations.len())
+        .find(|&i| annotation_here(app, i))
+        .unwrap_or(app.annotations.len() - 1);
+    let top = (focus + 1).saturating_sub(h);
+    (top, (top + h).min(app.annotations.len()))
+}
+
 fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
+    let (top, end) = annotation_window(app, usize::from(area.height.saturating_sub(2)));
     let rows: Vec<Line> = if app.annotations.is_empty() {
         vec![Line::from(Span::styled(
             "  no annotations yet — v/V select, +/- widen or narrow, Enter comment",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
-        app.annotations
+        app.annotations[top..end]
             .iter()
             .enumerate()
-            .map(|(i, a)| {
+            .map(|(row, a)| {
+                // The number is the entry's place in the whole list, not in the
+                // window: `x remove` acts on the cursor and the numbers are how
+                // you check you are about to remove the one you mean.
+                let i = top + row;
                 let loc = if a.whole_lines && a.start_line == a.end_line {
                     format!("L{}", a.start_line)
                 } else if a.whole_lines {
@@ -993,10 +1035,9 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
                         a.start_line, a.start_col, a.end_line, a.end_col
                     )
                 };
-                let here = app.cursor.line >= a.start_line && app.cursor.line <= a.end_line;
                 Line::from(vec![
                     Span::styled(
-                        format!(" {} ", if here { "▸" } else { " " }),
+                        format!(" {} ", if annotation_here(app, i) { "▸" } else { " " }),
                         Style::default().fg(Color::Yellow),
                     ),
                     Span::styled(
@@ -1015,12 +1056,22 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
             .collect()
     };
 
+    // `{first}-{last}/{total}` again, the third place the app answers "what
+    // part of this am I looking at" and the same answer each time. Only when
+    // some of the list is off screen, and only when the border can hold it —
+    // the alternative to dropping it is ratatui truncating it into a
+    // half-number, which is worse than the bare title it replaces.
+    let counted = format!(" annotations {}-{end}/{} ", top + 1, app.annotations.len());
+    let title = if end - top < app.annotations.len()
+        && cells_claimed(&counted) <= usize::from(area.width).saturating_sub(2)
+    {
+        counted
+    } else {
+        " annotations ".into()
+    };
+
     f.render_widget(
-        Paragraph::new(rows).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" annotations "),
-        ),
+        Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
 }
@@ -1786,6 +1837,113 @@ mod tests {
                 "width {w} hid the mark keys:\n{screen}"
             );
         }
+    }
+
+    // ---- the annotations pane ----------------------------------------------
+
+    /// The annotations pane's rect, from the same layout the renderer solves
+    /// rather than from arithmetic in the test. Getting it a row out reads the
+    /// first entry as the title and drops the last one.
+    fn annotations_area(area: Rect) -> Rect {
+        Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(0),
+            Constraint::Length(6),
+            Constraint::Length(1),
+        ])
+        .split(area)[2]
+    }
+
+    /// The pane's title, as it reached the screen.
+    fn annotations_title(buf: &ratatui::buffer::Buffer) -> String {
+        let y = annotations_area(buf.area).y;
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    /// The pane's content rows, trimmed of their borders.
+    fn annotation_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        let pane = annotations_area(buf.area);
+        (pane.y + 1..pane.bottom() - 1)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_matches('│')
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// `n` annotations, one per paragraph, written in document order.
+    fn annotated(n: usize) -> App {
+        let mut app = App::open("b.md".into(), &para_doc(n + 4), Format::Markdown);
+        for i in 0..n {
+            app.cursor = Pos::new(i * 2 + 1, 1);
+            app.begin_comment();
+            app.editor.set(&format!("note number {}", i + 1));
+            app.commit_comment();
+        }
+        app
+    }
+
+    /// Measured before this changed: eight annotations at 100x24 showed `1 L1`
+    /// through `4 L7` and stopped. No marker, no count, and the `▸` pointing at
+    /// the cursor's annotation was itself off the bottom — the footer said
+    /// `8 annotation(s)` beside a list of four.
+    #[test]
+    fn the_annotations_pane_says_when_it_is_showing_only_some_of_them() {
+        let mut app = annotated(8);
+        let buf = render_buf(&mut app, 100, 24);
+        let title = annotations_title(&buf);
+        assert!(title.contains("annotations 5-8/8"), "{title}");
+
+        // Four rows, and they are the last four — the cursor is on the eighth.
+        let rows = annotation_rows(&buf);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert!(rows[3].contains("note number 8"), "{rows:?}");
+        assert!(rows[0].contains("note number 5"), "{rows:?}");
+    }
+
+    /// The numbers name the entry's place in the list, not in the window: `x`
+    /// removes what the cursor is on, and the numbers are how you check you are
+    /// about to remove the one you mean.
+    #[test]
+    fn a_scrolled_pane_still_numbers_its_entries_from_the_whole_list() {
+        let mut app = annotated(8);
+        let rows = annotation_rows(&render_buf(&mut app, 100, 24));
+        for (row, n) in rows.iter().zip(5..=8) {
+            assert!(row.contains(&format!("{n} L")), "wanted {n}: {rows:?}");
+        }
+    }
+
+    /// The marker has to be on screen or it is pointing at nothing. It follows
+    /// the cursor up the document as well as down.
+    #[test]
+    fn the_cursor_marker_is_always_inside_the_window() {
+        let mut app = annotated(8);
+        for i in 0..8 {
+            app.cursor = Pos::new(i * 2 + 1, 1);
+            let rows = annotation_rows(&render_buf(&mut app, 100, 24));
+            let marked: Vec<&String> = rows.iter().filter(|r| r.contains('▸')).collect();
+            assert_eq!(marked.len(), 1, "annotation {}: {rows:?}", i + 1);
+            assert!(
+                marked[0].contains(&format!("note number {}", i + 1)),
+                "annotation {}: {rows:?}",
+                i + 1
+            );
+        }
+    }
+
+    /// Nothing hidden, nothing claimed: a list that fits keeps the bare title.
+    #[test]
+    fn a_pane_showing_every_annotation_does_not_count_them() {
+        let mut app = annotated(3);
+        let title = annotations_title(&render_buf(&mut app, 100, 24));
+        assert!(title.contains(" annotations "), "{title}");
+        assert!(!title.contains('/'), "{title}");
     }
 
     // ---- the scrollbar -----------------------------------------------------
