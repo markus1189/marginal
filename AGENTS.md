@@ -13,6 +13,9 @@ What is still expected of every commit:
   the tip of a series
 - a message that says what was wrong, what verified the fix, and why no
   existing test caught it. `git log` is the only design record this repo has.
+- integrate a branch by rebasing it onto `main`, never by merging. The history
+  is linear and stays that way; "merge the branch" means rebase and
+  fast-forward unless the request says otherwise.
 
 ## Build & check
 
