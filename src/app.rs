@@ -1004,7 +1004,12 @@ impl App {
     /// pushes), which is not the order they appear in — so this sorts. Positions
     /// collapse to one stop; a ring that visits the same cell twice reads as a
     /// stuck key.
-    fn mark_positions(&self) -> Vec<(Pos, &'static str)> {
+    ///
+    /// Also what the scrollbar paints on its track, which is the reason this is
+    /// public. The ring `[`/`]` walks and the marks the track shows are the same
+    /// set by construction — a track drawing its own idea of what counts as a
+    /// mark would send you looking for a stop the ring does not have.
+    pub fn mark_positions(&self) -> Vec<(Pos, &'static str)> {
         let mut out: Vec<(Pos, &'static str)> = self
             .annotations
             .iter()

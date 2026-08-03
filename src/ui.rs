@@ -510,15 +510,74 @@ fn draw_scrollbar(f: &mut Frame, area: Rect, app: &mut App, scroll: Anchor) {
     let first = track_cell(top, total, h);
     let last = track_cell((top + h - 1).min(total - 1), total, h);
 
+    let marks = track_marks(app, total, h);
     let x = area.right() - 1;
-    let style = Style::default().fg(Color::DarkGray);
+    let thumb = Style::default().fg(Color::DarkGray);
     let buf = f.buffer_mut();
-    for cell in first..=last {
+    for (cell, mark) in marks.iter().enumerate() {
+        // A cell can have to say two things at once, and layering them is the
+        // only answer that keeps both. Painting the mark *over* the thumb loses
+        // the position outright whenever they meet — and on a large file they
+        // meet constantly, because the thumb is one cell and you are standing
+        // on the mark you have just made. Painting the thumb over the mark
+        // loses the mark, which is worse: a one-cell thumb covers `total / h`
+        // rows, 400-odd on the corpus file, of which the pane shows twenty.
+        //
+        // So the glyph says what is there and the background says whether it is
+        // on screen, the same layering `line_marks` does one pane over, in the
+        // same grey the selection uses for "this is the part you mean".
+        let in_thumb = (first..=last).contains(&cell);
+        let (symbol, style) = match *mark {
+            // Matched on rather than defaulted to, so a third kind of mark
+            // arrives as a dot to be explained rather than as nothing at all.
+            Some("question") => ("?", Style::default().fg(Color::Cyan)),
+            Some(_) => ("●", Style::default().fg(Color::Magenta)),
+            None if in_thumb => ("█", thumb),
+            None => continue,
+        };
+        let style = if in_thumb && mark.is_some() {
+            style.bg(Color::Indexed(238))
+        } else {
+            style
+        };
         let Ok(dy) = u16::try_from(cell) else {
             continue;
         };
-        buf[(x, area.y + 1 + dy)].set_symbol("█").set_style(style);
+        buf[(x, area.y + 1 + dy)]
+            .set_symbol(symbol)
+            .set_style(style.add_modifier(Modifier::BOLD));
     }
+}
+
+/// What each track cell has a mark for, if anything.
+///
+/// The same set `[`/`]` walks, in the same glyphs and colours the gutter uses
+/// for it — a magenta `●` where you have annotated, a cyan `?` where the
+/// document asks something you have not answered. The gutter says that about
+/// the twenty lines on screen; the track says it about the whole file, which
+/// turns the fringe from a worklist you discover by pressing `]` into one whose
+/// shape you can see before you start.
+///
+/// A cell is many rows, so marks collide. **The open question wins**: the dot
+/// is work already done and the `?` is work outstanding, and a track that hides
+/// the outstanding one behind the finished one is a worklist that looks shorter
+/// than it is.
+fn track_marks(app: &mut App, total: usize, h: usize) -> Vec<Option<&'static str>> {
+    let mut out = vec![None; h];
+    for (pos, kind) in app.mark_positions() {
+        let cell = track_cell(
+            app.row_of(Anchor {
+                line: pos.line,
+                row: 0,
+            }),
+            total,
+            h,
+        );
+        if kind == "question" || out[cell].is_none() {
+            out[cell] = Some(kind);
+        }
+    }
+    out
 }
 
 /// The selection readout goes first: it is the only field that changes on every
@@ -1796,6 +1855,144 @@ mod tests {
                 "thumb reached the body column on row {y}"
             );
         }
+    }
+
+    /// Track cells carrying a mark, as `(offset, symbol)`.
+    fn track_marks_on(buf: &ratatui::buffer::Buffer) -> Vec<(u16, String)> {
+        let x = buf.area.width - 1;
+        (1..buf.area.height)
+            .map(|y| (y - 1, buf[(x, y)].symbol().to_string()))
+            .filter(|(_, s)| s == "●" || s == "?")
+            .collect()
+    }
+
+    /// The track is a map of the fringe: an annotation off screen is a dot on
+    /// it, at the cell its line falls in. Without this the only way to find out
+    /// there is work five hundred lines down is to press `]` and be taken
+    /// there.
+    /// `n` one-line paragraphs, so every line is a navigation unit of its own —
+    /// `tall_doc` has no blank lines and comrak reads the whole of it as a
+    /// single paragraph, which puts every annotation on line 1.
+    fn para_doc(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i}\n\n")).collect()
+    }
+
+    #[test]
+    fn the_track_shows_marks_that_are_nowhere_near_the_screen() {
+        let mut app = App::open("b.md".into(), &para_doc(250), Format::Markdown);
+        assert_eq!(app.line_count(), 500);
+        assert!(
+            track_marks_on(&render_buf(&mut app, 40, 24)).is_empty(),
+            "nothing annotated yet"
+        );
+
+        app.cursor = Pos::new(399, 1);
+        app.begin_comment();
+        app.editor.set("down here");
+        app.commit_comment();
+        assert_eq!(app.annotations[0].start_line, 399);
+        app.goto_first();
+
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        let (cell, symbol) = &marks[0];
+        assert_eq!(symbol, "●");
+        // Line 399 of 500, none of which wrap at this width.
+        let track_h = usize::from(track_height(buf.area));
+        assert_eq!(usize::from(*cell), track_cell(398, 500, track_h));
+        // …and it is nowhere near the screen: the pane shows the first lines.
+        assert!(!thumb(&buf).contains(cell), "the thumb is not there yet");
+    }
+
+    /// Same glyphs as the gutter, and the same drain: a `?` becomes a `●` when
+    /// the question is answered, on the track as well as beside the line.
+    #[test]
+    fn an_answered_question_changes_glyph_on_the_track_too() {
+        let src = format!("{}Is the parser fine?\n", "filler\n\n".repeat(200));
+        let mut app = App::open("q.md".into(), &src, Format::Markdown);
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert_eq!(marks[0].1, "?");
+        assert_eq!(
+            buf[(buf.area.width - 1, marks[0].0 + 1)].style().fg,
+            Some(Color::Cyan)
+        );
+
+        app.goto_last();
+        app.begin_comment();
+        app.editor.set("it is");
+        app.commit_comment();
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        assert_eq!(marks[0].1, "●", "answered — now an annotation");
+    }
+
+    /// Found by driving a 100x30 pane over the 5,959-line corpus file: answer a
+    /// question and the thumb disappears. It is a one-cell thumb on a document
+    /// that size, and the cell it is on is the cell of the mark you have just
+    /// made — so the mark, painted over it, was the whole of the bar. Position
+    /// and content are layered into the one cell instead: the glyph says what
+    /// is there, the background says it is on screen.
+    ///
+    /// The suite could not have caught this. Every other track test looks at
+    /// symbols, and this failure leaves the symbol exactly where it should be.
+    #[test]
+    fn a_mark_the_pane_is_looking_at_keeps_both_the_mark_and_the_thumb() {
+        let mut app = App::open("b.md".into(), &para_doc(250), Format::Markdown);
+        app.cursor = Pos::new(3, 1);
+        app.begin_comment();
+        app.editor.set("right here");
+        app.commit_comment();
+
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        let (cell, symbol) = &marks[0];
+        assert_eq!(symbol, "●", "the mark itself must survive");
+        assert!(
+            thumb(&buf).is_empty() || !thumb(&buf).contains(cell),
+            "the thumb cell should be carrying the mark glyph, not a block"
+        );
+        let style = buf[(buf.area.width - 1, cell + 1)].style();
+        assert_eq!(
+            style.bg,
+            Some(Color::Indexed(238)),
+            "no thumb background: the bar has nothing left to say where you are"
+        );
+        assert_eq!(style.fg, Some(Color::Magenta), "and it is still a mark");
+    }
+
+    /// A cell is hundreds of rows on a large file, so two marks land on one
+    /// cell routinely. The outstanding one has to be the one you see, or the
+    /// worklist reads as shorter than it is.
+    #[test]
+    fn an_open_question_outranks_an_annotation_in_a_shared_cell() {
+        // Two paragraphs two lines apart, certain to share a cell on a
+        // 500-line document: one asks, the other is annotated. Separate
+        // paragraphs so the annotation does not cover the question's line and
+        // answer it — `open_question_on` would then drop the question before
+        // the track ever sees it, and this would pass without testing anything.
+        let src = format!(
+            "{}Is the parser fine?\n\nfiller\n{}",
+            "filler\n\n".repeat(100),
+            "\nfiller\n".repeat(900)
+        );
+        let mut app = App::open("q.md".into(), &src, Format::Markdown);
+        app.cursor = Pos::new(203, 1);
+        app.begin_comment();
+        app.editor.set("about this one");
+        app.commit_comment();
+
+        let kinds: Vec<&str> = app.mark_positions().iter().map(|&(_, k)| k).collect();
+        assert_eq!(kinds, ["question", "annotation"], "both marks must exist");
+
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "the two marks share a cell: {marks:?}");
+        assert_eq!(marks[0].1, "?", "the answered dot hid the open question");
     }
 
     /// The bar is bounded by the track, and the track by the pane. Every width
