@@ -1,5 +1,17 @@
 # marginal
 
+> [!WARNING]
+> ## 🚨 SLOP WARNING 🚨
+>
+> **This is a vibe-coded, LLM-generated toy.** Nearly every line of code,
+> commit message, and paragraph of documentation here — including this
+> sentence — came out of an agent. It has not been reviewed line by line by a
+> human, it has not been audited, and it is not production software.
+>
+> Do not depend on it. Do not run it on anything you would miss. Read the
+> source before you trust a single claim in this README, because the README was
+> written by the same process that wrote the bugs.
+
 Annotate a document in a terminal at whatever granularity you actually mean —
 an inline code span, a table row, a range of list items, a whole section — and
 emit the result as prose an agent can act on. Markdown gets all of that; any
