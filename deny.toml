@@ -22,12 +22,6 @@ allow = [
   "Zlib",
 ]
 
-# `marginal` carries no license field and is `publish = false`, so it reads as
-# "Unlicensed" and would otherwise fail the check against our own crate.
-# Drop this once the crate picks a license.
-[licenses.private]
-ignore = true
-
 [bans]
 # comrak and ratatui pull overlapping transitive trees; duplicates are worth
 # knowing about but not worth blocking a build over.

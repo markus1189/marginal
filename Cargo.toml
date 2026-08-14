@@ -3,6 +3,9 @@ name = "marginal"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Declared so cargo-deny sees a license for our own crate rather than
+# "Unlicensed"; see deny.toml. Text in ./LICENSE.
+license = "MIT"
 
 [dependencies]
 comrak = { version = "0.54", default-features = false }
