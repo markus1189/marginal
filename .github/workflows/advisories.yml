@@ -1,0 +1,23 @@
+name: "Advisories"
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    # The one check that cannot be a flake check: it fetches the RustSec
+    # database and the build sandbox has no network. See the comment on the
+    # `deny` check in flake.nix for why pinning the database is not an option.
+    #
+    # This is the only job here that can fail without anything in the tree
+    # changing, which is the entire point of running it on a schedule:
+    # deny.toml carries `ignore = []`, so a new advisory against a pinned
+    # dependency turns it red the day it lands.
+    - run: nix develop --command cargo deny check advisories

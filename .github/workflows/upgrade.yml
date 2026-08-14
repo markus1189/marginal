@@ -1,0 +1,41 @@
+name: "Flake Update"
+on:
+  schedule:
+    - cron: '30 3 * * 0'
+  workflow_dispatch:
+
+# The repository default for GITHUB_TOKEN is read-only; pushing the updated
+# lock file back needs this explicitly.
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - name: configure git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "<>"
+    # Gated on the full suite rather than `nix build`. nixpkgs is the only
+    # input, so what this bump actually moves is rustc and clippy — and clippy
+    # runs with `-D warnings` against pedantic + nursery. `nix build` does not
+    # run clippy at all, so it would happily push a lock file that reddens the
+    # next pull request. If the check fails the commit step never runs and the
+    # old lock file stays; a broken bump is never pushed.
+    #
+    # Note this does not touch Cargo.lock. Rust dependencies stay pinned.
+    - name: update and verify
+      run: |
+        nix flake update
+        nix flake check --print-build-logs
+    - name: commit and push
+      run: |
+        git add flake.lock
+        git commit -m "Flake Update" && git push origin || echo "nothing to do"

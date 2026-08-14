@@ -1,0 +1,24 @@
+name: "Checks"
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    # The whole suite, defined in flake.nix: fmt, clippy, the test suite (via
+    # the package's check phase), typos, machete, taplo, deny and the .pi
+    # extension tests. Deliberately not `nix build` — that runs the tests and
+    # nothing else, which is one check out of eight.
+    #
+    # Each check is a separate derivation over its own fileset, so nix runs
+    # them in parallel and skips the ones no file in the push could affect.
+    - run: nix flake check --print-build-logs
