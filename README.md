@@ -146,18 +146,18 @@ tty anywhere in reach, so one has to be borrowed from tmux. The document model �
 which messages go in, how they are headed, what `--label` they carry — is the
 same in both, deliberately.
 
-### pi — `/annotate`
+### pi — `/marginal`
 
-`.pi/extensions/marginal-annotate.ts` registers `/annotate` in
+`.pi/extensions/marginal-annotate.ts` registers `/marginal` in
 [pi](https://github.com/badlogic/pi-mono). It takes the agent's last message,
 writes it to a temp `.md`, suspends pi's TUI, runs marginal over it, and sends
 `feedbackMarkdown` back as the next prompt. Exit `0` sends nothing.
 
 | Command | Document handed to marginal |
 |---|---|
-| `/annotate` | the last assistant message, bare |
-| `/annotate 3` | the last 3 assistant messages, plus the prompts between them |
-| `/annotate all` | the whole branch |
+| `/marginal` | the last assistant message, bare |
+| `/marginal 3` | the last 3 assistant messages, plus the prompts between them |
+| `/marginal all` | the whole branch |
 
 One message goes in bare, so its line numbers are its own. Anything wider is
 assembled with a `## you [n]` / `## agent [n]` heading per message — otherwise a

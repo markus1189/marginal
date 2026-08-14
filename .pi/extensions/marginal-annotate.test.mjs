@@ -49,7 +49,7 @@ test("parseSpec accepts nothing, a count, and all", () => {
 });
 
 test("parseSpec rejects what it cannot honour", () => {
-	// Rejected rather than clamped: "/annotate 0" is a typo, and silently
+	// Rejected rather than clamped: "/marginal 0" is a typo, and silently
 	// showing one message would look like the flag was ignored.
 	assert.equal(parseSpec("0"), undefined);
 	assert.equal(parseSpec("last two"), undefined);

@@ -1,14 +1,14 @@
 /**
  * marginal-annotate — review the agent's messages with marginal.
  *
- * `/annotate` writes the last assistant message to a temp .md file, suspends
+ * `/marginal` writes the last assistant message to a temp .md file, suspends
  * pi's TUI, and hands the terminal to marginal. Quitting with annotations
  * (exit 1) sends the feedback markdown back as the next user prompt; quitting
  * clean (exit 0) does nothing.
  *
- *   /annotate        the last assistant message, on its own
- *   /annotate 3      the last 3 assistant messages plus the prompts between
- *   /annotate all    the whole branch
+ *   /marginal        the last assistant message, on its own
+ *   /marginal 3      the last 3 assistant messages plus the prompts between
+ *   /marginal all    the whole branch
  *
  * Binary resolution, in order:
  *   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  `marginal` on PATH
@@ -63,7 +63,7 @@ function resolveBinary(): string | undefined {
 	return found ? found : undefined;
 }
 
-/** What `/annotate <args>` asked for. `undefined` means the args were nonsense. */
+/** What `/marginal <args>` asked for. `undefined` means the args were nonsense. */
 export function parseSpec(args: string): { count: number | "all" } | undefined {
 	const arg = args.trim().toLowerCase();
 	if (arg === "") return { count: 1 };
@@ -147,16 +147,16 @@ export function buildDocument(turns: Turn[], count: number | "all"): { text: str
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("annotate", {
-		description: "Annotate the agent's message(s) in marginal: /annotate [N|all]",
+	pi.registerCommand("marginal", {
+		description: "Annotate the agent's message(s) in marginal: /marginal [N|all]",
 		handler: async (args, ctx) => {
 			const spec = parseSpec(args);
 			if (!spec) {
-				ctx.ui.notify("Usage: /annotate [N|all] — N is how many assistant messages to include.", "warning");
+				ctx.ui.notify("Usage: /marginal [N|all] — N is how many assistant messages to include.", "warning");
 				return;
 			}
 			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/annotate needs the TUI — marginal refuses to start without a tty.", "error");
+				ctx.ui.notify("/marginal needs the TUI — marginal refuses to start without a tty.", "error");
 				return;
 			}
 			if (!ctx.isIdle()) {
