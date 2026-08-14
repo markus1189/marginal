@@ -3,8 +3,10 @@
 ## Working on main
 
 **Commit to `main` unless told otherwise.** This is a POC with a linear
-history and no remote; a branch per change is friction, not safety. Do not
-create one uninvited, and do not ask each time.
+history and a single author; a branch per change is friction, not safety. Do
+not create one uninvited, and do not ask each time. There *is* a remote
+(`origin`, `github.com:markus1189/marginal`) and CI runs on it, so a commit
+that fails `./check` is now visible to more than just you.
 
 What is still expected of every commit:
 
@@ -20,9 +22,14 @@ What is still expected of every commit:
 ## Build & check
 
 ```sh
-nix develop --command ./check    # everything CI would run, cheapest-first
+./check                          # everything CI runs; no dev shell needed
+nix flake check                  # the same suite, without the ✓/✗ wrapper
 cargo test                       # enough for a tight loop; no test needs a tty
 ```
+
+The checks are `checks` in `flake.nix`, one derivation each. `./check` adds
+only `cargo deny check advisories`, which needs a network and so cannot live
+in the sandbox.
 
 ## Invariants that break silently
 

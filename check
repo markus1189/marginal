@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Everything CI would run, in the order that fails cheapest-first.
-# Requires the dev shell: `nix develop --command ./check`
+# The suite itself lives in flake.nix, under `checks`. CI runs `nix flake check`
+# directly; this script is the local ergonomics on top of it — cheapest first,
+# a ✓/✗ per step — plus the one check that cannot run in a build sandbox.
+#
+# Runs standalone: it calls nix itself and no longer needs `nix develop`.
 set -uo pipefail
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -17,22 +20,16 @@ run() {
   fi
 }
 
-run "fmt"      cargo fmt --check
-run "taplo"    taplo fmt --check Cargo.toml
-run "clippy"   cargo clippy --all-targets -- -D warnings
-run "test"     cargo test
-run "typos"    typos
-run "machete"  cargo machete
-run "deny"     cargo deny check
+# fmt, clippy, test, typos, machete, taplo, deny (bans/licenses/sources) and the
+# .pi extension tests. Each is its own derivation, so nix caches and parallelises
+# them: a docs-only edit is a no-op, a src edit does not re-run taplo.
+run "flake check" nix flake check --print-build-logs
 
-# The pi extension's document builder. Node is deliberately not in the dev
-# shell — it is a launcher for one host, not a build dependency of the binary —
-# so this is skipped when node is absent rather than failing the run.
-if command -v node >/dev/null 2>&1; then
-  run "extension" node --test .pi/extensions/marginal-annotate.test.mjs
-else
-  printf '\n\033[33m– extension tests skipped (no node)\033[0m\n'
-fi
+# Not in the flake: this fetches the RustSec advisory database, and the sandbox
+# has no network. Pinning the database is not an option either — cargo-deny
+# locates it through a hashed db-path directory that is an internal detail.
+# So advisories are checked here and in the scheduled CI job, not per-build.
+run "advisories" nix develop --command cargo deny check advisories
 
 if [[ $fail -eq 0 ]]; then
   printf '\n\033[32m\033[1mall checks passed\033[0m\n'

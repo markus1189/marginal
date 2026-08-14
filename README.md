@@ -184,7 +184,8 @@ tests, since it is the part that can be wrong quietly:
 node --test .pi/extensions/marginal-annotate.test.mjs
 ```
 
-`./check` runs them too when `node` is on `PATH`, and skips them when it is not.
+`./check` runs them too, as a flake check with its own `nodejs` — they used to
+be skipped whenever `node` was absent from `PATH`, which locally was always.
 
 ### Claude Code — `/marginal-last`
 
@@ -579,12 +580,22 @@ scope — see `STATUS.md` for the options if it ever matters.
 
 ```sh
 cargo test
-nix develop --command ./check    # everything CI would run
+./check                          # everything CI runs; no dev shell needed
 ```
 
-`./check` runs, cheapest-first: `cargo fmt --check`, `taplo` on the TOML,
-`cargo clippy -D warnings`, the test suite, `typos`, `cargo machete` (unused
-deps) and `cargo deny check` (advisories, licenses, source provenance).
+The suite is the `checks` output of `flake.nix`, so `nix flake check` is the
+whole thing and CI is one line. Each check is its own derivation over the
+smallest set of files that can affect it — nix caches and parallelises them, so
+a docs-only edit re-runs `typos` and nothing else.
+
+It covers: `cargo fmt --check`, `taplo` on the TOML, `cargo clippy -D
+warnings`, the test suite (via the package's check phase), `typos`, `cargo
+machete` (unused deps), `cargo deny check` for licenses/bans/provenance, and
+the `.pi` extension's node tests.
+
+`./check` wraps that with cheapest-first ✓/✗ output and adds the one check that
+cannot run in a build sandbox: `cargo deny check advisories`, which fetches the
+RustSec database over the network. CI runs it as a separate scheduled job.
 
 Clippy runs with `pedantic` and `nursery` enabled. The exceptions live in
 `[lints.clippy]` in `Cargo.toml`, each with a comment saying why — that list is
