@@ -519,6 +519,11 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // already spells "next/previous change hunk" with brackets.
             KeyCode::Char(']') => app.goto_mark(1),
             KeyCode::Char('[') => app.goto_mark(-1),
+            // The escape hatch for a document that is one long numbered list,
+            // where the steps outnumber everything else in the ring. `#` because
+            // it is what a numbered item is made of, and because every letter
+            // near the mark keys is spoken for.
+            KeyCode::Char('#') => app.toggle_steps(),
             KeyCode::Esc => app.sel = Sel::Here,
             _ => {}
         },

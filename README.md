@@ -383,24 +383,29 @@ assumes one.
 | `Enter` (also `c`) | comment on the selection |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
+| `#` | steps of numbered lists in or out of the mark ring (in by default) |
 | `Esc` | drop the selection |
 | `q`, `C-c` | quit |
 
-A **mark** is an annotation you have written, or a question the document asks
-that you have not answered yet. The gutter cell between the line number and the
-selection bar shows which:
+A **mark** is an annotation you have written, a question the document asks that
+you have not answered yet, or a step of a numbered list you have not commented
+on. The gutter cell between the line number and the selection bar shows which:
 
 | cell | meaning |
 |---|---|
 | `?` cyan | an unanswered question |
-| `●` magenta | an annotation — including one you just wrote on a question |
+| `▸` green | a step of a numbered list, not yet commented on |
+| `●` magenta | an annotation — including one you just wrote on a question or a step |
 
-Commenting on a question turns its `?` into `●` and drops it from the ring, so
-the fringe is a worklist that drains as you work down the message. The status
-field reports where you are in the ring — `question 2/5` — which is also how you
-notice the detector has found more than you expected.
+Commenting turns a `?` or a `▸` into `●` and drops it from the ring, so the
+fringe is a worklist that drains as you work down the message. The status field
+reports where you are in the ring — `question 2/5`, `step 4/7` — which is also
+how you notice a detector has found more than you expected. The three states are
+exclusive, so one cell is enough: a line that carries an annotation has no open
+question and no open step left on it, and a step that asks something is in the
+ring as the question.
 
-The **right border of the source pane carries the same two glyphs for the whole
+The **right border of the source pane carries the same three glyphs for the whole
 file**, so a mark four hundred lines down is visible without pressing `]` to
 find it. See below.
 
@@ -410,9 +415,29 @@ So `Is it (really?) so?` is two, and `docs.rs/?q=1`, `ls *.rs?` and a `?:` in a
 fenced block are none. Note that this is the inverse of `?\b`, which matches a
 `?` followed by a word character — precisely the cases worth excluding.
 
-Questions are derived from the source, not authored by you: they never appear in
-`--result` JSON, and a document full of them with no comments is still an
-`approved` decision.
+A **step** is an item of an ordered list — `1.` or `1)` — where the list is not
+nested inside another list and has at least two items. That is the shape of an
+agent's reply that offers you seven things to do, and walking those seven is what
+`]` is for; `J`/`K` reaches them too, but reaches every paragraph and heading on
+the way. Bullets are not steps, the sub-steps of step 3 are not steps, and a lone
+`1.` is a sentence that starts with a digit far more often than it is an
+enumeration.
+
+Steps come from the parse tree, never from a line scan, which is what keeps the
+false ones out: `Released in` / `2019. It was a year.` is one paragraph, because
+a list may only interrupt a paragraph when it starts at 1, and a fenced block
+full of `1.` lines is a code block. Prose that merely mentions an ordinal
+mid-line is never a step either.
+
+`#` takes steps out of the ring and puts them back, reporting what the ring
+became — `ring: marks only (3)`. It exists for the document that *is* one long
+numbered list, where the ring would be indistinguishable from `j`: of the 3,501
+markdown files this was measured against, 675 hold an ordinal-marker line, median
+5 and p90 15 — but the worst holds 210.
+
+Questions and steps are derived from the source, not authored by you: they never
+appear in `--result` JSON, and a document full of them with no comments is still
+an `approved` decision.
 
 Raw mode delivers `C-c` as a keystroke and no `SIGINT` is ever raised, so it is
 bound explicitly. Without that binding there is no way out but `q`.
@@ -426,12 +451,15 @@ rows on screen; the rest of the track is the rest of the document. It is drawn
 only when there is something to scroll.
 
 The track is also a **map of the fringe**: a magenta `●` where you have
-annotated and a cyan `?` where the document asks something you have not, at the
-cell that part of the file falls in — the same glyphs as the gutter, the same
-set of marks `]` and `[` walk. A cell is many rows on a large file, so marks
-collide; the open question wins, because the dot is work finished and the `?` is
-work outstanding. Where a mark is on screen it keeps its glyph and takes the
-thumb's grey background, so the cell says both things at once.
+annotated, a cyan `?` where the document asks something you have not, a green `▸`
+at a step you have not commented on, at the cell that part of the file falls in —
+the same glyphs as the gutter, the same set of marks `]` and `[` walk. A cell is
+many rows on a large file, so marks collide, and outstanding work wins: question
+over step over dot, because the dot is work finished. Note that this ranking is
+the reverse of the gutter's, which is not a disagreement — the gutter decodes one
+line's single state, the track picks between several lines' marks that landed in
+one cell. Where a mark is on screen it keeps its glyph and takes the thumb's grey
+background, so the cell says both things at once.
 
 The **bottom border** says exactly: `rows 3289-3309/8847`. Rows and not lines,
 because with pretty mode on they are different numbers — the top border's `5959
@@ -447,7 +475,7 @@ The view soft-wraps: a line longer than the pane continues on the rows below it.
 The view still does not scroll sideways, and never will — every implementation
 surveyed makes the two mutually exclusive.
 
-- **One line, one number.** The line number and the annotation dot sit on a
+- **One line, one number.** The line number and the mark glyph sit on a
   line's first row only; a repeated number would read as a repeated line. The
   selection bar marks every row, because the line is still selected halfway
   down it.

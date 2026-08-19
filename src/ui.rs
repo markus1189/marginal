@@ -299,6 +299,9 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         let selected_here = app.line_selected(lineno);
         let n = app.annotations_on(lineno);
         let open_question = app.open_question_on(lineno);
+        let open_step = app.open_step_on(lineno);
+        let (glyph, glyph_colour) =
+            gutter_kind(n > 0, open_question, open_step).map_or((" ", Color::Cyan), mark_glyph);
         let (rows, indent) = app.line_rows(lineno);
         let marks = line_marks(app, lineno, &text, &rows, sel_style, cur_style);
         let pad = " ".repeat(indent);
@@ -328,22 +331,21 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 // The dot used to trail the text, which made it the first thing
                 // truncated — an annotation you could not see you had made.
                 //
-                // One cell, two states: a question you have not answered shows
-                // `?` until you comment on it, at which point it becomes the
-                // dot. The fringe is a worklist that drains. A third glyph
-                // would need a third gutter column, taken off the body width of
-                // every line — and both of these are single-width, which the
-                // fixed two-cell layout depends on. Head row only, for the same
-                // reason the number is: repeated down a wrapped line it would
-                // read as several questions.
+                // One cell, three states — not three columns. They are mutually
+                // exclusive by construction: `open_question_on` and
+                // `open_step_on` both go false the moment the line carries an
+                // annotation, and a step defers to a question on its own line.
+                // So this cell decodes a state, it does not resolve a collision
+                // — the track is where marks collide, and there the ranking runs
+                // the other way. The fringe is a worklist that drains: `▸` and
+                // `?` both become `●`. All three glyphs are single-width, which
+                // the fixed two-cell layout depends on. Head row only, for the
+                // same reason the number is: repeated down a wrapped line it
+                // would read as several questions.
                 Span::styled(
-                    match (head, n > 0, open_question) {
-                        (true, true, _) => "●",
-                        (true, false, true) => "?",
-                        _ => " ",
-                    },
+                    if head { glyph } else { " " },
                     Style::default()
-                        .fg(if n > 0 { Color::Magenta } else { Color::Cyan })
+                        .fg(glyph_colour)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -578,10 +580,10 @@ fn draw_scrollbar(f: &mut Frame, area: Rect, app: &mut App, scroll: Anchor) {
         // same grey the selection uses for "this is the part you mean".
         let in_thumb = (first..=last).contains(&cell);
         let (symbol, style) = match *mark {
-            // Matched on rather than defaulted to, so a third kind of mark
-            // arrives as a dot to be explained rather than as nothing at all.
-            Some("question") => ("?", Style::default().fg(Color::Cyan)),
-            Some(_) => ("●", Style::default().fg(Color::Magenta)),
+            Some(kind) => {
+                let (symbol, colour) = mark_glyph(kind);
+                (symbol, Style::default().fg(colour))
+            }
             None if in_thumb => ("█", thumb),
             None => continue,
         };
@@ -602,16 +604,60 @@ fn draw_scrollbar(f: &mut Frame, area: Rect, app: &mut App, scroll: Anchor) {
 /// What each track cell has a mark for, if anything.
 ///
 /// The same set `[`/`]` walks, in the same glyphs and colours the gutter uses
-/// for it — a magenta `●` where you have annotated, a cyan `?` where the
-/// document asks something you have not answered. The gutter says that about
-/// the twenty lines on screen; the track says it about the whole file, which
-/// turns the fringe from a worklist you discover by pressing `]` into one whose
-/// shape you can see before you start.
+/// for it — and literally the same table, [`mark_glyph`], because a track that
+/// paints its own idea of a mark sends you looking for a stop the gutter never
+/// shows. A magenta `●` where you have annotated, a cyan `?` where the document
+/// asks something you have not answered, a green `▸` at a step of a numbered
+/// plan you have not commented on. The gutter says that about the twenty lines
+/// on screen; the track says it about the whole file, which turns the fringe
+/// from a worklist you discover by pressing `]` into one whose shape you can see
+/// before you start.
 ///
-/// A cell is many rows, so marks collide. **The open question wins**: the dot
-/// is work already done and the `?` is work outstanding, and a track that hides
-/// the outstanding one behind the finished one is a worklist that looks shorter
-/// than it is.
+/// A cell is many rows, so marks collide, and here **outstanding work wins**:
+/// question over step over annotation. The dot is work already done and the
+/// other two are work outstanding, and a track that hides the outstanding ones
+/// behind the finished one is a worklist that looks shorter than it is. Note
+/// that this is the reverse of the gutter’s ordering, which is not a
+/// disagreement: the gutter decodes one line’s single state, this picks
+/// between several lines’ marks that landed in one cell.
+/// Glyph and colour for a mark kind — the one table the gutter and the track
+/// both read.
+///
+/// Defaulted rather than matched exhaustively on purpose: a fourth kind of mark
+/// arrives on screen as a dot to be explained, never as a blank cell that reads
+/// as a broken ring.
+fn mark_glyph(kind: &str) -> (&'static str, Color) {
+    match kind {
+        "question" => ("?", Color::Cyan),
+        "step" => ("▸", Color::Green),
+        _ => ("●", Color::Magenta),
+    }
+}
+
+/// Which of a line’s three mutually exclusive mark states holds, if any.
+const fn gutter_kind(annotated: bool, question: bool, step: bool) -> Option<&'static str> {
+    if annotated {
+        Some("annotation")
+    } else if question {
+        Some("question")
+    } else if step {
+        Some("step")
+    } else {
+        None
+    }
+}
+
+/// How loudly a mark kind argues for a track cell it has to share. Outstanding
+/// work outranks finished work; between the two outstanding kinds, the question
+/// is one the document asked and the step is one it merely offered.
+fn rank(kind: &str) -> u8 {
+    match kind {
+        "question" => 3,
+        "step" => 2,
+        _ => 1,
+    }
+}
+
 fn track_marks(app: &mut App, total: usize, h: usize) -> Vec<Option<&'static str>> {
     let mut out = vec![None; h];
     for (pos, kind) in app.mark_positions() {
@@ -623,7 +669,7 @@ fn track_marks(app: &mut App, total: usize, h: usize) -> Vec<Option<&'static str
             total,
             h,
         );
-        if kind == "question" || out[cell].is_none() {
+        if out[cell].is_none_or(|held| rank(kind) > rank(held)) {
             out[cell] = Some(kind);
         }
     }
@@ -1808,6 +1854,67 @@ mod tests {
         assert_eq!(col(&a), col(&b), "body text starts in the same column");
     }
 
+    // ---- the step glyph in the gutter --------------------------------------
+
+    const SDOC: &str = "Plan:\n\n1. first\n2. second\n";
+
+    /// The same worklist, one glyph further out: a step of a numbered plan shows
+    /// `▸` until you comment on it, and the steps you have not reached keep
+    /// theirs. This is the fringe on a reply that asks nothing at all, where
+    /// before there was nothing in the gutter to drain.
+    #[test]
+    fn a_step_shows_in_the_gutter_and_becomes_a_dot_when_commented_on() {
+        let mut app = App::open("REPLY.md".into(), SDOC, Format::Markdown);
+        let buf = render_buf(&mut app, 80, 20);
+        assert_eq!(gutter_mark(&buf, 3), "▸", "line 3 opens step 1");
+        assert_eq!(gutter_mark(&buf, 4), "▸", "line 4 opens step 2");
+        assert_eq!(gutter_mark(&buf, 1), " ", "the prose above opens nothing");
+        assert_eq!(
+            buf[(1 + u16::try_from(LINENO_MIN).unwrap(), 3)].style().fg,
+            Some(Color::Green)
+        );
+
+        app.cursor = crate::blocks::Pos::new(3, 1);
+        app.begin_comment();
+        app.editor.set("start here");
+        app.commit_comment();
+
+        let buf = render_buf(&mut app, 80, 20);
+        assert_eq!(gutter_mark(&buf, 3), "●", "commented — now an annotation");
+        assert_eq!(gutter_mark(&buf, 4), "▸", "step 2 is still outstanding");
+    }
+
+    /// The toggle is not only a ring key: the gutter reads the same predicate, so
+    /// switching steps off quiets the fringe as well as the jumps. A gutter still
+    /// full of `▸` after the press would advertise stops `]` no longer has.
+    #[test]
+    fn switching_steps_off_quiets_the_gutter_too() {
+        let mut app = App::open("REPLY.md".into(), SDOC, Format::Markdown);
+        app.toggle_steps();
+        let buf = render_buf(&mut app, 80, 20);
+        assert_eq!(gutter_mark(&buf, 3), " ");
+        assert_eq!(gutter_mark(&buf, 4), " ");
+    }
+
+    /// All three glyphs have to be single-width, or the fixed two-cell gutter
+    /// stops lining up with the body column beside it. A lone `1.` is no
+    /// enumeration, so the left-hand document has the same first line and no
+    /// glyph — which makes this a comparison of the gutter and nothing else.
+    #[test]
+    fn the_step_glyph_does_not_shift_the_body_column() {
+        let mut plain = App::open("R.md".into(), "1. first only\n", Format::Markdown);
+        let mut stepped = App::open("R.md".into(), "1. first\n2. second\n", Format::Markdown);
+        let (a, b) = (
+            render_buf(&mut plain, 80, 8),
+            render_buf(&mut stepped, 80, 8),
+        );
+        let col = |buf: &ratatui::buffer::Buffer| {
+            (0..buf.area.width).position(|x| buf[(x, 1)].symbol() == "f")
+        };
+        assert!(col(&a).is_some(), "the fixture line must be on screen");
+        assert_eq!(col(&a), col(&b), "body text starts in the same column");
+    }
+
     /// The full hint line is ~105 columns; in a 95-column pane it was cut
     /// mid-word, hiding `q quit` from the one reader who needs it most.
     #[test]
@@ -2146,7 +2253,7 @@ mod tests {
         let x = buf.area.width - 1;
         (1..buf.area.height)
             .map(|y| (y - 1, buf[(x, y)].symbol().to_string()))
-            .filter(|(_, s)| s == "●" || s == "?")
+            .filter(|(_, s)| s == "●" || s == "?" || s == "▸")
             .collect()
     }
 
@@ -2277,6 +2384,70 @@ mod tests {
         let marks = track_marks_on(&buf);
         assert_eq!(marks.len(), 1, "the two marks share a cell: {marks:?}");
         assert_eq!(marks[0].1, "?", "the answered dot hid the open question");
+    }
+
+    /// A numbered plan four hundred lines down is on the track before you have
+    /// pressed a key, which is the difference between a worklist you can see the
+    /// shape of and one you discover by pressing `]` until it wraps.
+    #[test]
+    fn the_track_shows_the_steps_of_a_plan_below_the_screen() {
+        let src = format!("{}1. first\n2. second\n", "filler\n\n".repeat(200));
+        let mut app = App::open("r.md".into(), &src, Format::Markdown);
+        assert_eq!(app.steps.len(), 2);
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert!(!marks.is_empty(), "the steps must reach the track");
+        assert!(
+            marks.iter().all(|(_, s)| s == "▸"),
+            "every mark on this document is a step: {marks:?}"
+        );
+        assert_eq!(
+            buf[(buf.area.width - 1, marks[0].0 + 1)].style().fg,
+            Some(Color::Green)
+        );
+    }
+
+    /// Marks collide on a cell hundreds of rows tall, and the ranking there runs
+    /// the other way from the gutter's: what is outstanding has to be visible.
+    /// A question the document asked outranks a step it merely offered.
+    #[test]
+    fn an_open_question_outranks_a_step_in_a_shared_cell() {
+        let src = format!(
+            "{}1. first\n2. second\n\nIs the parser fine?\n{}",
+            "filler\n\n".repeat(100),
+            "\nfiller\n".repeat(900)
+        );
+        let mut app = App::open("r.md".into(), &src, Format::Markdown);
+        let kinds: Vec<&str> = app.mark_positions().iter().map(|&(_, k)| k).collect();
+        assert_eq!(kinds, ["step", "step", "question"], "all three must exist");
+
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "the three marks share a cell: {marks:?}");
+        assert_eq!(marks[0].1, "?", "a step hid the open question");
+    }
+
+    /// …and a step outranks a dot, for the same reason a question does: the dot
+    /// is work finished, and a track that shows the finished half of a cell reads
+    /// as a shorter worklist than it is.
+    #[test]
+    fn a_step_outranks_an_annotation_in_a_shared_cell() {
+        let src = format!(
+            "{}1. first\n2. second\n\nelsewhere\n{}",
+            "filler\n\n".repeat(100),
+            "\nfiller\n".repeat(900)
+        );
+        let mut app = App::open("r.md".into(), &src, Format::Markdown);
+        app.cursor = crate::blocks::Pos::new(204, 1);
+        app.begin_comment();
+        app.editor.set("about this one");
+        app.commit_comment();
+        assert_eq!(app.annotations[0].start_line, 204, "not on a step's line");
+
+        let buf = render_buf(&mut app, 40, 24);
+        let marks = track_marks_on(&buf);
+        assert_eq!(marks.len(), 1, "the marks share a cell: {marks:?}");
+        assert_eq!(marks[0].1, "▸", "the dot hid two outstanding steps");
     }
 
     /// The bar is bounded by the track, and the track by the pane. Every width

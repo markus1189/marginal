@@ -820,9 +820,198 @@ pub fn questions(root: &TreeNode, src: &str) -> Vec<Pos> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Enumerations
+// ---------------------------------------------------------------------------
+
+/// Whether the list marker at `from` within `line` is an ordinal — `1.` or
+/// `1)` — rather than a bullet.
+///
+/// Only ever asked of a column comrak has already called the start of a list
+/// item, which is why this can be a lexical peek and not a second parser: at
+/// that column the source holds a marker, and the only question left is which
+/// kind. The trailing-whitespace check is belt and braces for exactly that
+/// reason, not a rule this has to enforce on its own.
+///
+/// `CommonMark` starts a new list when the marker type changes, so every item of
+/// one list agrees with the first — one probe answers for the whole list.
+fn ordinal_marker(line: &str, from: usize) -> bool {
+    let Some(rest) = line.get(from..) else {
+        return false;
+    };
+    let b = rest.as_bytes();
+    let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0
+        && b.get(digits).is_some_and(|c| matches!(c, b'.' | b')'))
+        && b.get(digits + 1).is_none_or(|c| matches!(c, b' ' | b'\t'))
+}
+
+/// The first line of every item of every top-level ordered list, in document
+/// order — the seven steps of a plan, each a stop worth landing on.
+///
+/// Three filters, and each one is a false positive the ring would otherwise
+/// carry:
+///
+/// - **ordered only.** Bullets are how every document on disk writes every
+///   aside; stopping on them is stopping everywhere.
+/// - **top level only** — no ordered list nested inside another list. The
+///   sub-steps of step 3 are reachable by `J` and are not the decisions the
+///   enumeration is offering.
+/// - **two items or more.** A lone `1.` is a sentence that happens to start
+///   with a digit far more often than it is an enumeration.
+///
+/// Measured over the 3,501 markdown files in `~/Stuff` on 2026-08-19: 675 hold
+/// at least one ordinal-marker line, median 5 and p90 15 — but the worst holds
+/// 210, which is a ring nobody can walk. Hence `App::steps_in_ring`, and hence
+/// these filters rather than "every list item".
+///
+/// Taken from the tree, never from a line scan, and that is the whole point.
+/// Two shapes a `^ *[0-9]+[.)]` scan gets wrong, both checked against comrak
+/// rather than reasoned about:
+///
+/// - `Released in\n2019. It was a year.\n3. Then this.` is **one paragraph**.
+///   A list may only interrupt a paragraph when it starts at 1, so neither line
+///   opens an item and a scan invents two steps inside a sentence.
+/// - a fenced block holding `1. not a step` is a code block, which keeps its
+///   contents out with none of the verbatim-span machinery [`questions`] needs.
+///
+/// Prose ordinals mid-line — the wrapped continuation of step 1 in the file this
+/// was written for ends `step 2.` — are out for free for the same reason.
+///
+/// Emitted at the marker column, which is where the item's navigation unit
+/// starts — so landing on one and pressing `Enter` annotates that step, with no
+/// selection keys in between.
+///
+/// A backend whose tree has no `list` nodes yields nothing here, which is how
+/// the plain backend opts out: it knows paragraphs and blank lines, and a second
+/// lexical idea of what an enumeration is would only disagree with this one.
+pub fn steps(root: &TreeNode, src: &str) -> Vec<Pos> {
+    fn go(n: &TreeNode, lines: &[&str], nested: bool, out: &mut Vec<Pos>) {
+        for c in &n.children {
+            let list = c.kind == "list";
+            if list && !nested {
+                let items: Vec<&TreeNode> = c
+                    .children
+                    .iter()
+                    .filter(|k| k.kind == "list-item")
+                    .collect();
+                let ordered = items.first().is_some_and(|i| {
+                    let l = lines.get(i.span.start.line - 1).copied().unwrap_or("");
+                    ordinal_marker(l, i.span.start.col - 1)
+                });
+                if ordered && items.len() >= 2 {
+                    out.extend(items.iter().map(|i| i.span.start));
+                }
+            }
+            go(c, lines, nested || list, out);
+        }
+    }
+
+    let lines = source_lines(src);
+    let mut out = Vec::new();
+    go(root, &lines, false, &mut out);
+    out.sort_unstable();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- enumerations ------------------------------------------------------
+
+    fn step_lines(src: &str) -> Vec<usize> {
+        steps(&parse_tree(src), src)
+            .into_iter()
+            .map(|p| p.line)
+            .collect()
+    }
+
+    #[test]
+    fn the_items_of_a_top_level_ordered_list_are_steps() {
+        let src = "Plan:\n\n1. first\n2. second\n3. third\n";
+        assert_eq!(step_lines(src), vec![3, 4, 5]);
+    }
+
+    /// Emitted at the marker, which is where the item's navigation unit starts —
+    /// so the cursor the ring leaves you on is inside the unit `Enter` annotates.
+    #[test]
+    fn a_step_is_emitted_at_the_marker_column_of_its_unit() {
+        let src = "1. first\n2. second\n";
+        let found = steps(&parse_tree(src), src);
+        let units: Vec<Span> = parse(src).into_iter().map(|b| b.span).collect();
+        assert_eq!(found, vec![units[0].start, units[1].start]);
+        assert_eq!(found[0], Pos::new(1, 1));
+    }
+
+    #[test]
+    fn both_ordinal_markers_count() {
+        assert_eq!(step_lines("1) first\n2) second\n"), vec![1, 2]);
+        assert_eq!(step_lines("8. eight\n9. nine\n10. ten\n"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn bullets_are_not_steps() {
+        assert!(step_lines("- one\n- two\n").is_empty());
+        assert!(step_lines("* one\n* two\n").is_empty());
+        assert!(step_lines("- [ ] 1. one\n- [ ] 2. two\n").is_empty());
+    }
+
+    /// A sentence that happens to start with a digit is one item long far more
+    /// often than it is an enumeration.
+    #[test]
+    fn a_lone_ordinal_item_is_not_an_enumeration() {
+        assert!(step_lines("1. the only one\n").is_empty());
+    }
+
+    /// The sub-steps of step 2 are reachable by `J`; they are not the decisions
+    /// the enumeration is offering, and in the ring they double its length.
+    #[test]
+    fn a_nested_ordered_list_adds_no_stops() {
+        let src = "1. one\n2. two\n   1. nested a\n   2. nested b\n3. three\n";
+        assert_eq!(step_lines(src), vec![1, 2, 5], "only the outer three");
+    }
+
+    /// Top level means no *list* above it. A quoted plan is still a plan.
+    #[test]
+    fn an_ordered_list_inside_a_blockquote_is_top_level() {
+        assert_eq!(step_lines("> 1. quoted one\n> 2. quoted two\n"), vec![1, 2]);
+    }
+
+    /// The first of the two shapes a source scan gets wrong: a list can only
+    /// interrupt a paragraph when it starts at 1, so all three of these lines are
+    /// one paragraph and none of them opens a step. Verified against comrak's own
+    /// unit table — `--dump-blocks` on this source prints `paragraph L1-3`.
+    #[test]
+    fn ordinals_that_do_not_open_a_list_item_are_not_steps() {
+        let src = "Released in\n2019. It was a year.\n3. Then this.\n";
+        assert_eq!(parse(src).len(), 1, "one paragraph, not three items");
+        assert!(step_lines(src).is_empty());
+    }
+
+    /// The second: a fenced block full of ordinals. No verbatim-span pass here,
+    /// unlike `questions` — a code block simply has no `list` node inside it.
+    #[test]
+    fn a_fenced_block_full_of_ordinals_holds_no_steps() {
+        let src = "Steps:\n\n```sh\n1. not a step\n2. also not\n```\n";
+        assert!(step_lines(src).is_empty());
+    }
+
+    /// Two enumerations in one document are two lists, and every item of both is
+    /// a stop — the ring is the document's, not the first list's.
+    #[test]
+    fn a_second_enumeration_lower_down_is_walked_too() {
+        let src = "1. a\n2. b\n\nProse between.\n\n1. c\n2. d\n";
+        assert_eq!(step_lines(src), vec![1, 2, 6, 7]);
+    }
+
+    /// The plain backend has no lists at all, which is how it opts out: a second
+    /// lexical idea of an enumeration could only disagree with this one.
+    #[test]
+    fn the_plain_backend_yields_no_steps() {
+        let src = "1. first\n2. second\n";
+        assert!(steps(&crate::plain::parse_tree(src), src).is_empty());
+    }
 
     const DOC: &str = "\
 # Heading
