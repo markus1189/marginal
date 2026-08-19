@@ -2,7 +2,6 @@
 name: marginal-diff
 description: Open a git diff in marginal, the terminal annotator, and act on the comments that come back anchored to real files and line numbers. Invoked explicitly as /marginal-diff [git-diff-args].
 disable-model-invocation: true
-allowed-tools: Bash(/home/markus/.claude/skills/marginal-diff/marginal-diff:*)
 ---
 
 # marginal-diff

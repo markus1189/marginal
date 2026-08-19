@@ -2,7 +2,6 @@
 name: marginal-last
 description: Open the user's last-read assistant message in marginal, the terminal markdown annotator, and act on the annotations that come back. Invoked explicitly as /marginal-last [N|all].
 disable-model-invocation: true
-allowed-tools: Bash(/home/markus/.claude/skills/marginal-last/marginal-last:*)
 ---
 
 # marginal-last
