@@ -146,6 +146,24 @@ tty anywhere in reach, so one has to be borrowed from tmux. The document model �
 which messages go in, how they are headed, what `--label` they carry — is the
 same in both, deliberately.
 
+All three ride the package, so `nix profile install github:markus1189/marginal`
+is the whole install and there is no separate version to keep in step:
+
+```
+$out/bin/marginal
+$out/share/pi/extensions/marginal-annotate.ts
+$out/share/claude-code/skills/marginal-{last,diff}/{SKILL.md,marginal-*}
+```
+
+Each of the three looks its binary up as `$MARGINAL_BIN`, then
+`<repo>/target/release/marginal`, then the absolute path baked in at install
+time, then `marginal` on `PATH`. The repo build wins in a checkout, so you
+review with what you just compiled; a packaged copy finds the binary it was
+built beside rather than whatever `PATH` offers, because the two are one
+derivation and therefore one version. The sentinel is `@marginalBin@` and the
+flake substitutes it with `--replace-fail`, so renaming it breaks the build
+instead of shipping a launcher that cannot find anything.
+
 ### pi — `/marginal`
 
 `.pi/extensions/marginal-annotate.ts` registers `/marginal` in
@@ -164,10 +182,15 @@ assembled with a `## you [n]` / `## agent [n]` heading per message — otherwise
 comment cannot say which message it means. Thinking blocks, tool calls and tool
 results are dropped; the numbering counts what survived.
 
-The binary is looked up as `$MARGINAL_BIN`, then `target/release/marginal`, then
-`marginal` on `PATH` — the repo build wins, so you review with what you just
-compiled. Project-local extensions load only in a trusted project, so start pi
-with `-a` or trust the project once.
+In a checkout it loads as a project-local extension, which pi only does in a
+trusted project — so start pi with `-a`, or trust the project once. Everywhere
+else, symlink the packaged copy into pi's global extension directory, which is
+auto-discovered and `/reload`-able:
+
+```sh
+ln -s "$(nix build --print-out-paths .#marginal)/share/pi/extensions/marginal-annotate.ts" \
+  ~/.pi/agent/extensions/marginal-annotate.ts
+```
 
 `--label` is what makes it readable: the temp path is noise, so every location
 reads `assistant-message:29 · list-item`, or `conversation:64 · paragraph` for
@@ -191,10 +214,14 @@ be skipped whenever `node` was absent from `PATH`, which locally was always.
 
 `launchers/claude-code/marginal-last` is a bash script and `SKILL.md` beside it
 is the slash command, which does nothing but run the script and read its stdout.
-Both live here; installing is one symlink, so the two copies cannot drift:
+Both live here; installing is one symlink of the directory, so the two copies
+cannot drift — from the checkout while working on it, from the package
+otherwise:
 
 ```sh
 ln -s "$PWD/launchers/claude-code" ~/.claude/skills/marginal-last
+ln -s "$(nix build --print-out-paths .#marginal)/share/claude-code/skills/marginal-last" \
+  ~/.claude/skills/marginal-last
 ```
 
 Same three views (`/marginal-last`, `/marginal-last 3`, `/marginal-last all`),
@@ -285,10 +312,13 @@ human who would rather comment on the diff than describe the problem.
 
 ```sh
 ln -s "$PWD/launchers/claude-code-diff" ~/.claude/skills/marginal-diff
+ln -s "$(nix build --print-out-paths .#marginal)/share/claude-code/skills/marginal-diff" \
+  ~/.claude/skills/marginal-diff
 ```
 
 Its own directory, because the symlink above targets a skill and
-`launchers/claude-code` is already spoken for by `marginal-last`.
+`launchers/claude-code` is already spoken for by `marginal-last`. The package
+keeps them apart the same way, under `share/claude-code/skills/`.
 
 Every argument goes to `git diff` verbatim, so there is no second vocabulary:
 nothing means `HEAD` (staged and unstaged together, which is what "what has

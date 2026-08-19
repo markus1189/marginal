@@ -11,7 +11,8 @@
  *   /marginal all    the whole branch
  *
  * Binary resolution, in order:
- *   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  `marginal` on PATH
+ *   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  the packaged binary
+ *   →  `marginal` on PATH
  */
 
 import { spawnSync } from "node:child_process";
@@ -23,6 +24,12 @@ import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_BUILD = resolve(HERE, "../../target/release/marginal");
+// Rewritten by the flake's postInstall to the store path of the binary this
+// file is installed beside; in a checkout it stays the sentinel, which no
+// existsSync can match. It comes before the PATH probe because a packaged
+// extension and its packaged binary are one derivation and therefore one
+// version, while PATH may hold any other.
+const PACKAGED_BIN = "@marginalBin@";
 
 const PROMPT_HEADER_ONE = [
 	"I reviewed your last message in marginal. Below is my annotated feedback:",
@@ -58,6 +65,7 @@ function resolveBinary(): string | undefined {
 	const fromEnv = process.env.MARGINAL_BIN;
 	if (fromEnv && existsSync(fromEnv)) return fromEnv;
 	if (existsSync(REPO_BUILD)) return REPO_BUILD;
+	if (existsSync(PACKAGED_BIN)) return PACKAGED_BIN;
 	const probe = spawnSync("sh", ["-c", "command -v marginal"], { encoding: "utf8" });
 	const found = probe.stdout?.trim();
 	return found ? found : undefined;

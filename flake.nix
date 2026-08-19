@@ -22,6 +22,14 @@
       graph = fs.unions [ ./Cargo.toml ./Cargo.lock ./deny.toml ./src/main.rs ];
       manifest = ./Cargo.toml;
       extension = ./.pi/extensions;
+      # Shipped alongside the binary: the pi extension and the two Claude Code
+      # skills. They ride the package rather than a separate output so the
+      # launcher and the binary it spawns can never be different versions —
+      # `nix profile install` is then the whole install, on either host. The
+      # price is that editing one of them rebuilds the crate. The extension's
+      # node test is deliberately left out: it is checked on its own and would
+      # buy a full rebuild for a file nothing at runtime reads.
+      hosts = fs.unions [ ./launchers ./.pi/extensions/marginal-annotate.ts ];
       # typos reads prose too. Subtracting the lock files rather than listing
       # what to include means new docs are covered the day they are added.
       everything = fs.difference ./. (fs.unions [ ./Cargo.lock ./flake.lock ]);
@@ -66,8 +74,36 @@
         marginal = pkgs.rustPlatform.buildRustPackage {
           pname = "marginal";
           version = "0.1.0";
-          src = sourceOf crate;
+          src = sourceOf (fs.unions [ crate hosts ]);
           cargoLock.lockFile = ./Cargo.lock;
+
+          # `share/pi/extensions` and `share/claude-code/skills` are the layouts
+          # both hosts already auto-discover, so installing is one symlink per
+          # host into ~/.pi/agent/extensions or ~/.claude/skills.
+          postInstall = ''
+            install -Dm644 .pi/extensions/marginal-annotate.ts \
+              $out/share/pi/extensions/marginal-annotate.ts
+            install -Dm755 launchers/claude-code/marginal-last \
+              $out/share/claude-code/skills/marginal-last/marginal-last
+            install -Dm644 launchers/claude-code/SKILL.md \
+              $out/share/claude-code/skills/marginal-last/SKILL.md
+            install -Dm755 launchers/claude-code-diff/marginal-diff \
+              $out/share/claude-code/skills/marginal-diff/marginal-diff
+            install -Dm644 launchers/claude-code-diff/SKILL.md \
+              $out/share/claude-code/skills/marginal-diff/SKILL.md
+
+            # Every copy that leaves the repo learns where its binary is. The
+            # `<repo>/target/release` fallback the three share cannot resolve
+            # from the store, and falling through to PATH would run whatever
+            # version happens to be installed instead of the one built here.
+            # --replace-fail, so a renamed sentinel fails the build rather than
+            # shipping a launcher that quietly cannot find marginal.
+            substituteInPlace \
+              $out/share/pi/extensions/marginal-annotate.ts \
+              $out/share/claude-code/skills/marginal-last/marginal-last \
+              $out/share/claude-code/skills/marginal-diff/marginal-diff \
+              --replace-fail '@marginalBin@' "$out/bin/marginal"
+          '';
         };
         default = marginal;
       });

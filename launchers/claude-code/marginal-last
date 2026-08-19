@@ -19,7 +19,8 @@
 # — never the half-finished turn that is running this script.
 #
 # Binary resolution, in order:
-#   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  `marginal` on PATH
+#   $MARGINAL_BIN  →  <repo>/target/release/marginal  →  the packaged binary
+#   →  `marginal` on PATH
 #
 # Exit codes:
 #   0  handled — stdout is either the feedback or "No annotations"
@@ -35,6 +36,11 @@ trap 'exit 2' ERR   # every failure leaves by the documented door, jq's included
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly REPO_BUILD="$SCRIPT_DIR/../../target/release/marginal"
+# Rewritten by the flake's postInstall to the store path of the binary this
+# skill is installed beside; in a checkout it stays the sentinel, which no
+# -x test can match. Ahead of the PATH probe: a packaged skill and its packaged
+# binary are one derivation and therefore one version, PATH may hold any other.
+readonly PACKAGED_BIN="@marginalBin@"
 
 die() { printf 'marginal-last: %s\n' "$*" >&2; exit 2; }
 
@@ -157,6 +163,8 @@ if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
   binary="$MARGINAL_BIN"
 elif [ -x "$REPO_BUILD" ]; then
   binary="$REPO_BUILD"
+elif [ -x "$PACKAGED_BIN" ]; then
+  binary="$PACKAGED_BIN"
 elif command -v marginal >/dev/null; then
   binary="$(command -v marginal)"
 fi
