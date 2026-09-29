@@ -1973,6 +1973,32 @@ mod tests {
         assert_eq!(app.annotations[1].text, INPUT_TEXT);
     }
 
+    /// Esc and `C-c` in the editor discarded the draft for good — a long,
+    /// multi-line one included — and `C-c` is also the reflex for "get me out".
+    /// Both still leave the editor with nothing committed, but the draft is now
+    /// the newest history entry: open a comment, `C-p`, and it is back.
+    #[test]
+    fn a_cancelled_comment_comes_back_with_one_recall() {
+        let draft = "first line\nsecond line";
+        for cancel in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            key('c', KeyModifiers::CONTROL),
+        ] {
+            let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+            handle_key(&mut app, key('c', KeyModifiers::NONE));
+            handle_event(&mut app, Event::Paste(draft.into()));
+            handle_key(&mut app, cancel);
+            assert_eq!(app.mode, Mode::Normal, "{cancel:?} did not cancel");
+            assert!(app.annotations.is_empty(), "{cancel:?} committed");
+            assert!(app.status.contains("C-p"), "{}", app.status);
+
+            handle_key(&mut app, key('c', KeyModifiers::NONE));
+            assert_eq!(app.editor.text(), "", "a new comment starts empty");
+            handle_key(&mut app, key('p', KeyModifiers::CONTROL));
+            assert_eq!(app.editor.text(), draft, "{cancel:?} lost the draft");
+        }
+    }
+
     /// A paste used to arrive as keystrokes: the newline in `see:\nxx` was
     /// Enter, which committed `see:`, and the two `x` that followed were
     /// Normal-mode `x` — two annotations removed with no undo. With bracketed

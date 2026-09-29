@@ -1328,9 +1328,25 @@ impl App {
 
     pub fn cancel_input(&mut self) {
         self.mode = Mode::Normal;
+        // An edit abandoned untouched is not a draft: its text is still the
+        // annotation's, and filing it in the history would only offer back what
+        // `e` reopens anyway.
+        let untouched_edit = match &self.target {
+            Target::Edit(id) => self
+                .annotations
+                .iter()
+                .any(|a| &a.id == id && a.text == self.editor.text()),
+            _ => false,
+        };
         self.target = Target::Selection;
-        self.editor.start_fresh();
-        self.status = "cancelled".into();
+        self.status = if untouched_edit {
+            self.editor.start_fresh();
+            "cancelled".into()
+        } else if self.editor.cancel() {
+            "cancelled · C-p recalls it".into()
+        } else {
+            "cancelled".into()
+        };
     }
 
     pub fn remove_at_cursor(&mut self) {
@@ -3283,6 +3299,26 @@ https://example.dev/a/very/long/path in it as well.
         a.move_block(1);
         commit(&mut a, "fresh");
         assert_eq!(a.annotations.len(), 2);
+    }
+
+    /// A rewrite abandoned half-typed is a draft like any other; the text `e`
+    /// merely reopened is not, and filing it would offer `C-p` a duplicate of
+    /// the annotation itself.
+    #[test]
+    fn a_cancelled_edit_keeps_only_what_was_typed() {
+        let mut a = app();
+        commit(&mut a, "keep me");
+        a.edit_at_cursor();
+        a.cancel_input();
+        assert_eq!(a.status, "cancelled");
+
+        a.edit_at_cursor();
+        a.editor.set("half-typed replacement");
+        a.cancel_input();
+        assert_eq!(a.status, "cancelled · C-p recalls it");
+        a.begin_comment();
+        a.editor.history_prev();
+        assert_eq!(a.editor.text(), "half-typed replacement");
     }
 
     #[test]

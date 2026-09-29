@@ -617,6 +617,8 @@ selection bar cannot be pushed off screen by anything the body does.
 
 Readline bindings, because that is what fingers expect. `Enter` saves, `Esc` or
 `C-c` cancels, and **`C-j` inserts a newline** — comments can be several lines.
+A cancelled comment is not thrown away: it becomes the newest history entry, so
+the next comment's `C-p` brings it back.
 
 | Key | Action |
 |---|---|

@@ -19,6 +19,9 @@
 //!   Nothing typed afterwards overwrites it.
 //! * `C-n` past the newest entry puts it back and empties the slot; so does
 //!   `submit` / `start_fresh`, which throw the whole buffer away anyway.
+//! * `cancel` (Esc, `C-c`) empties it too, but into the history: the parked
+//!   draft and any composed buffer become the newest entries, so a cancelled
+//!   comment is one `C-p` away rather than gone.
 //! * Editing a recalled entry ends browsing but does not touch the slot. The
 //!   *edit* has no slot of its own: it lives as long as you stay on it and is
 //!   gone the moment you walk away with `C-p`. The next `C-p` resumes from the
@@ -77,6 +80,33 @@ impl Editor {
         }
         self.start_fresh();
         out
+    }
+
+    /// Abandon the comment without losing it: whatever the user composed goes
+    /// into the history, so the next comment's `C-p` brings it back. Returns
+    /// whether anything was kept.
+    ///
+    /// Esc and `C-c` used to be `start_fresh`, and a cancel is one keystroke
+    /// away from the keys it shares a hand with — a long multi-line draft went
+    /// with no way back. What counts as "composed" is the draft slot's rule
+    /// turned outward: the parked draft if one is parked, and the buffer unless
+    /// it is a recalled entry nobody touched (that one is in the history
+    /// already). Blanks and an immediate repeat are skipped, as in `submit`.
+    pub fn cancel(&mut self) -> bool {
+        let untouched_recall = self
+            .browsing
+            .is_some_and(|i| self.history.get(i) == Some(&self.text));
+        let mut kept = false;
+        let draft = self.stash.take();
+        let shown = (!untouched_recall).then(|| std::mem::take(&mut self.text));
+        for text in [draft, shown].into_iter().flatten() {
+            if !text.trim().is_empty() && self.history.last() != Some(&text) {
+                self.history.push(text);
+                kept = true;
+            }
+        }
+        self.start_fresh();
+        kept
     }
 
     pub fn set(&mut self, s: &str) {
@@ -773,6 +803,68 @@ mod tests {
         e.paste("!");
         e.history_next();
         assert_eq!(e.text(), "old!", "a real paste is an edit");
+    }
+
+    /// Esc threw a draft away for good. Now it is the newest history entry,
+    /// line breaks and all, one `C-p` away in the next comment.
+    #[test]
+    fn a_cancelled_draft_is_one_recall_away() {
+        let mut e = Editor::default();
+        e.set("older");
+        e.submit();
+        e.set("a long\nmulti-line\ndraft");
+        assert!(e.cancel());
+        assert!(e.text().is_empty(), "cancel must still clear the buffer");
+
+        e.history_prev();
+        assert_eq!(e.text(), "a long\nmulti-line\ndraft");
+        e.history_prev();
+        assert_eq!(e.text(), "older", "the cancelled draft displaced history");
+    }
+
+    /// Cancelling while a recalled entry is on screen: the draft parked behind
+    /// it is what the user composed, and it is kept; the recalled entry is
+    /// already in the history and is not added twice. An *edited* recall is
+    /// composition too, and is kept after the draft.
+    #[test]
+    fn cancelling_a_recall_keeps_the_parked_draft_not_a_duplicate() {
+        let mut e = Editor::default();
+        for c in ["first", "second"] {
+            e.set(c);
+            e.submit();
+        }
+        e.set("my draft");
+        e.history_prev();
+        e.history_prev();
+        assert_eq!(e.text(), "first");
+        assert!(e.cancel());
+        assert_eq!(e.history, ["first", "second", "my draft"]);
+
+        e.set("draft two");
+        e.history_prev();
+        e.insert('!');
+        assert_eq!(e.text(), "my draft!");
+        assert!(e.cancel());
+        assert_eq!(
+            e.history,
+            ["first", "second", "my draft", "draft two", "my draft!"]
+        );
+    }
+
+    /// Nothing composed, nothing kept: a blank buffer, an untouched recall of
+    /// the newest entry, and a repeat of it all leave the history as it was.
+    #[test]
+    fn cancelling_nothing_keeps_nothing() {
+        let mut e = Editor::default();
+        e.set("  \n ");
+        assert!(!e.cancel());
+        e.set("same");
+        e.submit();
+        e.set("same");
+        assert!(!e.cancel());
+        e.history_prev();
+        assert!(!e.cancel());
+        assert_eq!(e.history, ["same"]);
     }
 
     #[test]
