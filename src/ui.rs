@@ -781,6 +781,13 @@ fn keep_cursor_visible(app: &App, scroll: &mut Anchor, viewport: usize) {
     if viewport == 0 {
         return;
     }
+    // The anchor was produced at last frame's width, and a row index means
+    // nothing at another one. Widen the pane and a line that took 80 rows takes
+    // eight, but an anchor on its row 74 survived: the loop below walks from it
+    // and never meets the cursor, the body skipped the line entirely, and the
+    // readout said `rows 75-58/58`. The line is still the right place to be, so
+    // keep it and clamp the row onto what the line has now.
+    scroll.row = scroll.row.min(app.row_count(scroll.line) - 1);
     let cur = Anchor {
         line: app.cursor.line,
         row: app.cursor_row(),
@@ -3276,6 +3283,69 @@ mod tests {
                 .map(|s| s.content.to_string())
                 .collect();
             assert_eq!(rebuilt, text, "range {a}..{b}");
+        }
+    }
+
+    // ---- geometry that changes under a live anchor ---------------------------
+
+    /// Render with an anchor the caller keeps, the way `main` keeps one across
+    /// frames — `render` starts every frame from a fresh one and so can never
+    /// see an anchor outlive the width it was made at.
+    fn render_kept(app: &mut App, scroll: &mut Anchor, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app, scroll)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// `rows A-B/T` off the bottom border, if there is one.
+    fn readout(buf: &ratatui::buffer::Buffer) -> Option<(usize, usize, usize)> {
+        let border = bottom_border(buf);
+        let rest = border.split("rows ").nth(1)?;
+        let (range, total) = rest.split_once('/')?;
+        let (a, b) = range.split_once('-')?;
+        let total: String = total.chars().take_while(char::is_ascii_digit).collect();
+        Some((a.parse().ok()?, b.parse().ok()?, total.parse().ok()?))
+    }
+
+    /// Measured before the fix: 80 `C-n` into a 1,500-column line at width 30
+    /// left the anchor on that line's row 74. Widened to 200 the line takes
+    /// eight rows, the anchor kept 74, and the frame skipped the line outright
+    /// with `rows 75-58/58` on the border and the thumb on the floor. Every
+    /// existing test renders from a fresh `Anchor::default()`, which is why none
+    /// of them could meet an anchor made at another width.
+    #[test]
+    fn widening_the_pane_never_leaves_the_anchor_below_its_line() {
+        let src =
+            "word ".repeat(300) + "\n" + &(0..50).map(|i| format!("l{i}\n")).collect::<String>();
+        for narrow in [30u16, 40] {
+            for wide in [80u16, 95, 120, 200] {
+                let mut app = App::open("r.txt".into(), &src, Format::Plain);
+                let mut scroll = Anchor::default();
+                render_kept(&mut app, &mut scroll, narrow, 16);
+                // Off the end of line 1 by a couple of rows, so the anchor is
+                // still deep inside it but the cursor is not: a cursor on line
+                // 1 is above the stale anchor and drags it back by itself.
+                while app.cursor.line < 3 {
+                    app.move_row(1);
+                    render_kept(&mut app, &mut scroll, narrow, 16);
+                }
+                assert!(
+                    scroll.line == 1 && scroll.row > 10,
+                    "setup: anchor not deep in line 1: {scroll:?}"
+                );
+                let buf = render_kept(&mut app, &mut scroll, wide, 16);
+                assert!(
+                    scroll.row < app.row_count(scroll.line),
+                    "{narrow}->{wide}: anchor {scroll:?} past its line's {} rows",
+                    app.row_count(scroll.line)
+                );
+                assert!(has_cursor(&buf), "{narrow}->{wide}: cursor off screen");
+                let (a, b, total) = readout(&buf).expect("readout");
+                assert!(
+                    a <= b && b <= total,
+                    "{narrow}->{wide}: rows {a}-{b}/{total}"
+                );
+            }
         }
     }
 }
