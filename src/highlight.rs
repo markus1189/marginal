@@ -100,6 +100,30 @@ fn list_marker_len(line: &str, from: usize) -> usize {
     i
 }
 
+/// Bytes at the head of a continuation line that belong to the containers a
+/// node sits in rather than to the node: quote markers and indentation, and no
+/// more of them than the `lead` bytes in front of the node on its first line.
+///
+/// A span's continuation lines start at column 1 as comrak reports them, so a
+/// fence inside a quote painted each `> ` in code colour on top of the quote's
+/// own, and a link wrapped inside a list item underlined the item's
+/// indentation. The node starts where its first line says it does, and its
+/// later lines repeat that line's chrome — the list marker, footnote label or
+/// quote marker there becomes indentation or a marker here, never content.
+///
+/// Capped by `lead` so a deeper continuation keeps its relative indentation —
+/// a code line indented past its fence is code — and a lazy continuation, which
+/// repeats no chrome at all, is left whole. Unlike `App::slice`, which trims
+/// only what the lead's quote markers and spaces literally repeat, this also
+/// skips the indentation that stands in for a list marker: whitespace is
+/// invisible to `slice`'s quoted text but not to an underline.
+fn chrome_len(text: &str, lead: usize) -> usize {
+    text.bytes()
+        .take(lead)
+        .take_while(|b| matches!(b, b'>' | b' ' | b'\t'))
+        .count()
+}
+
 fn add(out: &mut [LineMarks], line: usize, a: usize, b: usize, tag: &'static str) {
     if b > a {
         if let Some(row) = out.get_mut(line.saturating_sub(1)) {
@@ -113,9 +137,15 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
         let span = child.span;
 
         if let Some(tag) = tag_of(child.kind) {
+            let lead = span.start.col - 1;
             for line in span.start.line..=span.end.line {
-                let len = lines.get(line - 1).map_or(0, |l| l.len());
-                if let Some((a, b)) = span.byte_range_on(line, len) {
+                let text = lines.get(line - 1).copied().unwrap_or("");
+                if let Some((a, b)) = span.byte_range_on(line, text.len()) {
+                    let a = if line == span.start.line {
+                        a
+                    } else {
+                        chrome_len(text, lead)
+                    };
                     add(out, line, a, b, tag);
                 }
             }
@@ -523,6 +553,40 @@ mod tests {
                 ("list-marker", "- "),
                 ("list-marker", "3. ")
             ]
+        );
+    }
+
+    /// comrak's continuation lines start at column 1, so a fence in a quote
+    /// painted every `> ` in code colour over the quote's own, and a link
+    /// wrapped in a list item underlined the item's indentation. A node's later
+    /// lines now start past the chrome its first line stood behind — and no
+    /// further, so indentation that belongs to the code stays code.
+    #[test]
+    fn continuation_lines_leave_the_container_chrome_to_the_container() {
+        let q = "> ```\n> code\n>   indented\n> ```\n";
+        assert_eq!(tags(q, 2), vec![(0, 6, "quote"), (2, 6, "code")]);
+        assert_eq!(tags(q, 3), vec![(0, 12, "quote"), (2, 12, "code")]);
+        assert_eq!(tags(q, 4), vec![(0, 5, "quote"), (2, 5, "code")]);
+        // Doubly quoted: both markers are chrome.
+        assert_eq!(
+            tags("> > ```\n> > x\n> > ```\n", 2),
+            vec![(0, 5, "quote"), (2, 5, "quote"), (4, 5, "code")]
+        );
+        // Code content that itself opens with `>` is still code: the cap is
+        // what the first line's lead held.
+        assert_eq!(
+            tags("> ```\n> > not a quote\n> ```\n", 2),
+            vec![(0, 15, "quote"), (2, 15, "code")]
+        );
+        // A list item: the marker becomes indentation on the next line.
+        let l = "- see [the\n  docs](u) now\n";
+        assert_eq!(tags(l, 2), vec![(2, 10, "link")]);
+        // A setext underline indented under a list marker.
+        assert_eq!(tags("- title\n  ===\n", 2), vec![(2, 5, "heading")]);
+        // A lazy continuation repeats no chrome and loses nothing.
+        assert_eq!(
+            tags("> para [a\nlazy](u)\n", 2),
+            vec![(0, 8, "quote"), (0, 8, "link")]
         );
     }
 
