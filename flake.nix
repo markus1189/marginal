@@ -94,6 +94,10 @@
               $out/share/claude-code/skills/marginal-diff/marginal-diff
             install -Dm644 launchers/claude-code-diff/SKILL.md \
               $out/share/claude-code/skills/marginal-diff/SKILL.md
+            # Outside skills/, so symlinking that whole directory into
+            # ~/.claude/skills does not offer it as a skill.
+            install -Dm644 launchers/lib/marginal-launch.bash \
+              $out/share/claude-code/lib/marginal-launch.bash
 
             # Every copy that leaves the repo learns where its binary is. The
             # `<repo>/target/release` fallback the three share cannot resolve
@@ -103,9 +107,13 @@
             # shipping a launcher that quietly cannot find marginal.
             substituteInPlace \
               $out/share/pi/extensions/marginal-annotate.ts \
+              $out/share/claude-code/lib/marginal-launch.bash \
+              --replace-fail '@marginalBin@' "$out/bin/marginal"
+            substituteInPlace \
               $out/share/claude-code/skills/marginal-last/marginal-last \
               $out/share/claude-code/skills/marginal-diff/marginal-diff \
-              --replace-fail '@marginalBin@' "$out/bin/marginal"
+              --replace-fail '@marginalLaunchLib@' \
+                "$out/share/claude-code/lib/marginal-launch.bash"
           '';
         };
         default = marginal;

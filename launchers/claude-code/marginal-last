@@ -33,16 +33,15 @@
 set -euo pipefail
 trap 'exit 2' ERR   # every failure leaves by the documented door, jq's included
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_DIR
-readonly REPO_BUILD="$SCRIPT_DIR/../../target/release/marginal"
-# Rewritten by the flake's postInstall to the store path of the binary this
-# skill is installed beside; in a checkout it stays the sentinel, which no
-# -x test can match. Ahead of the PATH probe: a packaged skill and its packaged
-# binary are one derivation and therefore one version, PATH may hold any other.
-readonly PACKAGED_BIN="@marginalBin@"
-
 die() { printf 'marginal-last: %s\n' "$*" >&2; exit 2; }
+
+# The binary lookup and the tty borrowing, shared with marginal-diff. The flake
+# rewrites the sentinel to the installed copy; a checkout finds it at
+# launchers/lib, by a path the kernel resolves through the skill symlink.
+launch_lib="@marginalLaunchLib@"
+[ -f "$launch_lib" ] || launch_lib="$(dirname "${BASH_SOURCE[0]}")/../lib/marginal-launch.bash"
+# shellcheck source=SCRIPTDIR/../lib/marginal-launch.bash
+. "$launch_lib"
 
 # ---------------------------------------------------------------- arguments
 
@@ -178,64 +177,14 @@ if [ "$dump_only" -eq 1 ]; then
   exit 0
 fi
 
-# ---------------------------------------------------------------- binary
-
-binary=""
-if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
-  binary="$MARGINAL_BIN"
-elif [ -x "$REPO_BUILD" ]; then
-  binary="$REPO_BUILD"
-elif [ -x "$PACKAGED_BIN" ]; then
-  binary="$PACKAGED_BIN"
-elif command -v marginal >/dev/null; then
-  binary="$(command -v marginal)"
-fi
-[ -n "$binary" ] || die "marginal not found — build it (cargo build --release) or set \$MARGINAL_BIN"
-
 # ---------------------------------------------------------------- the tty
 #
-# marginal refuses to start without a real tty, and this script has none. A tmux
-# popup is a blocking tty on the client that is already showing Claude's pane; a
-# terminal window is the same trade without tmux. There is deliberately no third
-# branch: a gate that cannot reach the human must say so, not answer on their
-# behalf.
-#
-# Three things about this, all measured:
-#   - A tmux session with no attached client still runs the command, with a pty,
-#     and still reports its exit status — to an audience of nobody. A TUI
-#     launched that way waits for a keypress that can never arrive, so the
-#     attached-client check below is what stands between the user and a silent
-#     30-minute hang.
-#   - The popup does not inherit this shell's environment; it gets the tmux
-#     server's. The binary is passed by absolute path for that reason, and the
-#     locale is forwarded explicitly, since a server started before the current
-#     locale settings would otherwise render multibyte text differently here
-#     than everywhere else.
-#   - alacritty does NOT forward its child's exit status: `alacritty -e sh -c
-#     'exit 7'` returns 0. Nothing below may read $rc as a verdict; see the
-#     result-file comment.
+# Both halves live in launchers/lib/marginal-launch.bash, with the measured
+# gotchas that shaped them.
 
-rc=0
-if [ -n "${TMUX:-}" ]; then
-  [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
-    || die "this tmux session has no attached client — nobody could see the popup"
-
-  # if-blocks, not `[ -n "$x" ] && popup+=(…)`: a false test is a failed command,
-  # and under `set -e` an unset LC_ALL would end the script here instead.
-  popup=(-E -w 90% -h 90% -T " marginal · $label ")
-  if [ -n "${TMUX_PANE:-}" ]; then popup+=(-t "$TMUX_PANE"); fi
-  if [ -n "${LANG:-}" ]; then popup+=(-e "LANG=$LANG"); fi
-  if [ -n "${LC_ALL:-}" ]; then popup+=(-e "LC_ALL=$LC_ALL"); fi
-  if [ -n "${COLORTERM:-}" ]; then popup+=(-e "COLORTERM=$COLORTERM"); fi
-
-  tmux display-popup "${popup[@]}" \
-    -- "$binary" --result "$result_json" --label "$label" "$source_md" || rc=$?
-elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v alacritty >/dev/null; then
-  alacritty --title "marginal · $label" \
-    -e "$binary" --result "$result_json" --label "$label" "$source_md" || rc=$?
-else
-  die "no way to reach a terminal — run Claude Code inside tmux, or install alacritty"
-fi
+binary="$(marginal_find_binary)"
+marginal_run_on_tty "$label" "$binary" --result "$result_json" --label "$label" "$source_md"
+rc=$MARGINAL_RC
 
 # ---------------------------------------------------------------- feedback
 #

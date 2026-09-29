@@ -212,7 +212,12 @@ is the whole install and there is no separate version to keep in step:
 $out/bin/marginal
 $out/share/pi/extensions/marginal-annotate.ts
 $out/share/claude-code/skills/marginal-{last,diff}/{SKILL.md,marginal-*}
+$out/share/claude-code/lib/marginal-launch.bash
 ```
+
+The two bash launchers share one file, `launchers/lib/marginal-launch.bash`:
+the binary lookup and the tty borrowing below. They source it, from
+`../lib/` in a checkout and from its store path once packaged.
 
 Each of the three looks its binary up as `$MARGINAL_BIN`, then
 `<repo>/target/release/marginal`, then the absolute path baked in at install

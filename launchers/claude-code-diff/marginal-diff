@@ -70,14 +70,13 @@ fence_for() {
   printf '%*s' "$n" '' | tr ' ' '`'
 }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_DIR
-readonly REPO_BUILD="$SCRIPT_DIR/../../target/release/marginal"
-# Rewritten by the flake's postInstall to the store path of the binary this
-# skill is installed beside; in a checkout it stays the sentinel, which no
-# -x test can match. Ahead of the PATH probe: a packaged skill and its packaged
-# binary are one derivation and therefore one version, PATH may hold any other.
-readonly PACKAGED_BIN="@marginalBin@"
+# The binary lookup and the tty borrowing, shared with marginal-last. The flake
+# rewrites the sentinel to the installed copy; a checkout finds it at
+# launchers/lib, by a path the kernel resolves through the skill symlink.
+launch_lib="@marginalLaunchLib@"
+[ -f "$launch_lib" ] || launch_lib="$(dirname "${BASH_SOURCE[0]}")/../lib/marginal-launch.bash"
+# shellcheck source=SCRIPTDIR/../lib/marginal-launch.bash
+. "$launch_lib"
 
 # ---------------------------------------------------------------- arguments
 
@@ -435,47 +434,15 @@ if [ "$dump_map" -eq 1 ]; then
   exit 0
 fi
 
-# ---------------------------------------------------------------- binary
-
-binary=""
-if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
-  binary="$MARGINAL_BIN"
-elif [ -x "$REPO_BUILD" ]; then
-  binary="$REPO_BUILD"
-elif [ -x "$PACKAGED_BIN" ]; then
-  binary="$PACKAGED_BIN"
-elif command -v marginal >/dev/null; then
-  binary="$(command -v marginal)"
-fi
-[ -n "$binary" ] || die "marginal not found — build it (cargo build --release) or set \$MARGINAL_BIN"
-
 # ---------------------------------------------------------------- the tty
 #
-# Identical to marginal-last, and for the same reasons: this script has no tty,
-# a tmux popup is one on a client already showing the agent's pane, and a gate
-# that cannot reach the human must say so rather than answer on their behalf.
-# See that script's comments for the three measured gotchas (detached servers,
-# the popup's environment, alacritty swallowing exit status).
+# Shared with marginal-last in launchers/lib/marginal-launch.bash, with the
+# measured gotchas that shaped it: detached servers, the popup's environment,
+# alacritty swallowing exit status.
 
-rc=0
-if [ -n "${TMUX:-}" ]; then
-  [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
-    || die "this tmux session has no attached client — nobody could see the popup"
-
-  popup=(-E -w 90% -h 90% -T " marginal · $label ")
-  if [ -n "${TMUX_PANE:-}" ];  then popup+=(-t "$TMUX_PANE"); fi
-  if [ -n "${LANG:-}" ];       then popup+=(-e "LANG=$LANG"); fi
-  if [ -n "${LC_ALL:-}" ];     then popup+=(-e "LC_ALL=$LC_ALL"); fi
-  if [ -n "${COLORTERM:-}" ];  then popup+=(-e "COLORTERM=$COLORTERM"); fi
-
-  tmux display-popup "${popup[@]}" \
-    -- "$binary" --result "$result_json" --label "$label" "$doc" || rc=$?
-elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v alacritty >/dev/null; then
-  alacritty --title "marginal · $label" \
-    -e "$binary" --result "$result_json" --label "$label" "$doc" || rc=$?
-else
-  die "no way to reach a terminal — run Claude Code inside tmux, or install alacritty"
-fi
+binary="$(marginal_find_binary)"
+marginal_run_on_tty "$label" "$binary" --result "$result_json" --label "$label" "$doc"
+rc=$MARGINAL_RC
 
 [ -f "$result_json" ] \
   || die "no result file from marginal (launcher rc=$rc) — no verdict is available." \
