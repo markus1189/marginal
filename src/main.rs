@@ -261,6 +261,38 @@ fn preflight(path: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Would writing the result to `result` overwrite the document under review?
+///
+/// Asked of the file a write would land on — through the same symlink chain
+/// `preflight` follows — and answered by device and inode, so a hard link, a
+/// `./` prefix or a symlink to the document is caught as surely as the same
+/// spelling twice. `marginal --result victim.md victim.md` used to replace the
+/// document with its own review JSON on exit, and the review was the only thing
+/// left that quoted it.
+///
+/// A target that does not exist yet cannot be the document; anything else this
+/// cannot stat is left for `preflight` to report.
+#[cfg(unix)]
+fn clobbers_input(input: &str, result: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let target = write_target(std::path::Path::new(result));
+    match (std::fs::metadata(input), std::fs::metadata(target)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
+/// Elsewhere there is no inode to ask, so the canonical paths stand in: a hard
+/// link gets through there, a symlink and a second spelling do not.
+#[cfg(not(unix))]
+fn clobbers_input(input: &str, result: &str) -> bool {
+    let target = write_target(std::path::Path::new(result));
+    match (std::fs::canonicalize(input), std::fs::canonicalize(target)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args_os().skip(1)) {
         Ok(Some(a)) => a,
@@ -315,6 +347,13 @@ fn main() -> ExitCode {
     }
 
     if let Some(path) = &args.result {
+        if clobbers_input(&args.file, path) {
+            eprintln!(
+                "marginal: --result {path} is the file under review; \
+                 the review would overwrite it"
+            );
+            return ExitCode::from(2);
+        }
         if let Err(e) = preflight(path) {
             eprintln!("marginal: cannot write {path}: {e}");
             return ExitCode::from(2);
@@ -713,6 +752,42 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert!(left.is_empty(), "pre-flight left a file behind: {left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--result victim.md victim.md` passed pre-flight — the file is writable,
+    /// which is exactly the problem — and `finish` then replaced the document
+    /// with its review JSON. Every spelling of "the same file" is refused: the
+    /// path itself, a different spelling of it, a symlink to it and a hard link
+    /// to it. A different file with the same contents is not the same file.
+    #[cfg(unix)]
+    #[test]
+    fn a_result_path_that_is_the_input_file_is_refused() {
+        let dir = scratch("clobber");
+        let doc = dir.join("victim.md");
+        std::fs::write(&doc, "# keep me\n").unwrap();
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        let input = s(&doc);
+
+        let dotted = format!("{}/./victim.md", s(&dir));
+        let sym = dir.join("link.json");
+        std::os::unix::fs::symlink(&doc, &sym).unwrap();
+        let hard = dir.join("hard.json");
+        std::fs::hard_link(&doc, &hard).unwrap();
+        for same in [input.clone(), dotted, s(&sym), s(&hard)] {
+            assert!(clobbers_input(&input, &same), "{same} slipped through");
+        }
+
+        let twin = dir.join("twin.md");
+        std::fs::write(&twin, "# keep me\n").unwrap();
+        assert!(!clobbers_input(&input, &s(&twin)), "a copy is not the file");
+        assert!(!clobbers_input(&input, &s(&dir.join("fresh.json"))));
+        // A dangling symlink lands on a file that does not exist yet.
+        let dangling = dir.join("dangling.json");
+        std::os::unix::fs::symlink(dir.join("nothing-yet.json"), &dangling).unwrap();
+        assert!(!clobbers_input(&input, &s(&dangling)));
+
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), "# keep me\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
