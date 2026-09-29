@@ -99,7 +99,10 @@ marginal_run_on_tty() {
 
     # if-blocks, not `[ -n "$x" ] && popup+=(…)`: a false test is a failed
     # command, and under `set -e` an unset LC_ALL would end the script here.
-    local popup=(-E -w 90% -h 90% -T " marginal · $title ")
+    # -T is expanded as a tmux format, and the title carries the caller's
+    # arguments: `#(cmd)` in a git pathspec ran cmd, `#{…}` was substituted.
+    # `##` is a literal `#`.
+    local popup=(-E -w 90% -h 90% -T " marginal · ${title//#/##} ")
     if [ -n "${TMUX_PANE:-}" ]; then popup+=(-t "$TMUX_PANE"); fi
     if [ -n "${LANG:-}" ]; then popup+=(-e "LANG=$LANG"); fi
     if [ -n "${LC_ALL:-}" ]; then popup+=(-e "LC_ALL=$LC_ALL"); fi
