@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# run-regression [--update] — marginal-diff against the fixture repository that
+# make-fixture-repo builds, compared with the golden files in golden/.
+#
+#   dump.md       `marginal-diff --dump`: the document the reviewer sees
+#   dump.map      `marginal-diff --dump-map`: what every document line was
+#   feedback.md   a whole review round trip, through a stand-in tmux and a
+#                 stand-in marginal that annotate chosen document lines
+#
+# Plus two invariants no golden file states: one map row per document line,
+# and eight fields on every row.
+#
+# The flake runs this as the `marginal-diff` check. --update rewrites the
+# golden files from the current output instead; read the diff before
+# committing one.
+#
+# Needs git, jq, awk, iconv and coreutils on PATH, and nothing else: no tty,
+# no tmux, no marginal binary.
+
+# Backticks in single quotes all over this file are markdown code spans, and
+# meant literally.
+# shellcheck disable=SC2016
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# $MARGINAL_DIFF runs another copy against the same goldens, e.g. an old one
+# to see what this would have caught.
+launcher="${MARGINAL_DIFF:-$here/../claude-code-diff/marginal-diff}"
+golden="$here/golden"
+update=0
+if [ "${1:-}" = --update ]; then update=1; fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# `bash script`, not `script`: the build sandbox has no /usr/bin/env.
+bash "$here/make-fixture-repo" "$work/repo"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME="$work/repo"
+cd "$work/repo"
+
+bash "$launcher" --dump > "$work/dump.md"
+bash "$launcher" --dump-map > "$work/dump.map"
+
+check() {  # check MESSAGE — report a failure; a file, so $(…) cannot lose it
+  printf 'FAIL: %s\n' "$*" >&2
+  : > "$work/failed"
+}
+
+# ---- invariants -----------------------------------------------------------
+
+lines="$(wc -l < "$work/dump.md")"
+rows="$(( $(wc -l < "$work/dump.map") - 1 ))"
+[ "$lines" -eq "$rows" ] || check "dump.md has $lines lines but dump.map has $rows rows"
+awk -F'\t' 'NR > 1 && $1 != NR - 1 { exit 1 }' "$work/dump.map" \
+  || check "dump.map rows are not numbered 1..N in order"
+awk -F'\t' 'NF != 8 { exit 1 }' "$work/dump.map" \
+  || check "a dump.map line does not have exactly 8 fields"
+
+# ---- a review round trip --------------------------------------------------
+#
+# Document line numbers are looked up by content, so a change to the document
+# moves them without breaking this; the golden feedback then shows where each
+# comment landed.
+
+doc_line() {  # the first document line equal to $1, or 1 when there is none
+  local n
+  n="$(grep -n -x -F -- "$1" "$work/dump.md" | head -1 | cut -d: -f1)" || true
+  if [ -z "$n" ]; then
+    check "the document has no line '$1'"
+    n=1
+  fi
+  printf '%s\n' "$n"
+}
+heading_space="$(doc_line '## `with space.txt`')"
+del_two="$(doc_line '-two')"
+add_two="$(doc_line '+TWO')"
+heading_mode="$(doc_line 'mode `100644` → `100755`')"
+heading_deleted="$(doc_line '## `deleted.txt (deleted)`')"
+del_gone="$(doc_line '-gone')"
+changed_end="$(doc_line '+changed end')"
+
+jq -n \
+  --argjson s1 "$del_two" --argjson e1 "$add_two" \
+  --argjson s2 "$add_two" \
+  --argjson s3 "$heading_mode" \
+  --argjson s4 "$del_gone" \
+  --argjson s5 "$heading_space" \
+  --argjson s6 "$changed_end" \
+  --argjson s7 "$heading_deleted" '
+  def ann($s; $e; $kind; $text): {startLine: $s, endLine: $e, blockKind: $kind, originalText: "(quoted)", text: $text};
+  { version: 2, final: true, decision: "changes-requested",
+    annotations: [
+      {id: "g", type: "general", text: "a general comment on the change"},
+      ann($s1; $e1; "lines"; "a replacement: old and new side"),
+      ann($s2; $s2; "lines"; "an addition only"),
+      ann($s3; $s3; "paragraph"; "the mode change"),
+      ann($s4; $s4; "lines"; "a deleted line: old side only"),
+      ann($s5; $s5; "heading"; "the file heading of a spaced path"),
+      ann($s6; $s6; "lines"; "see:\n```\n## not a heading\n```"),
+      ann($s7; $s7; "heading"; "a deleted file")
+    ],
+    feedbackMarkdown: "" }' > "$work/result.json"
+
+mkdir "$work/bin"
+{
+  printf '#!%s\n' "$BASH"
+  cat <<'EOF'
+# stand-in tmux: one attached client; a popup runs what follows `--`
+case "$1" in
+  list-clients) echo /dev/pts/0 ;;
+  display-message) echo "200 50" ;;
+  display-popup) while [ "$1" != -- ]; do shift; done; shift; exec "$@" ;;
+esac
+EOF
+} > "$work/bin/tmux"
+{
+  printf '#!%s\n' "$BASH"
+  printf 'canned=%q\n' "$work/result.json"
+  cat <<'EOF'
+# stand-in marginal: answers the liveness probe, then "annotates" by writing
+# the canned result wherever --result points
+[ "$1" = --help ] && exit 0
+while [ "$1" != --result ]; do shift; done
+cp "$canned" "$2"
+exit 1
+EOF
+} > "$work/bin/marginal"
+chmod +x "$work/bin/tmux" "$work/bin/marginal"
+
+TMUX=stand-in TMUX_PANE=%0 PATH="$work/bin:$PATH" MARGINAL_BIN="$work/bin/marginal" \
+  bash "$launcher" > "$work/feedback.raw"
+# The repository root is a temp path; the golden file names it <root>.
+sed "s|$work/repo|<root>|g" "$work/feedback.raw" > "$work/feedback.md"
+
+# ---- goldens --------------------------------------------------------------
+
+for f in dump.md dump.map feedback.md; do
+  if [ "$update" -eq 1 ]; then
+    cp "$work/$f" "$golden/$f"
+  elif ! diff -u "$golden/$f" "$work/$f"; then
+    check "$f differs from golden/$f (run with --update to accept)"
+  fi
+done
+
+if [ -e "$work/failed" ]; then exit 1; fi
+echo "marginal-diff regression: ok"

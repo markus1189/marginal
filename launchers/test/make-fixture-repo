@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# make-fixture-repo DIR — build the git repository the marginal-diff
+# regression test renders. Every file in it exists because a real diff of that
+# shape once came out wrong; the comment beside each says how.
+#
+# The working tree is left dirty on purpose: `marginal-diff` with no arguments
+# reviews `git diff HEAD`, and that is what the golden files record.
+
+# The backticks in single quotes below are a markdown fence, meant literally.
+# shellcheck disable=SC2016
+
+set -euo pipefail
+
+dir="$1"
+mkdir -p "$dir"
+cd "$dir"
+
+# Isolated from whoever runs this: no global config may change the diff. That
+# is the point of the test — the launcher has to defend against config, so the
+# fixture sets the hostile knobs itself, in the repository, where they are
+# visible.
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME="$PWD"
+export GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@example.invalid
+export GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@example.invalid
+export GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z'
+
+git init -q -b main .
+git config core.fileMode true
+# Each of these once changed what the renderer saw.
+git config diff.submodule log        # swallowed submodule changes whole
+git config diff.mnemonicPrefix true  # c/ and i/ instead of a/ and b/
+git config color.ui always           # SGR escapes in the byte stream
+git config core.quotepath true       # octal escapes for non-ASCII paths
+
+# A space in the name: git appends a TAB after `--- a/with space.txt`.
+printf 'one\ntwo\nthree\n' > 'with space.txt'
+# A tab and a double quote: git C-quotes the whole path, `"tab\there.txt"`.
+printf 'x\n' > "$(printf 'tab\there.txt')"
+printf 'y\n' > 'quo"te.txt'
+# Non-ASCII, which core.quotepath would octal-escape.
+printf 'ä\n' > 'umlaut-ü.txt'
+# Mode only: no ---/+++ pair, no hunk.
+printf '#!/bin/sh\n' > script.sh
+# Binary: `Binary files … differ`, no ---/+++ pair either.
+printf 'bin\000ary\n' > blob.bin
+# A markdown file whose context lines hold a fence of their own.
+printf '# Notes\n\n```sh\necho hi\n```\n\nend\n' > notes.md
+# No newline at EOF on both sides: two `\` markers, the second one after the
+# hunk's last counted line.
+printf 'keep\nold' > noeol.txt
+# To be deleted, and to be renamed.
+printf 'gone\n' > deleted.txt
+printf 'moved\nunchanged\n' > before.txt
+
+# A submodule, as a gitlink to an embedded repository.
+mkdir sub
+git -C sub init -q -b main
+git -C sub commit -q --allow-empty -m 'sub: first'
+git add -A 2>/dev/null
+git commit -q -m base
+
+git -C sub commit -q --allow-empty -m 'sub: second'
+printf 'one\nTWO\nthree\n' > 'with space.txt'
+printf 'X\n' > "$(printf 'tab\there.txt')"
+printf 'Y\n' > 'quo"te.txt'
+printf 'Ä\n' > 'umlaut-ü.txt'
+chmod +x script.sh
+printf 'bin\000ARY\n' > blob.bin
+printf '# Notes\n\n```sh\necho hi\n```\n\nchanged end\n' > notes.md
+printf 'keep\nnew' > noeol.txt
+rm deleted.txt
+git mv -f before.txt 'after it.txt'
+: > empty.txt
+git add -N empty.txt

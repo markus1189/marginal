@@ -29,7 +29,11 @@
       # price is that editing one of them rebuilds the crate. The extension's
       # node test is deliberately left out: it is checked on its own and would
       # buy a full rebuild for a file nothing at runtime reads.
-      hosts = fs.unions [ ./launchers ./.pi/extensions/marginal-annotate.ts ];
+      # launchers/test is left out for the same reason as the node test.
+      hosts = fs.unions [
+        (fs.difference ./launchers ./launchers/test)
+        ./.pi/extensions/marginal-annotate.ts
+      ];
       # typos reads prose too. Subtracting the lock files rather than listing
       # what to include means new docs are covered the day they are added.
       everything = fs.difference ./. (fs.unions [ ./Cargo.lock ./flake.lock ]);
@@ -196,10 +200,26 @@
           name = "shellcheck";
           fileset = fs.unions [ ./check ./launchers ];
           tools = [ pkgs.shellcheck pkgs.findutils ];
+          # A UTF-8 locale: shellcheck quotes the offending line in its report,
+          # and dies with "cannot encode character" on a `→` under C.
           script = ''
+            export LC_ALL=C.UTF-8
             shellcheck -x check launchers/lib/*.bash \
               $(find launchers -type f -perm -u+x | sort)
           '';
+        };
+
+        # marginal-diff against a fixture repository built in the sandbox:
+        # --dump and --dump-map against golden files, the map's invariants,
+        # and one review round trip through a stand-in tmux and marginal.
+        # Spaced, quoted and tabbed paths, binary, mode-only, empty, deleted,
+        # renamed, submodule, a markdown fence and no newline at EOF — the
+        # shapes that once rendered wrong. See launchers/test/run-regression.
+        marginal-diff = toolCheck pkgs {
+          name = "marginal-diff";
+          fileset = fs.unions [ ./launchers/claude-code-diff ./launchers/lib ./launchers/test ];
+          tools = with pkgs; [ git jq iconv ];
+          script = "bash launchers/test/run-regression";
         };
 
         # Previously skipped whenever node was absent, which was always, locally.

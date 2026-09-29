@@ -21,8 +21,9 @@ run() {
   fi
 }
 
-# fmt, clippy, test, typos, machete, taplo, deny (bans/licenses/sources) and the
-# .pi extension tests. Each is its own derivation, so nix caches and parallelises
+# fmt, clippy, test, typos, machete, taplo, deny (bans/licenses/sources), the
+# .pi extension tests, shellcheck and the marginal-diff regression against its
+# golden files. Each is its own derivation, so nix caches and parallelises
 # them: a docs-only edit is a no-op, a src edit does not re-run taplo.
 run "flake check" nix flake check --print-build-logs
 

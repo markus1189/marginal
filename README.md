@@ -786,8 +786,14 @@ a docs-only edit re-runs `typos` and nothing else.
 
 It covers: `cargo fmt --check`, `taplo` on the TOML, `cargo clippy -D
 warnings`, the test suite (via the package's check phase), `typos`, `cargo
-machete` (unused deps), `cargo deny check` for licenses/bans/provenance, and
-the `.pi` extension's node tests.
+machete` (unused deps), `cargo deny check` for licenses/bans/provenance, the
+`.pi` extension's node tests, `shellcheck` over `./check` and the launchers,
+and a `marginal-diff` regression check. That last one builds a fixture git
+repository in the sandbox (spaced, quoted and tabbed paths, binary, mode-only,
+empty, deleted, renamed, a submodule, a markdown fence, no newline at EOF) and
+compares `--dump`, `--dump-map` and a full review round trip with golden files
+in `launchers/test/golden/`. `launchers/test/run-regression` runs it outside
+nix, and `--update` rewrites the goldens.
 
 `./check` wraps that with cheapest-first ✓/✗ output and adds the one check that
 cannot run in a build sandbox: `cargo deny check advisories`, which fetches the
