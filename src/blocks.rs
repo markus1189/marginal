@@ -610,9 +610,19 @@ fn walk_child<'a>(
         // belonged to no unit at all. `block_at` then resolved a cursor on
         // those lines to the last unit above it -- the sublist's final leaf --
         // and the annotation was written against that block's lines and text.
+        //
+        // A table is cut off the same way, so its rows are units here as they
+        // are everywhere else — unless it opens on the item's own line
+        // (`- | a |`), where the trim has nowhere to go and the item keeps it
+        // whole rather than overlap its first row.
+        let first = span.start.line;
         let nested = child
             .children()
-            .find(|c| is_list(&c.data.borrow().value))
+            .find(|c| {
+                let d = c.data.borrow();
+                is_list(&d.value)
+                    || (matches!(d.value, NodeValue::Table(_)) && d.sourcepos.start.line > first)
+            })
             .map(|c| norm(c.data.borrow().sourcepos, lines).start.line);
 
         let mut s = span;
@@ -1177,13 +1187,57 @@ still para.
         assert!(!parse(src).iter().any(|b| b.kind == "blockquote"));
     }
 
+    /// Tables inside list items, in every position the item trim has to handle:
+    /// straight under the item's text, after a blank line with more item
+    /// content below it, and opening on the marker line itself.
+    const TABLES_IN_ITEMS: &[&str] = &[
+        "- x\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
+        "- x\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n\n  after\n- y\n",
+        "- | a | b |\n  |---|---|\n  | 1 | 2 |\n- y\n",
+        "1. x\n   | a | b |\n   |---|---|\n   - sub\n",
+    ];
+
+    /// A table in a list item was covered by the item's own unit, so it had no
+    /// rows to step through and `extents` — then built from row units — never
+    /// aligned it. Everywhere else a table navigates by row.
+    #[test]
+    fn a_table_in_a_list_item_navigates_by_row() {
+        assert_eq!(
+            flat(TABLES_IN_ITEMS[0]),
+            vec![
+                ("list-item", 1, 1),
+                ("table-row", 2, 3),
+                ("table-row", 4, 4)
+            ]
+        );
+        assert_eq!(
+            flat(TABLES_IN_ITEMS[1]),
+            vec![
+                ("list-item", 1, 2),
+                ("table-row", 3, 4),
+                ("table-row", 5, 5),
+                ("paragraph", 7, 7),
+                ("list-item", 8, 8)
+            ]
+        );
+        // On the marker's own line there is nothing to trim the item back to,
+        // so it keeps the table rather than overlap its first row.
+        assert_eq!(
+            flat(TABLES_IN_ITEMS[2]),
+            vec![("list-item", 1, 3), ("list-item", 4, 4)]
+        );
+    }
+
     #[test]
     fn navigation_units_never_overlap() {
         for src in [
             DOC,
             "> quote\n\n| a |\n|---|\n| 1 |\n",
             "- a\n  - b\n    - c\n",
-        ] {
+        ]
+        .into_iter()
+        .chain(TABLES_IN_ITEMS.iter().copied())
+        {
             let bs = parse(src);
             for w in bs.windows(2) {
                 assert!(
@@ -1213,6 +1267,7 @@ still para.
         ]
         .into_iter()
         .chain(MIXED_ENDINGS.iter().copied())
+        .chain(TABLES_IN_ITEMS.iter().copied())
         {
             let bs = parse(src);
             for (i, line) in source_lines(src).into_iter().enumerate() {
