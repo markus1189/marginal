@@ -74,7 +74,10 @@
         marginal = pkgs.rustPlatform.buildRustPackage {
           pname = "marginal";
           version = "0.1.0";
-          src = sourceOf (fs.unions [ crate hosts ]);
+          # README.md because `cargo test` holds the `?` overlay's key table
+          # to the README's Keys table (src/help.rs), so a README edit has to
+          # re-run it. Only this check: clippy and fmt still skip prose.
+          src = sourceOf (fs.unions [ crate hosts ./README.md ]);
           cargoLock.lockFile = ./Cargo.lock;
 
           # `share/pi/extensions` and `share/claude-code/skills` are the layouts

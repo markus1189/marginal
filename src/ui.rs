@@ -48,6 +48,8 @@ pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     if app.peek {
         draw_peek(f, chunks[0], app);
     }
+    let area = f.area();
+    crate::help::draw(f, area, app);
 }
 
 /// Colours for the markdown syntax tags produced by `highlight`.
@@ -1141,12 +1143,18 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
 /// `c comment`, not `Enter comment`, from this rung down: `c` stays bound
 /// (see the dispatch in `main.rs`) and spells the same action four cells
 /// cheaper, which is `[/] marks` nearly half paid for.
-const KEYS: [&str; 6] = [
-    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · [/] marks · Enter comment · x remove · q quit",
-    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · [/] marks · Enter comment · x remove · q quit",
-    "z peek · [/] marks · c comment · x remove · q quit",
-    "w/b · z peek · c comment · x remove · q quit",
+///
+/// `? help` took `z peek`'s place on the middle rungs, cell for cell, so no
+/// budget above moved: the overlay lists `z` and everything else, and a hint
+/// line that can name one more key should name the one that names the rest.
+/// It gets a rung of its own just above the barest, which keeps `q quit`.
+const KEYS: [&str; 7] = [
+    "hjkl move · ^d/^u/^f/^b page · J/K unit · w/b inline · v units · V lines · +/- widen/narrow · z peek · [/] marks · Enter comment · x remove · ? help · q quit",
+    "hjkl · J/K unit · w/b inline · v/V select · +/- widen · z peek · [/] marks · Enter comment · x remove · ? help · q quit",
+    "? help · [/] marks · c comment · x remove · q quit",
+    "w/b · ? help · c comment · x remove · q quit",
     "c comment · x remove · q quit",
+    "? help · q quit",
     "q quit",
 ];
 const INPUT_KEYS: [&str; 2] = ["Enter save · Esc cancel", "Enter · Esc"];
@@ -1799,6 +1807,27 @@ mod tests {
         // again without touching a line of the footer's arithmetic.
         assert!(footer_at(|_| {}, &KEYS, 80).1, "no status at 80 columns");
         assert!(footer_at(|_| {}, &KEYS, 140).1, "no status at 140 columns");
+    }
+
+    /// `q quit` is on every rung, the barest included, and `? help` reaches
+    /// every width from the second-barest rung up — at 80 columns alongside
+    /// the status field, whose budget it did not move.
+    #[test]
+    fn every_footer_rung_keeps_quit_and_most_offer_help() {
+        assert_eq!(KEYS[KEYS.len() - 1], "q quit");
+        for k in KEYS {
+            assert!(k.ends_with("q quit"), "{k}");
+        }
+        for k in &KEYS[..KEYS.len() - 1] {
+            if *k != "c comment · x remove · q quit" {
+                assert!(k.contains("? help"), "{k}");
+            }
+        }
+        let (rung, status) = footer_at(|_| {}, &KEYS, 80);
+        assert!(
+            KEYS[rung].contains("? help") && status,
+            "80 columns: rung {rung}"
+        );
     }
 
     // ---- the question mark in the gutter -----------------------------------

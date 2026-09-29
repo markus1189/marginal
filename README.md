@@ -413,7 +413,12 @@ assumes one.
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
 | `#` | steps of numbered lists in or out of the mark ring (in by default) |
 | `Esc` | drop the selection |
+| `?` | every key on this list, grouped, over the source view — `j`/`k` scroll, `?`/`Esc`/`q` close |
 | `q`, `C-c` | quit |
+
+The `?` overlay is drawn from a table in `src/help.rs`, and a test reads this
+table and fails when the two list different keys — add a binding to one and
+not the other and `cargo test` says so.
 
 A **mark** is an annotation you have written, a question the document asks that
 you have not answered yet, or a step of a numbered list you have not commented

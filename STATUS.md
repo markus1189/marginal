@@ -17,6 +17,8 @@
 - markdown syntax highlighting driven by the same AST, no extra dependency
 - multi-line comment editor with readline bindings and per-session history
 - paging keys (`C-d`/`C-u`/`C-f`/`C-b`, PgDn/PgUp)
+- a `?` overlay listing every key, drawn from a table a test holds to the
+  README's Keys table
 - comments on any selection, general comments on the whole document,
   removal, result JSON + feedback markdown, exit `0` / `1` / `2`
 - no test requires a terminal (UI covered via ratatui `TestBackend`)

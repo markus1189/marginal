@@ -9,6 +9,7 @@ mod app;
 mod blocks;
 mod editor;
 mod format;
+mod help;
 mod highlight;
 mod plain;
 mod table;
@@ -473,6 +474,15 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('k') | KeyCode::Up if !ctrl => app.scroll_peek(-1),
             _ => {}
         },
+        // The `?` overlay, like peek, swallows everything but its own keys: it
+        // covers the screen, so a key acting on what is underneath would act
+        // on something the reader cannot see.
+        Mode::Normal if app.help.is_some() => match code {
+            KeyCode::Char('?' | 'q') | KeyCode::Esc if !ctrl => app.toggle_help(),
+            KeyCode::Char('j') | KeyCode::Down if !ctrl => app.scroll_help(1),
+            KeyCode::Char('k') | KeyCode::Up if !ctrl => app.scroll_help(-1),
+            _ => {}
+        },
         // Paging. C-f/C-b keep two lines of overlap, as vim does.
         Mode::Normal if ctrl => match code {
             KeyCode::Char('d') => app.page(1, true),
@@ -529,6 +539,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // it is what a numbered item is made of, and because every letter
             // near the mark keys is spoken for.
             KeyCode::Char('#') => app.toggle_steps(),
+            KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Esc => app.clear_selection(),
             _ => {}
         },

@@ -180,6 +180,10 @@ pub struct App {
     pub peek: bool,
     /// Wrapped-row offset inside the peek overlay.
     pub peek_scroll: usize,
+    /// The `?` overlay: `None` when closed, otherwise its scroll offset in
+    /// rows, which the renderer clamps. One field rather than a bool and an
+    /// offset, because an offset for a closed overlay means nothing.
+    pub help: Option<usize>,
     /// Rows the peeked text wraps to at the current width. Published by the
     /// renderer for the same reason `viewport` is: only it knows the geometry.
     pub peek_rows: usize,
@@ -515,6 +519,7 @@ impl App {
             viewport: 20,
             peek: false,
             peek_scroll: 0,
+            help: None,
             peek_rows: 0,
             pretty: true,
             body_width: 0,
@@ -1049,6 +1054,22 @@ impl App {
             .peek_scroll
             .saturating_add_signed(delta)
             .min(self.peek_rows.saturating_sub(1));
+    }
+
+    /// `?`: open the key overlay at its top, or close it.
+    pub const fn toggle_help(&mut self) {
+        self.help = match self.help {
+            Some(_) => None,
+            None => Some(0),
+        };
+    }
+
+    /// Scroll the key overlay. Unclamped at the bottom here: `help::draw`
+    /// knows how many rows there are and pulls it back every frame.
+    pub const fn scroll_help(&mut self, delta: isize) {
+        if let Some(top) = self.help {
+            self.help = Some(top.saturating_add_signed(delta));
+        }
     }
 
     /// The text the peek overlay shows: exactly what would be quoted.
