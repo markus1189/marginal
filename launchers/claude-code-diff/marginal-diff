@@ -339,9 +339,13 @@ in_hunk {
     line($0, "ctx", oldpath, oldline, newpath, newline)
     oldline++; newline++; orem--; nrem--
   }
-  if (orem <= 0 && nrem <= 0) { in_hunk = 0; close_fence() }
+  # The fence stays open past the last counted line: when neither side ends
+  # in a newline, the new side marker comes AFTER it, and closing here used
+  # to drop it. The next @@, file or EOF closes the fence.
+  if (orem <= 0 && nrem <= 0) in_hunk = 0
   next
 }
+fence && /^\\/ { meta($0); next }
 
 # ---- structure ------------------------------------------------------------
 
