@@ -72,8 +72,9 @@ you cannot see their screen and they are busy using it.
 
 - **Exit code 2** — the gate could not run: no terminal to borrow, no binary,
   not a git repository, a combined (merge) diff, or a diff that is not valid
-  UTF-8. The message on stderr says which. Report it plainly; this is a launcher
-  failure, never a verdict on your work.
+  UTF-8, or it was interrupted before the user finished. The message on stderr
+  says which. Report it plainly; this is a launcher failure, never a verdict on
+  your work.
 
 ## The diff is a snapshot
 

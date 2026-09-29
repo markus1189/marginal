@@ -370,7 +370,7 @@ never ran". What it still cannot do is *recover* the review in the lost-write
 case, because nothing captures the popup's stdout. That is a code change and has
 not been made.
 
-Four behaviours the code has to defend against, all measured:
+Five behaviours the code has to defend against, all measured:
 
 | Behaviour | Consequence |
 |---|---|
@@ -378,6 +378,7 @@ Four behaviours the code has to defend against, all measured:
 | One popup per client — a second concurrent caller gets `rc=0` having never run | Handled by the same rule as above: no result file, no verdict, exit `2`. |
 | The popup inherits the tmux server's environment, not the caller's | The binary is passed by absolute path, and `LANG`/`LC_ALL`/`COLORTERM` are forwarded explicitly. |
 | `alacritty` does not forward its child's exit status | Nothing reads `$rc` as a verdict; it appears only in the error message when no result file exists. |
+| A popup outlives the launcher that opened it: kill the launcher (a tool timeout, Ctrl-C) and the human keeps annotating into a result nobody reads | The popup runs as a background job the launcher `wait`s on, since bash defers traps while a foreground child runs. TERM/INT/HUP exit `2`, and the exit closes the popup (`display-popup -C`) and kills the window. Measured on a nested tmux server: popup, marginal and tmux client all gone within a second, for a kill of the launcher or of its whole process group. |
 
 marginal's `0`/`1` split is deliberately not propagated to the agent: a tool call
 that exits non-zero reads as a broken command, and "the human commented" is not a

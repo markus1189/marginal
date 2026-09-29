@@ -40,8 +40,9 @@ cannot see their screen and they are busy using it.
   Acknowledge briefly and carry on with whatever you were doing. Do not re-run
   the command and do not ask them what they meant to say.
 - **Exit code 2** — the gate could not run: no terminal to borrow, no binary, no
-  transcript, no session id. The message on stderr says which. Report it plainly;
-  this is a launcher failure, never a verdict on your message.
+  transcript, no session id, or it was interrupted before the user finished.
+  The message on stderr says which. Report it plainly; this is a launcher
+  failure, never a verdict on your message.
 
 Annotations are the user's own words about your text. Treat them as
 instructions, not as suggestions to evaluate.

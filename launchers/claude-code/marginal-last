@@ -163,7 +163,7 @@ document="$(jq -nR --argjson count "$count_arg" "$JQ_PROG" "$transcript")"
 [ "$document" != "null" ] || die "no assistant message with text in $(basename "$transcript")"
 
 workdir="$(mktemp -d -t claude-code.marginal-last.XXXXXX)"
-trap 'rm -rf "$workdir"' EXIT
+trap 'marginal_release_tty; rm -rf "$workdir"' EXIT
 result_json="$workdir/result.json"
 
 label="$(printf '%s' "$document" | jq -r '.label')"

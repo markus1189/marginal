@@ -86,13 +86,37 @@ marginal_find_binary() {
 #
 # marginal_run_on_tty TITLE CMD [ARG...] — run CMD on a borrowed tty and wait
 # for it. Its status is left in MARGINAL_RC, as a diagnostic only.
+#
+# The caller's EXIT trap must call marginal_release_tty. A launcher killed
+# mid-review, by an agent's tool timeout or a Ctrl-C, used to leave the popup
+# up: the human kept annotating, and every comment went to a result file no
+# one would ever read. So the popup client runs as a background job, because
+# bash runs no trap while a foreground child is running, and TERM, INT and HUP
+# end the launcher through `die`, whose exit closes the popup and kills the
+# client. A popup that is gone takes marginal with it (SIGHUP).
 
 MARGINAL_RC=0
+MARGINAL_CHILD=""
+MARGINAL_CHILD_KIND=""
+
+marginal_release_tty() {
+  [ -n "$MARGINAL_CHILD" ] || return 0
+  if [ "$MARGINAL_CHILD_KIND" = popup ]; then
+    if [ -n "${TMUX_PANE:-}" ]; then
+      tmux display-popup -C -t "$TMUX_PANE" 2>/dev/null || true
+    else
+      tmux display-popup -C 2>/dev/null || true
+    fi
+  fi
+  kill "$MARGINAL_CHILD" 2>/dev/null || true
+  MARGINAL_CHILD=""
+}
 
 # shellcheck disable=SC2034  # MARGINAL_RC is this function's output
 marginal_run_on_tty() {
   local title="$1"; shift
   MARGINAL_RC=0
+  trap 'die "interrupted — the review was abandoned and its window closed"' TERM INT HUP
   if [ -n "${TMUX:-}" ]; then
     [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
       || die "this tmux session has no attached client — nobody could see the popup"
@@ -108,10 +132,15 @@ marginal_run_on_tty() {
     if [ -n "${LC_ALL:-}" ]; then popup+=(-e "LC_ALL=$LC_ALL"); fi
     if [ -n "${COLORTERM:-}" ]; then popup+=(-e "COLORTERM=$COLORTERM"); fi
 
-    tmux display-popup "${popup[@]}" -- "$@" || MARGINAL_RC=$?
+    tmux display-popup "${popup[@]}" -- "$@" &
+    MARGINAL_CHILD=$! MARGINAL_CHILD_KIND=popup
   elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v alacritty >/dev/null; then
-    alacritty --title "marginal · $title" -e "$@" || MARGINAL_RC=$?
+    alacritty --title "marginal · $title" -e "$@" &
+    MARGINAL_CHILD=$! MARGINAL_CHILD_KIND=window
   else
     die "no way to reach a terminal — run Claude Code inside tmux, or install alacritty"
   fi
+  wait "$MARGINAL_CHILD" || MARGINAL_RC=$?
+  MARGINAL_CHILD=""
+  trap - TERM INT HUP
 }

@@ -136,7 +136,7 @@ toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=""
 # ERR trap is correct to take it.
 
 workdir="$(mktemp -d -t claude-code.marginal-diff.XXXXXX)"
-trap 'rm -rf "$workdir"' EXIT
+trap 'marginal_release_tty; rm -rf "$workdir"' EXIT
 raw="$workdir/raw.diff"
 doc="$workdir/git diff.md"          # the space is deliberate: --label shows it
 map="$workdir/map"
