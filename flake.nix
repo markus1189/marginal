@@ -79,6 +79,7 @@
           # re-run it. Only this check: clippy and fmt still skip prose.
           src = sourceOf (fs.unions [ crate hosts ./README.md ]);
           cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
 
           # `share/pi/extensions` and `share/claude-code/skills` are the layouts
           # both hosts already auto-discover, so installing is one symlink per
@@ -114,6 +115,20 @@
               $out/share/claude-code/skills/marginal-diff/marginal-diff \
               --replace-fail '@marginalLaunchLib@' \
                 "$out/share/claude-code/lib/marginal-launch.bash"
+
+            # Everything the launchers call, so a bare `nix profile install`
+            # works on a machine without jq or gawk. --suffix, not --prefix:
+            # the user's own tools still win, and above all their own tmux —
+            # a tmux client of another version than the running server fails
+            # with a protocol mismatch, which is worse than any fallback.
+            wrapProgram $out/share/claude-code/skills/marginal-last/marginal-last \
+              --suffix PATH : ${pkgs.lib.makeBinPath (with pkgs; [
+                jq coreutils tmux
+              ])}
+            wrapProgram $out/share/claude-code/skills/marginal-diff/marginal-diff \
+              --suffix PATH : ${pkgs.lib.makeBinPath (with pkgs; [
+                git jq gawk iconv coreutils gnugrep gnused tmux
+              ])}
           '';
         };
         default = marginal;

@@ -118,6 +118,8 @@ marginal_run_on_tty() {
   MARGINAL_RC=0
   trap 'die "interrupted — the review was abandoned and its window closed"' TERM INT HUP
   if [ -n "${TMUX:-}" ]; then
+    # Otherwise the list-clients probe below fails and says "no attached client"
+    command -v tmux >/dev/null || die "\$TMUX is set but tmux is not on PATH"
     [ -n "$(tmux list-clients -t "${TMUX_PANE:-}" -F '#{client_tty}' 2>/dev/null)" ] \
       || die "this tmux session has no attached client — nobody could see the popup"
 

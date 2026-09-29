@@ -97,8 +97,12 @@ done
 # just staged. HEAD is the honest default for "what has changed".
 [ ${#git_args[@]} -gt 0 ] || git_args=(HEAD)
 
-command -v jq  >/dev/null || die "jq is required"
-command -v git >/dev/null || die "git is required"
+# Each by name, up front: a missing iconv used to surface as "this diff is not
+# valid UTF-8", and a missing awk as a bash error about an invalid number. The
+# packaged launcher carries all of them on its PATH as a fallback.
+for tool in jq git awk iconv; do
+  command -v "$tool" >/dev/null || die "$tool is required but not on PATH"
+done
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 # git names every path relative to the top of the working tree, whatever the
 # current directory. The feedback says so and names the root, because an agent

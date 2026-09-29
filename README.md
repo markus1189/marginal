@@ -219,6 +219,14 @@ The two bash launchers share one file, `launchers/lib/marginal-launch.bash`:
 the binary lookup and the tty borrowing below. They source it, from
 `../lib/` in a checkout and from its store path once packaged.
 
+The packaged launchers are wrapped (`makeWrapper --suffix PATH`) with
+everything they call: jq, git, gawk, iconv, coreutils, grep, sed and tmux. A
+bare install works on a machine that has none of them. It's a suffix, so your
+own tools still come first, above all your own tmux: a tmux client of a
+different version than the running server fails with a protocol mismatch. In
+a checkout, a missing tool is named on stderr instead of surfacing as a
+misleading error. A missing `iconv` used to report "not valid UTF-8".
+
 Each of the three looks its binary up as `$MARGINAL_BIN`, then
 `<repo>/target/release/marginal`, then the absolute path baked in at install
 time, then `marginal` on `PATH`. The repo build wins in a checkout, so you
