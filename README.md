@@ -408,6 +408,8 @@ assumes one.
 | `Enter` (also `c`) | comment on the selection |
 | `C` | general comment — on the whole document, quoting nothing |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
+| `e` | edit that same annotation: its text reopens in the comment editor; `Enter` keeps its id and span, `Esc` leaves it as it was, and saving it **empty removes it** |
+| `E` | edit the most recent **general** comment, by the same rules — emptying it is how a general comment is removed, since it sits on no line for `x` to find |
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
 | `#` | steps of numbered lists in or out of the mark ring (in by default) |
 | `Esc` | drop the selection |

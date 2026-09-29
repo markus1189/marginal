@@ -79,7 +79,6 @@ impl Editor {
         out
     }
 
-    #[cfg(test)]
     pub fn set(&mut self, s: &str) {
         self.text = s.to_string();
         self.cursor = self.text.len();

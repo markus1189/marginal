@@ -34,6 +34,9 @@ pub enum Target {
     Selection,
     /// A comment on the document as a whole — `C`. Quotes nothing.
     General,
+    /// New text for the annotation with this id — `e` / `E`. Its id, span and
+    /// quote stay; only `text` changes.
+    Edit(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1085,10 +1088,63 @@ impl App {
         self.editor.start_fresh();
     }
 
+    /// The most recent annotation on the cursor's line — exactly the one `x`
+    /// would remove, so the two keys never disagree about which one you mean.
+    fn line_annotation_at_cursor(&self) -> Option<usize> {
+        let line = self.cursor.line;
+        self.annotations
+            .iter()
+            .rposition(|a| !a.is_general() && line >= a.start_line && line <= a.end_line)
+    }
+
+    /// Reopen annotation `i` in the comment editor with its text in place.
+    fn begin_edit(&mut self, i: usize) {
+        let text = self.annotations[i].text.clone();
+        self.target = Target::Edit(self.annotations[i].id.clone());
+        self.mode = Mode::Input;
+        self.editor.start_fresh();
+        self.editor.set(&text);
+    }
+
+    /// `e`: edit the annotation on the cursor's line — the most recent one if
+    /// several overlap, the same rule as `x`.
+    pub fn edit_at_cursor(&mut self) {
+        match self.line_annotation_at_cursor() {
+            Some(i) => self.begin_edit(i),
+            None => self.status = "no annotation here".into(),
+        }
+    }
+
+    /// `E`: edit the most recent general comment. General comments sit on no
+    /// line, so `e` cannot reach them and `x` must not; this is their way in,
+    /// and emptying the text is their way out.
+    pub fn edit_general(&mut self) {
+        match self.annotations.iter().rposition(Annotation::is_general) {
+            Some(i) => self.begin_edit(i),
+            None => self.status = "no general comment".into(),
+        }
+    }
+
     /// What the comment box is about to comment on, for its title.
     pub fn input_subject(&self) -> String {
-        if self.target == Target::General {
-            return "general comment on the whole document".into();
+        match &self.target {
+            Target::General => return "general comment on the whole document".into(),
+            Target::Edit(id) => {
+                let Some(a) = self.annotations.iter().find(|a| &a.id == id) else {
+                    return format!("edit {id}");
+                };
+                return if a.is_general() {
+                    format!("edit {id}, general comment")
+                } else if a.start_line == a.end_line {
+                    format!("edit {id} on {} L{}", a.block_kind, a.start_line)
+                } else {
+                    format!(
+                        "edit {id} on {} L{}-{}",
+                        a.block_kind, a.start_line, a.end_line
+                    )
+                };
+            }
+            Target::Selection => {}
         }
         let range = match self.selection() {
             Some(s) if s.start.line == s.end.line && s.start.col == 1 => {
@@ -1107,6 +1163,10 @@ impl App {
         let text = trim_blank_lines(self.editor.text()).to_string();
         self.mode = Mode::Normal;
         let target = std::mem::replace(&mut self.target, Target::Selection);
+        if let Target::Edit(id) = target {
+            self.commit_edit(&id, text);
+            return;
+        }
         if text.is_empty() {
             self.editor.start_fresh();
             self.status = "empty comment discarded".into();
@@ -1152,6 +1212,25 @@ impl App {
         self.status = format!("{} annotation(s)", self.annotations.len());
     }
 
+    /// Replace annotation `id`'s text, keeping its id and span. Emptying it
+    /// removes it: the editor already treats an empty comment as "nothing to
+    /// say", and it is the only removal a general comment has.
+    fn commit_edit(&mut self, id: &str, text: String) {
+        let Some(i) = self.annotations.iter().position(|a| a.id == id) else {
+            self.editor.start_fresh();
+            return;
+        };
+        if text.is_empty() {
+            self.editor.start_fresh();
+            self.annotations.remove(i);
+            self.status = format!("{id} emptied — removed");
+            return;
+        }
+        self.editor.submit();
+        self.annotations[i].text = text;
+        self.status = format!("{id} updated");
+    }
+
     pub fn cancel_input(&mut self) {
         self.mode = Mode::Normal;
         self.target = Target::Selection;
@@ -1160,12 +1239,7 @@ impl App {
     }
 
     pub fn remove_at_cursor(&mut self) {
-        let line = self.cursor.line;
-        let hit = self
-            .annotations
-            .iter()
-            .rposition(|a| !a.is_general() && line >= a.start_line && line <= a.end_line);
-        match hit {
+        match self.line_annotation_at_cursor() {
             Some(i) => {
                 self.annotations.remove(i);
                 self.status = "annotation removed".into();
@@ -3036,6 +3110,119 @@ https://example.dev/a/very/long/path in it as well.
         general(&mut a, "  ");
         assert_eq!(a.annotations.len(), 1);
         assert_eq!(a.target, Target::Selection);
+    }
+
+    /// `e` reopens the annotation `x` would remove, prefilled; `Enter` keeps
+    /// its id, span and quote and changes only the text.
+    #[test]
+    fn editing_replaces_the_text_and_keeps_id_and_span() {
+        let mut a = app();
+        a.move_block(1);
+        commit(&mut a, "older");
+        a.move_block(1);
+        a.move_block(-1);
+        a.toggle_lines();
+        commit(&mut a, "newer on the same line");
+        let before: Vec<Annotation> = a.annotations.clone();
+
+        a.edit_at_cursor();
+        assert_eq!(a.mode, Mode::Input);
+        assert_eq!(a.editor.text(), "newer on the same line", "prefilled");
+        assert!(
+            a.input_subject().starts_with("edit a2"),
+            "{}",
+            a.input_subject()
+        );
+        a.editor.set("  rewritten\n  twice");
+        a.commit_comment();
+
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.annotations.len(), 2);
+        let (old, new) = (&before[1], &a.annotations[1]);
+        assert_eq!(new.id, old.id);
+        assert_eq!(
+            (new.start_line, new.start_col, new.end_line, new.end_col),
+            (old.start_line, old.start_col, old.end_line, old.end_col)
+        );
+        assert_eq!(new.original_text, old.original_text);
+        assert_eq!(new.text, "  rewritten\n  twice");
+        assert_eq!(a.annotations[0].text, "older", "the other one is untouched");
+        assert_eq!(a.status, "a2 updated");
+        assert_eq!(a.target, Target::Selection);
+    }
+
+    #[test]
+    fn cancelling_an_edit_leaves_the_annotation_as_it_was() {
+        let mut a = app();
+        commit(&mut a, "keep me");
+        a.edit_at_cursor();
+        a.editor.set("half-typed replacement");
+        a.cancel_input();
+        assert_eq!(a.annotations[0].text, "keep me");
+        assert_eq!(a.target, Target::Selection);
+        // …and the next plain comment is a new annotation, not an edit.
+        a.move_block(1);
+        commit(&mut a, "fresh");
+        assert_eq!(a.annotations.len(), 2);
+    }
+
+    #[test]
+    fn emptying_an_annotation_removes_it_and_says_so() {
+        let mut a = app();
+        commit(&mut a, "doomed");
+        a.edit_at_cursor();
+        a.editor.set(" \n ");
+        a.commit_comment();
+        assert!(a.annotations.is_empty());
+        assert_eq!(a.status, "a1 emptied — removed");
+    }
+
+    #[test]
+    fn edit_finds_nothing_where_x_finds_nothing() {
+        let mut a = app();
+        a.edit_at_cursor();
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.status, "no annotation here");
+        a.edit_general();
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.status, "no general comment");
+    }
+
+    /// General comments are on no line, so `e` and `x` cannot reach them:
+    /// `E` edits the newest one, and emptying it is how one is removed.
+    #[test]
+    fn a_general_comment_is_edited_and_removed_through_capital_e() {
+        let mut a = app();
+        general(&mut a, "first thought");
+        general(&mut a, "second thought");
+        commit(&mut a, "on the heading");
+
+        a.edit_at_cursor();
+        assert_eq!(
+            a.editor.text(),
+            "on the heading",
+            "`e` edits the line's own"
+        );
+        a.cancel_input();
+
+        a.edit_general();
+        assert_eq!(a.editor.text(), "second thought");
+        assert!(
+            a.input_subject().contains("general"),
+            "{}",
+            a.input_subject()
+        );
+        a.editor.set("second, revised");
+        a.commit_comment();
+        assert_eq!(a.annotations[1].text, "second, revised");
+        assert!(a.annotations[1].is_general());
+
+        a.edit_general();
+        a.editor.set("");
+        a.commit_comment();
+        assert_eq!(a.annotations.len(), 2);
+        a.edit_general();
+        assert_eq!(a.editor.text(), "first thought", "then the one before");
     }
 
     #[test]

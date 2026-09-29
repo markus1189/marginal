@@ -2079,6 +2079,22 @@ mod tests {
         assert!(render(&mut app, 120, 24).contains("1 annotations"));
     }
 
+    /// `e` reopens the comment box on the annotation's own text, and the title
+    /// names which annotation is being rewritten rather than the selection.
+    #[test]
+    fn editing_shows_the_old_text_and_names_the_annotation() {
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
+        app.begin_comment();
+        app.editor.set("first draft of a note");
+        app.commit_comment();
+        app.edit_at_cursor();
+        for w in [60, 80, 120] {
+            let screen = render(&mut app, w, 24);
+            assert!(screen.contains(" edit a1 on heading L1 "), "{w}: {screen}");
+            assert!(screen.contains("first draft of a note"), "{w}: {screen}");
+        }
+    }
+
     // ---- the scrollbar -----------------------------------------------------
 
     /// Track cells carrying the thumb, as offsets from the top of the track —

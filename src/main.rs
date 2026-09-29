@@ -517,6 +517,9 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // Capital for the document-level variant of the same action.
             KeyCode::Char('C') => app.begin_general(),
             KeyCode::Char('x') => app.remove_at_cursor(),
+            // Edit in place: the line's annotation, or the newest general one.
+            KeyCode::Char('e') => app.edit_at_cursor(),
+            KeyCode::Char('E') => app.edit_general(),
             // `]`/`[` rather than `n`/`N`: search will want those, and vim
             // already spells "next/previous change hunk" with brackets.
             KeyCode::Char(']') => app.goto_mark(1),
