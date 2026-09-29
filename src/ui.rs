@@ -1133,12 +1133,19 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
                         format!(" {} ", if annotation_here(app, i) { "▸" } else { " " }),
                         Style::default().fg(Color::Yellow),
                     ),
+                    // Each column is padded to 13 and then always given a
+                    // space of its own. Padding to 14 with nothing after it ran
+                    // a column that filled it straight into the next: a block
+                    // selection's kind is `list-item..list-item`, and the row
+                    // read `list-item..list-itemmerge these bullets`. The
+                    // location is never cut — it is how an entry is found —
+                    // but the kind is, since its head says which it is.
                     Span::styled(
-                        format!("{} {:<14}", i + 1, loc),
+                        format!("{} {:<13} ", i + 1, loc),
                         Style::default().fg(Color::Magenta),
                     ),
                     Span::styled(
-                        format!("{:<14}", a.block_kind),
+                        format!("{:<13} ", ellipsize(&a.block_kind, 13)),
                         Style::default().fg(Color::DarkGray),
                     ),
                     // The editor advertises C-j, so a comment can be several
@@ -1328,22 +1335,23 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let field = usize::from(status_w).saturating_sub(1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("{:>field$} ", fit_status(&app.status, field)),
+            format!("{:>field$} ", ellipsize(&app.status, field)),
             Style::default().fg(Color::Cyan),
         )),
         cols[1],
     );
 }
 
-/// `status` cut to `max` cells, with `…` marking the cut. The head is kept: a
-/// status says what just happened first and adds detail after.
-fn fit_status(status: &str, max: usize) -> String {
-    if cells_drawn(status) <= max {
-        return status.to_string();
+/// `s` cut to `max` cells, with `…` marking the cut. The head is kept: a
+/// status says what just happened first and adds detail after, and a block
+/// kind is recognisable from its first few letters.
+fn ellipsize(s: &str, max: usize) -> String {
+    if cells_drawn(s) <= max {
+        return s.to_string();
     }
     let mut out = String::new();
     let mut w = 0;
-    for g in status.graphemes(true) {
+    for g in s.graphemes(true) {
         let gw = cells_drawn(g);
         if w + gw + 1 > max {
             break;
@@ -3752,10 +3760,37 @@ mod tests {
     }
 
     #[test]
-    fn fit_status_cuts_by_cells_and_marks_the_cut() {
-        assert_eq!(fit_status("short", 10), "short");
-        assert_eq!(fit_status("abcdefghij", 5), "abcd…");
-        assert_eq!(fit_status("日本語テキスト", 5), "日本…");
-        assert_eq!(fit_status("abc", 0), "");
+    fn ellipsize_cuts_by_cells_and_marks_the_cut() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("abcdefghij", 5), "abcd…");
+        assert_eq!(ellipsize("日本語テキスト", 5), "日本…");
+        assert_eq!(ellipsize("abc", 0), "");
+    }
+
+    /// A two-block selection's kind is `list-item..list-item`, twenty
+    /// characters in a column padded to fourteen with nothing after it, so the
+    /// pane read `list-item..list-itemmerge these bullets`. Each column now
+    /// ends in a space of its own, and an over-long kind is cut with `…`.
+    ///
+    /// No existing test annotated a multi-block selection and then looked at
+    /// the pane: the pane tests all annotate single paragraphs.
+    #[test]
+    fn the_annotation_columns_never_run_into_the_comment() {
+        let src = "- one\n- two\n\nL1234 is far away\n";
+        let mut app = App::open("l.md".into(), src, Format::Markdown);
+        app.toggle_blocks();
+        app.move_block(1);
+        app.begin_comment();
+        app.editor.set("merge these bullets");
+        app.commit_comment();
+        assert_eq!(app.annotations[0].block_kind, "list-item..list-item");
+        for w in [80u16, 95, 120] {
+            let rows = annotation_rows(&render_buf(&mut app, w, 24));
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains("list-item..l… merge these bullets")),
+                "width {w}: {rows:?}"
+            );
+        }
     }
 }
