@@ -137,7 +137,11 @@ impl Tables {
             if texts.len() != to + 1 - from {
                 continue;
             }
-            let Some(padding) = align(&texts) else {
+            let starts: Vec<usize> = (from..=to)
+                .zip(&texts)
+                .map(|(l, t)| content_start(t, l, blocks))
+                .collect();
+            let Some(padding) = align(&texts, &starts) else {
                 continue;
             };
             for (i, p) in padding.into_iter().enumerate() {
@@ -219,6 +223,28 @@ fn extents(lines: &[String], blocks: &[Block]) -> Vec<(usize, usize)> {
     out
 }
 
+/// Byte offset at which line `line`'s table row begins — everything before it
+/// is the container the table sits in, not a cell.
+///
+/// A row comrak built a node for says so itself: its unit starts at the row's
+/// first byte, past `> `, a list item's indent or a footnote's `[^1]: `. The
+/// delimiter row has no node, and only container chrome can precede it — a
+/// quote marker or whitespace, since it can never share a line with a list
+/// marker or a footnote label, both of which open on the header's line.
+///
+/// Reading the row from byte 0 instead counted `> ` as a first cell, so a
+/// quoted delimiter row had a non-rule first cell, `is_delimiter` said no, and
+/// the table was never aligned.
+fn content_start(text: &str, line: usize, blocks: &[Block]) -> usize {
+    blocks
+        .iter()
+        .find(|b| b.kind == "table-row" && b.start() == line)
+        .map_or_else(
+            || text.len() - text.trim_start_matches(['>', ' ']).len(),
+            |b| (b.span.start.col - 1).min(text.len()),
+        )
+}
+
 /// Byte offsets of the `|` that separate cells. A backslash escapes the next
 /// character, which is the only way GFM lets a pipe be content.
 ///
@@ -267,16 +293,17 @@ fn cell(line: &str, a: usize, b: usize, closed: bool) -> Cell {
     }
 }
 
-fn row_cells(line: &str) -> Vec<Cell> {
-    let bars = bars(line);
+/// The cells of `line`'s row, which begins at byte `from`.
+fn row_cells(line: &str, from: usize) -> Vec<Cell> {
+    let bars: Vec<usize> = bars(&line[from..]).into_iter().map(|b| b + from).collect();
     let Some((&first, &last)) = bars.first().zip(bars.last()) else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(bars.len() + 1);
     // Text before the first bar is a column only when the row opens without
     // one. `  | a |` has indentation, not a first cell.
-    if !line[..first].trim().is_empty() {
-        out.push(cell(line, 0, first, true));
+    if !line[from..first].trim().is_empty() {
+        out.push(cell(line, from, first, true));
     }
     for w in bars.windows(2) {
         out.push(cell(line, w[0] + 1, w[1], true));
@@ -359,8 +386,12 @@ fn pads_for(text: &str, cells_of: &[Cell], delim: bool, g: &Grid) -> Vec<Pad> {
 
 /// The padding for every line of one table, or `None` when there is nothing to
 /// align — no delimiter row, or a table already laid out by hand.
-fn align(texts: &[String]) -> Option<Vec<Option<Padding>>> {
-    let rows: Vec<Vec<Cell>> = texts.iter().map(|t| row_cells(t)).collect();
+fn align(texts: &[String], starts: &[usize]) -> Option<Vec<Option<Padding>>> {
+    let rows: Vec<Vec<Cell>> = texts
+        .iter()
+        .zip(starts)
+        .map(|(t, &from)| row_cells(t, from))
+        .collect();
     let delim = rows
         .iter()
         .enumerate()
@@ -544,12 +575,8 @@ mod tests {
     /// delimiter row and padded the quoted rows to the outer grid, giving the
     /// quoted delimiter row space padding instead of its own rule.
     ///
-    /// The quoted table is never aligned *at all* — `row_cells` reads the `> `
-    /// before the first pipe as a first cell, so `is_delimiter` finds no rule
-    /// row and `align` bails — so there is no inner grid to assert on here. The
-    /// rows are deliberately of unequal width to keep that from looking like
-    /// one: what is pinned is that they come out of the renderer untouched, and
-    /// that `extents` hands `align` two tables rather than one.
+    /// Pinned here: `extents` hands `align` two tables rather than one, and the
+    /// quoted one keeps its markers and its own rule.
     #[test]
     fn a_quoted_table_is_not_merged_into_the_one_above_it() {
         let src =
@@ -570,6 +597,52 @@ mod tests {
             "rule padded with spaces: {:?}",
             out[4]
         );
+        // …and is aligned to its own grid, not left ragged.
+        assert_pipes_line_up(&out[3..]);
+    }
+
+    fn assert_pipes_line_up(out: &[String]) {
+        let bars: Vec<Vec<usize>> = out.iter().map(|l| super::bars(l)).collect();
+        assert!(bars.windows(2).all(|w| w[0] == w[1]), "{out:#?}");
+    }
+
+    /// `row_cells` read every line from byte 0, so the `> ` in front of a
+    /// quoted row was a first cell. On the delimiter row that cell is not a
+    /// rule, `is_delimiter` said no, and `align` gave up: a table inside a
+    /// blockquote rendered exactly as typed at every width. The same went for
+    /// a table opening on a footnote label's line, whose first "cell" was
+    /// `[^1]: `. A row now begins where comrak says its node begins.
+    #[test]
+    fn a_table_inside_a_container_is_aligned_from_its_first_pipe() {
+        for src in [
+            "> | a | bbbb |\n> |---|---|\n> | ccccc | d |\n",
+            ">| a | bbbb |\n> |---|---|\n>  | ccccc | d |\n",
+            "> > | a | bbbb |\n> > |---|---|\n> > | ccccc | d |\n",
+            "> a | bbbb\n> ---|---\n> ccccc | d\n",
+            "x[^1]\n\n[^1]: | a | bbbb |\n      |---|---|\n      | ccccc | d |\n",
+        ] {
+            let out = render(src, 80);
+            let lines: Vec<&str> = src.lines().collect();
+            assert_ne!(out, lines, "left unaligned: {src:?}");
+            // Aligned means every row's pipes sit at the same offsets past its
+            // container chrome. The chrome itself may differ row to row and is
+            // never touched: insertion only.
+            let mut pipes = Vec::new();
+            for (o, i) in out.iter().zip(&lines) {
+                if !i.contains('|') {
+                    continue;
+                }
+                let n = i.len() - i.trim_start_matches(['>', ' ']).len();
+                let chrome = if i.starts_with("[^") {
+                    "[^1]: "
+                } else {
+                    &i[..n]
+                };
+                assert!(o.starts_with(chrome), "{o:?} lost {chrome:?}");
+                pipes.push(super::bars(&o[chrome.len()..]));
+            }
+            assert!(pipes.windows(2).all(|w| w[0] == w[1]), "{out:#?}");
+        }
     }
 
     /// GFM allows a table row up to three spaces of indentation and comrak
