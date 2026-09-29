@@ -26,20 +26,39 @@ MARGINAL_PACKAGED_BIN="@marginalBin@"
 # ---------------------------------------------------------------- binary
 #
 # $MARGINAL_BIN  →  <repo>/target/release/marginal  →  the packaged binary
-# →  `marginal` on PATH.  Prints the one chosen.
+# →  `marginal` on PATH.  Prints the first one that actually runs.
+#
+# "Actually runs", not `-x`. A repo build linked against a nix glibc keeps its
+# mode bits after a garbage collection deletes that glibc's loader, and then
+# exec fails with ENOENT. `-x` chose it anyway, over a working marginal
+# further down the list, and the review died in the popup with rc=126.
+# `--help` needs no tty and exits 0, so it is the cheapest honest probe.
+
+marginal_runs() {
+  [ -f "$1" ] && [ -x "$1" ] && "$1" --help >/dev/null 2>&1 </dev/null
+}
 
 marginal_find_binary() {
-  if [ -n "${MARGINAL_BIN:-}" ] && [ -x "${MARGINAL_BIN}" ]; then
-    printf '%s\n' "$MARGINAL_BIN"
-  elif [ -x "$MARGINAL_LIB_DIR/../../target/release/marginal" ]; then
-    printf '%s\n' "$MARGINAL_LIB_DIR/../../target/release/marginal"
-  elif [ -x "$MARGINAL_PACKAGED_BIN" ]; then
-    printf '%s\n' "$MARGINAL_PACKAGED_BIN"
-  elif command -v marginal >/dev/null; then
-    command -v marginal
-  else
-    die "marginal not found — build it (cargo build --release) or set \$MARGINAL_BIN"
-  fi
+  local candidate skipped=""
+  for candidate in \
+      "${MARGINAL_BIN:-}" \
+      "$MARGINAL_LIB_DIR/../../target/release/marginal" \
+      "$MARGINAL_PACKAGED_BIN" \
+      "$(command -v marginal || true)"; do
+    [ -n "$candidate" ] || continue
+    if marginal_runs "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    # Only a file that is there and does not run is worth mentioning; the
+    # sentinel and an absent repo build are the normal case.
+    if [ -e "$candidate" ]; then
+      printf '%s: skipping %s: it is there but does not run (a stale build?)\n' \
+        "${0##*/}" "$candidate" >&2
+      skipped=" (skipped: $candidate)"
+    fi
+  done
+  die "marginal not found$skipped — build it (cargo build --release) or set \$MARGINAL_BIN"
 }
 
 # ---------------------------------------------------------------- the tty

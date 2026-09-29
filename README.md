@@ -228,6 +228,12 @@ derivation and therefore one version. The sentinel is `@marginalBin@` and the
 flake substitutes it with `--replace-fail`, so renaming it breaks the build
 instead of shipping a launcher that cannot find anything.
 
+A candidate is taken only if it actually runs (`marginal --help` exits 0), not
+merely because it is executable. A repo build linked against a nix glibc
+keeps its `x` bit after a garbage collection deletes that glibc's loader, and
+exec then fails with ENOENT. A candidate that exists but doesn't run is
+skipped with a warning on stderr.
+
 ### pi — `/marginal`
 
 `.pi/extensions/marginal-annotate.ts` registers `/marginal` in
