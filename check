@@ -31,7 +31,9 @@ run "flake check" nix flake check --print-build-logs
 # has no network. Pinning the database is not an option either — cargo-deny
 # locates it through a hashed db-path directory that is an internal detail.
 # So advisories are checked here and in the scheduled CI job, not per-build.
-run "advisories" nix develop --command cargo deny check advisories
+# cargo-deny and cargo from the flake's pinned nixpkgs, not the whole dev shell.
+run "advisories" nix shell --inputs-from . nixpkgs#cargo-deny nixpkgs#cargo \
+  --command cargo deny check advisories
 
 if [[ $fail -eq 0 ]]; then
   printf '\n\033[32m\033[1mall checks passed\033[0m\n'

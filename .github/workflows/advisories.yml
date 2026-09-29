@@ -20,4 +20,9 @@ jobs:
     # changing, which is the entire point of running it on a schedule:
     # deny.toml carries `ignore = []`, so a new advisory against a pinned
     # dependency turns it red the day it lands.
-    - run: nix develop --command cargo deny check advisories
+    #
+    # cargo-deny and the cargo it shells out to for `cargo metadata`, from
+    # the flake's own pinned nixpkgs — not the whole dev shell, which also
+    # fetched rustc, clippy, rust-analyzer, node and cargo-mutants to run
+    # one command.
+    - run: nix shell --inputs-from . nixpkgs#cargo-deny nixpkgs#cargo --command cargo deny check advisories
