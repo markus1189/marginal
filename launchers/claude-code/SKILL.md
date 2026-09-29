@@ -13,7 +13,7 @@ Run — **with a 1800000 ms timeout**, because the command blocks for as long as
 the user is reading, and the 60 s default would kill the session mid-annotation:
 
 ```bash
-/home/markus/.claude/skills/marginal-last/marginal-last [N|all]
+${CLAUDE_SKILL_DIR}/marginal-last [N|all]
 ```
 
 Pass the skill's argument straight through: nothing for the last message, `N`

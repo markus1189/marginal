@@ -14,7 +14,7 @@ Run — **with a 1800000 ms timeout**, because the command blocks for as long as
 the user is reading, and the 60 s default would kill the session mid-review:
 
 ```bash
-/home/markus/.claude/skills/marginal-diff/marginal-diff [GIT-DIFF-ARGS...]
+${CLAUDE_SKILL_DIR}/marginal-diff [GIT-DIFF-ARGS...]
 ```
 
 Every argument is passed through to `git diff` unchanged. With none, it reviews
