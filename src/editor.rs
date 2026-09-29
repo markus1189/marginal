@@ -186,6 +186,44 @@ impl Editor {
         self.cursor = self.line_end();
     }
 
+    /// Up: to the row above, at the same column counted in characters, or at
+    /// that row's end if it is shorter. `false` on the first row, where there
+    /// is no row to go to — the caller falls back to the history there, as
+    /// fish and readline's multi-line mode do.
+    pub fn up(&mut self) -> bool {
+        let start = self.line_start();
+        if start == 0 {
+            return false;
+        }
+        let col = self.text[start..self.cursor].chars().count();
+        let above = self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+        self.cursor = self.at_column(above, start - 1, col);
+        true
+    }
+
+    /// Down: the mirror of `up`; `false` on the last row.
+    pub fn down(&mut self) -> bool {
+        let end = self.line_end();
+        if end == self.text.len() {
+            return false;
+        }
+        let col = self.text[self.line_start()..self.cursor].chars().count();
+        let below = end + 1;
+        let below_end = self.text[below..]
+            .find('\n')
+            .map_or(self.text.len(), |i| below + i);
+        self.cursor = self.at_column(below, below_end, col);
+        true
+    }
+
+    /// The byte index of character `col` in the row `start..end`, or `end`.
+    fn at_column(&self, start: usize, end: usize, col: usize) -> usize {
+        self.text[start..end]
+            .char_indices()
+            .nth(col)
+            .map_or(end, |(i, _)| start + i)
+    }
+
     /// `M-b`
     pub fn word_left(&mut self) {
         let mut i = self.cursor;
@@ -865,6 +903,40 @@ mod tests {
         e.history_prev();
         assert!(!e.cancel());
         assert_eq!(e.history, ["same"]);
+    }
+
+    /// Up/Down keep the column, clamp to a shorter row, count characters
+    /// rather than bytes, and report `false` at the edges instead of moving.
+    #[test]
+    fn up_and_down_move_between_rows_and_stop_at_the_edges() {
+        let mut e = ed("first row\nab\nthird row", 21); // "third ro|w"
+        assert!(e.up());
+        assert_eq!(
+            show(&e),
+            "first row\nab|\nthird row",
+            "clamped to the row end"
+        );
+        assert!(e.up());
+        assert_eq!(show(&e), "fi|rst row\nab\nthird row");
+        assert!(!e.up(), "moved above the first row");
+        assert_eq!(show(&e), "fi|rst row\nab\nthird row");
+        assert!(e.down());
+        assert!(e.down());
+        assert_eq!(show(&e), "first row\nab\nth|ird row");
+        assert!(!e.down(), "moved below the last row");
+
+        // Characters, not bytes: two umlauts are two columns, four bytes.
+        let mut e = ed("äöx\nabc", 4); // "äö|x"
+        assert!(e.down());
+        assert_eq!(show(&e), "äöx\nab|c");
+        assert!(e.up());
+        assert_eq!(show(&e), "äö|x\nabc");
+
+        // Empty rows are rows.
+        let mut e = ed("a\n\nb", 4);
+        assert!(e.up());
+        assert_eq!(show(&e), "a\n|\nb");
+        assert!(!Editor::default().up() && !Editor::default().down());
     }
 
     #[test]

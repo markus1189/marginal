@@ -887,8 +887,21 @@ fn handle_key(app: &mut App, k: KeyEvent) {
                 KeyCode::Right => e.right(),
                 KeyCode::Home => e.home(),
                 KeyCode::End => e.end(),
-                KeyCode::Up => e.history_prev(),
-                KeyCode::Down => e.history_next(),
+                // A row up or down while there is one; the history only from
+                // the first or last row. Up/Down used to be history alone, so
+                // in a multi-line comment the arrow meant to reach the row
+                // above swapped the whole buffer for an older comment. `C-p`
+                // and `C-n` stay pure history.
+                KeyCode::Up => {
+                    if !e.up() {
+                        e.history_prev();
+                    }
+                }
+                KeyCode::Down => {
+                    if !e.down() {
+                        e.history_next();
+                    }
+                }
 
                 // Anything else with a modifier is a chord we do not bind, not
                 // text to insert. `unbound` covers ALT and the exotic three;
@@ -1971,6 +1984,47 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.annotations.len(), 2);
         assert_eq!(app.annotations[1].text, INPUT_TEXT);
+    }
+
+    /// Up in a multi-line comment recalled an older comment over the whole
+    /// buffer instead of going to the row above. Now the arrows walk the rows
+    /// and reach the history only from the first or last one; `C-p`/`C-n`
+    /// are still the history from anywhere.
+    #[test]
+    fn up_and_down_walk_the_rows_before_the_history() {
+        let plain = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut app = editing();
+        app.editor.set("row one\nrow two\nrow three");
+        handle_key(&mut app, plain(KeyCode::Up));
+        assert_eq!(
+            app.editor.row_col(),
+            (1, 7),
+            "Up did not go to the row above"
+        );
+        handle_key(&mut app, plain(KeyCode::Up));
+        assert_eq!(app.editor.row_col(), (0, 7));
+        assert_eq!(app.editor.text(), "row one\nrow two\nrow three");
+
+        // From the first row, Up is the history — and Down comes back to the
+        // draft, whose rows it then walks as rows again.
+        handle_key(&mut app, plain(KeyCode::Up));
+        assert_eq!(app.editor.text(), "older note");
+        handle_key(&mut app, plain(KeyCode::Down));
+        assert_eq!(app.editor.text(), "row one\nrow two\nrow three");
+        assert_eq!(
+            app.editor.row_col(),
+            (2, 9),
+            "restored with the cursor at the end"
+        );
+        handle_key(&mut app, plain(KeyCode::Up));
+        assert_eq!(app.editor.row_col(), (1, 7));
+        handle_key(&mut app, plain(KeyCode::Down));
+        assert_eq!(app.editor.row_col(), (2, 7));
+
+        // C-p is the history even from the middle of a multi-line draft.
+        handle_key(&mut app, plain(KeyCode::Up));
+        handle_key(&mut app, key('p', KeyModifiers::CONTROL));
+        assert_eq!(app.editor.text(), "older note");
     }
 
     /// Esc and `C-c` in the editor discarded the draft for good — a long,

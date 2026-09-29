@@ -632,7 +632,8 @@ the next comment's `C-p` brings it back.
 | `M-d` | delete word forward |
 | `C-k` | kill to end of line; at the end, joins the next line |
 | `C-u` | kill to start of line, keeping anything after the cursor |
-| `C-p` / `C-n`, Up/Down | recall earlier comments from this session |
+| `C-p` / `C-n` | recall earlier comments from this session |
+| Up / Down | row above / below in a multi-line comment; from the first / last row, the same recall as `C-p` / `C-n` |
 
 There is no kill ring: killed text is gone.
 
