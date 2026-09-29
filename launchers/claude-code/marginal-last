@@ -97,14 +97,27 @@ def turn_text:
 
 def trimmed: gsub("^\\s+|\\s+$"; "");
 
+# Claude Code's own tags, by name. Matching any `^<tag>` used to take a real
+# prompt that starts with `<div>` out of the document, leaving the answer to a
+# question the document no longer showed.
+#
 # anything the human did not type — never the cut point
-def machine: test("^<(task-notification|bash-stdout|local-command-stdout|system-reminder)>");
-# anything wrapped in a tag — never part of the document
-def plumbing: test("^<[a-z][a-z0-9-]*>");
+def machine:
+  test("^<(task-notification|bash-notification|bash-stdout|bash-stderr|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder)>")
+  # written when the human presses Esc, and not a prompt either
+  or test("^\\[Request interrupted by user[^\\]]*\\]$");
+# anything machine, or a stub of something the human invoked — never part of
+# the document
+def plumbing:
+  machine
+  or test("^<(command-name|command-message|command-args|bash-input|user-memory-input|background-task-input)>");
 
 [ .[]
   | select((.isSidechain // false) | not)
   | select((.isMeta // false) | not)
+  # the summary `/compact` leaves behind, written as a user message that
+  # nobody typed
+  | select((.isCompactSummary // false) | not)
   | select(.type == "assistant" or .type == "user")
   | select(.message.role == "assistant" or .message.role == "user")
   # Claude Code's own stand-ins for a reply the model never gave: "No response

@@ -311,7 +311,11 @@ ordinary user messages — task notifications, `!command` input and its output �
 and the two kinds are not interchangeable: a slash-command stub records that the
 human invoked something and is a valid place to cut, while a notification that
 landed mid-turn is not, and cutting there would leave the in-flight turn in the
-document. Everything tag-wrapped is kept out of the document either way.
+document. Both kinds are kept out of the document, matched by Claude Code's own
+tag names (`command-name`, `bash-stdout`, `task-notification`, …), not by
+"starts with a tag". A prompt that begins with `<div>` is the human's and
+stays. The `[Request interrupted by user]` marker and the `isCompactSummary`
+entry `/compact` leaves behind are machine traffic too.
 
 `--dump` prints the assembled document and launches nothing, which is how the
 builder gets checked without a terminal — the same trick as `--dump-blocks`:
