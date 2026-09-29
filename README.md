@@ -397,7 +397,9 @@ What makes the result usable is that the launcher rendered the document, so it
 knows what every line of it was. It writes a sidecar map — one row per document
 line, carrying the file and line number on each side of the diff — and resolves
 the annotations through it on the way back out. The human comments on a diff;
-the agent is told `src/app.rs:312-314 (new)`.
+the agent is told `src/app.rs:312-314 (new)`. Paths are git's, relative to the
+repository root whatever the current directory, and the feedback preamble says
+so and names the root by its absolute path.
 
 Deleted lines resolve to the **old** side and are labelled as such. They are not
 in the working tree, and naming a nearby line for them would be a guess wearing

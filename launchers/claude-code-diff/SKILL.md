@@ -39,9 +39,10 @@ you cannot see their screen and they are busy using it.
 ## What comes back
 
 - **Feedback markdown** — a preamble, then one `##` section per comment. Each
-  heading is a **real location in the working tree**, not a position in the
-  diff, followed by the exact text they selected as a blockquote and their
-  comment under it. Address every comment.
+  heading is a **real location**, not a position in the diff, followed by the
+  exact text they selected as a blockquote and their comment under it. Address
+  every comment. Paths are **relative to the repository root**, which the
+  preamble names, not to your current directory.
 
   Read the side label on every heading, because it decides where to go:
 

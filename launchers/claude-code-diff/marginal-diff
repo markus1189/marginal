@@ -101,6 +101,11 @@ done
 command -v jq  >/dev/null || die "jq is required"
 command -v git >/dev/null || die "git is required"
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+# git names every path relative to the top of the working tree, whatever the
+# current directory. The feedback says so and names the root, because an agent
+# whose shell sits in a subdirectory would otherwise resolve `src/app.rs`
+# against the wrong directory. Empty in a bare repository, which has no tree.
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || toplevel=""
 
 # ---------------------------------------------------------------- the diff
 #
@@ -557,10 +562,16 @@ needs_fence() {
   printf '%s\n' "$1" | grep -qE '^ {0,3}(#|>|[-*+]( |$)|[0-9]+[.)]( |$)|```|~~~|[-=_*]{3,}|<)|^(    |	)'
 }
 
+if [ -n "$toplevel" ]; then
+  root="the repository root, \`$toplevel\`"
+else
+  root="the repository root"
+fi
+
 cat <<HDR
 The user reviewed \`$label\` in marginal. Each \`##\` heading below is a real
-location in the working tree — file, line range, and which side of the diff the
-selected lines live on:
+location — file, line range, and which side of the diff the selected lines live
+on. Paths are relative to $root, not to the current directory:
 
   * **(new)** — the lines are in the file now, at those numbers. Go there.
   * **(old)** — the lines were DELETED. They are not in the working tree at all;
