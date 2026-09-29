@@ -908,7 +908,7 @@ impl App {
             self.status = "selection cleared".into();
             Sel::Here
         } else {
-            self.status = "block selection — J/K to extend".into();
+            self.status = "blocks — J/K extends".into();
             Sel::Blocks {
                 anchor: self.current_block().unwrap_or(0),
             }
@@ -920,7 +920,7 @@ impl App {
             self.status = "selection cleared".into();
             Sel::Here
         } else {
-            self.status = "line selection — j/k to extend".into();
+            self.status = "lines — j/k extends".into();
             Sel::Lines {
                 anchor: self.cursor.line,
             }

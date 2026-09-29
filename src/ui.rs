@@ -1304,6 +1304,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         })
         .unwrap_or("q");
 
+    // The reserved field decided the rung; the status may then grow left into
+    // whatever that rung leaves unused, which can change nothing already
+    // decided. `STATUS_W` alone cut `block selection — J/K to extend` to
+    // `…J/K to ext` at 80, 95 and 120 columns, though at 95 and 120 the rung
+    // left fifteen and forty columns standing empty beside it.
+    let status_w = if status_w == 0 {
+        0
+    } else {
+        let slack = width.saturating_sub(hints_w(keys) + 1 + usize::from(STATUS_W));
+        let over = (cells_drawn(&app.status) + 1).saturating_sub(usize::from(STATUS_W));
+        STATUS_W + u16::try_from(over.min(slack)).unwrap_or(0)
+    };
+
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(status_w)]).split(area);
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -1312,13 +1325,36 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )),
         cols[0],
     );
+    let field = usize::from(status_w).saturating_sub(1);
     f.render_widget(
         Paragraph::new(Span::styled(
-            format!("{:>27} ", app.status),
+            format!("{:>field$} ", fit_status(&app.status, field)),
             Style::default().fg(Color::Cyan),
         )),
         cols[1],
     );
+}
+
+/// `status` cut to `max` cells, with `…` marking the cut. The head is kept: a
+/// status says what just happened first and adds detail after.
+fn fit_status(status: &str, max: usize) -> String {
+    if cells_drawn(status) <= max {
+        return status.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for g in status.graphemes(true) {
+        let gw = cells_drawn(g);
+        if w + gw + 1 > max {
+            break;
+        }
+        w += gw;
+        out.push_str(g);
+    }
+    if max > 0 {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3657,5 +3693,69 @@ mod tests {
             let buf = render_buf(&mut app, w, 12);
             assert_eq!(cursor_cell(&buf).as_deref(), Some("x"), "width {w}");
         }
+    }
+
+    // ---- the footer's status field -----------------------------------------
+
+    fn footer_row(buf: &ratatui::buffer::Buffer) -> String {
+        let y = buf.area.height - 1;
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    /// The two selection toggles set a status longer than the 27 cells the
+    /// field had, so it was cut to `block selection — J/K to ext` at every
+    /// width — the one hint that says how to use the mode just entered. Both
+    /// strings now fit the field, and the field grows into what the chosen
+    /// rung leaves unused.
+    #[test]
+    fn the_selection_status_reaches_the_footer_whole() {
+        for (toggle, want) in [
+            (App::toggle_blocks as fn(&mut App), "blocks — J/K extends"),
+            (App::toggle_lines, "lines — j/k extends"),
+        ] {
+            for w in [80u16, 95, 120] {
+                let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
+                toggle(&mut app);
+                assert_eq!(app.status, want);
+                let row = footer_row(&render_buf(&mut app, w, 24));
+                assert!(row.contains(want), "width {w}: {row:?}");
+            }
+        }
+    }
+
+    /// A status longer than the field uses the columns the rung does not, and
+    /// says so with `…` when even that is not enough — never a silent cut, and
+    /// never at the cost of a rung.
+    #[test]
+    fn a_long_status_grows_into_spare_columns_and_marks_a_cut() {
+        let long = "paragraph L12345:1000-2000 plus a tail";
+        for w in [80u16, 95, 120, 200] {
+            let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
+            let bare = footer_row(&render_buf(&mut app, w, 24));
+            app.status = long.into();
+            let row = footer_row(&render_buf(&mut app, w, 24));
+            let rung = |r: &str| KEYS.iter().position(|k| r.contains(k));
+            assert_eq!(rung(&row), rung(&bare), "width {w}: the status cost a rung");
+            if row.contains(long) {
+                continue;
+            }
+            assert!(
+                row.trim_end().ends_with('…'),
+                "width {w}: silent cut {row:?}"
+            );
+            assert!(row.contains("paragraph L12345"), "width {w}: {row:?}");
+        }
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
+        app.status = long.into();
+        let row = footer_row(&render_buf(&mut app, 120, 24));
+        assert!(row.contains(long), "120 has the room: {row:?}");
+    }
+
+    #[test]
+    fn fit_status_cuts_by_cells_and_marks_the_cut() {
+        assert_eq!(fit_status("short", 10), "short");
+        assert_eq!(fit_status("abcdefghij", 5), "abcd…");
+        assert_eq!(fit_status("日本語テキスト", 5), "日本…");
+        assert_eq!(fit_status("abc", 0), "");
     }
 }
