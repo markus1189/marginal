@@ -170,14 +170,27 @@ label="git diff ${git_args[*]}"
 # A `-` in any column means "does not exist on that side".
 
 render_awk='
-function out(s) { docline++; print s > DOC }
-# The two end columns are only ever meaningful on a hunk row, so every other
-# call omits them and gets "-". awk leaves an unpassed parameter empty.
-function map(kind, of, ol, nf, nl, oe, ne) {
+# Every document line is written by `line`, which writes its map row in the
+# same call. They used to be two calls, and ensure_file made one row for three
+# lines: a heading followed by an `index` line got no row at all, so a comment
+# on it resolved to nothing and came back as a bare document line number.
+# Unpassed awk parameters are empty; every empty column becomes "-".
+function line(s, kind, of, ol, nf, nl, oe, ne) {
+  docline++
+  print s > DOC
+  if (kind == "") kind = "meta"
+  if (of == "") of = "-"
+  if (ol == "") ol = "-"
+  if (nf == "") nf = "-"
+  if (nl == "") nl = "-"
   if (oe == "") oe = "-"
   if (ne == "") ne = "-"
   printf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", docline, kind, of, ol, nf, nl, oe, ne > MAP
 }
+function meta(s) { line(s, "meta") }
+# A line about the file as a whole: its heading and everything under it that
+# is not a hunk. A comment there resolves to the path alone.
+function fileline(s) { line(s, "file", oldpath, "-", newpath, "-") }
 function strip(p) { return (p == "/dev/null") ? p : substr(p, 3) }
 
 # The file heading is emitted lazily, at the first thing that needs it, because
@@ -188,14 +201,13 @@ function ensure_file(   name) {
   else if (oldpath == "/dev/null") name = newpath " (new file)"
   else if (oldpath != newpath)     name = oldpath " → " newpath
   else                             name = newpath
-  out("")
-  out("## `" name "`")
-  if (blobs != "") { out(""); out("`" blobs "`") }
-  map("file", oldpath, "-", newpath, "-", "-")
+  meta("")
+  fileline("## `" name "`")
+  if (blobs != "") { meta(""); fileline("`" blobs "`") }
   file_open = 1
 }
 
-function close_fence() { if (fence) { out("```"); map("meta","-","-","-","-","-"); fence = 0 } }
+function close_fence() { if (fence) { meta("```"); fence = 0 } }
 
 # A rename or mode change with no content difference reaches neither @@ nor
 # "Binary files", so nothing ever calls ensure_file and the file would vanish
@@ -205,10 +217,8 @@ function flush_file() {
   close_fence()
   if (file_seen && !file_open) {
     ensure_file()
-    out("")
-    map("meta","-","-","-","-","-")
-    out("*(no content change)*")
-    map("file", oldpath, "-", newpath, "-", "-")
+    meta("")
+    fileline("*(no content change)*")
   }
 }
 
@@ -220,14 +230,10 @@ function reset_file() {
 BEGIN {
   docline = 0; fence = 0; in_hunk = 0; file_open = 0; file_seen = 0
   oldpath = "?"; newpath = "?"; blobs = ""
-  out("# Review: " LABEL)
-  map("meta","-","-","-","-","-")
-  out("")
-  map("meta","-","-","-","-","-")
-  out("Select a hunk with `J`/`K`, or any run of lines inside one with `V` and")
-  map("meta","-","-","-","-","-")
-  out("`j`/`k`. Comments come back anchored to the real file and line.")
-  map("meta","-","-","-","-","-")
+  meta("# Review: " LABEL)
+  meta("")
+  meta("Select a hunk with `J`/`K`, or any run of lines inside one with `V` and")
+  meta("`j`/`k`. Comments come back anchored to the real file and line.")
 }
 
 # ---- inside a hunk body ---------------------------------------------------
@@ -238,15 +244,14 @@ BEGIN {
 # by it.
 in_hunk {
   c = substr($0, 1, 1)
-  if (c == "\\") { out($0); map("meta","-","-","-","-","-"); next }
-  out($0)
-  if (c == "+")      { map("add", "-", "-", newpath, newline, "-"); newline++; nrem-- }
-  else if (c == "-") { map("del", oldpath, oldline, "-", "-", "-"); oldline++; orem-- }
+  if (c == "\\")     { meta($0); next }
+  if (c == "+")      { line($0, "add", "-", "-", newpath, newline); newline++; nrem-- }
+  else if (c == "-") { line($0, "del", oldpath, oldline, "-", "-"); oldline++; orem-- }
   else {
     # " " or a genuinely empty line, which git writes for an empty context line.
     # Reading that as anything but context puts every later line in the hunk off
     # by one, silently, and only after the first blank line in the file.
-    map("ctx", oldpath, oldline, newpath, newline, "-")
+    line($0, "ctx", oldpath, oldline, newpath, newline)
     oldline++; newline++; orem--; nrem--
   }
   if (orem <= 0 && nrem <= 0) { in_hunk = 0; close_fence() }
@@ -269,10 +274,8 @@ in_hunk {
 
 /^Binary files / || /^GIT binary patch/ {
   ensure_file()
-  out("")
-  map("meta","-","-","-","-","-")
-  out("*(binary — no line-level diff)*")
-  map("file", oldpath, "-", newpath, "-", "-")
+  meta("")
+  fileline("*(binary — no line-level diff)*")
   next
 }
 
@@ -287,14 +290,10 @@ in_hunk {
   hunk_new_start = newline; hunk_new_end = newline + nrem - 1
 
   close_fence()
-  out("")
-  map("meta","-","-","-","-","-")
-  out("### " p[1] " " p[2] " " p[3] " " p[4])
-  map("hunk", oldpath, hunk_old_start, newpath, hunk_new_start, hunk_old_end, hunk_new_end)
-  out("")
-  map("meta","-","-","-","-","-")
-  out("```diff")
-  map("meta","-","-","-","-","-")
+  meta("")
+  line("### " p[1] " " p[2] " " p[3] " " p[4], "hunk", oldpath, hunk_old_start, newpath, hunk_new_start, hunk_old_end, hunk_new_end)
+  meta("")
+  meta("```diff")
   fence = 1
 
   # A hunk header declaring zero lines on both sides has no body to consume, so
@@ -307,7 +306,7 @@ in_hunk {
 
 /^(old|new) mode |^(new|deleted) file mode |^similarity index |^dissimilarity index /  { next }
 
-END { flush_file(); out(""); map("meta","-","-","-","-","-") }
+END { flush_file(); meta("") }
 '
 
 awk -v DOC="$doc" -v MAP="$map" -v LABEL="$label" "$render_awk" "$raw"
