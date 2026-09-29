@@ -211,6 +211,29 @@ impl Editor {
         self.browsing_off();
     }
 
+    /// A bracketed paste, arriving as one string rather than as keys.
+    ///
+    /// Line endings are normalised to `\n` — a terminal sends `\r` for the
+    /// Enter inside a paste, and CRLF text keeps both — and every other control
+    /// character except the tab is dropped: an escape sequence copied out of a
+    /// terminal has no business in a comment the agent will read as markdown.
+    /// Like any insert it ends history browsing, but only if something was
+    /// actually inserted.
+    pub fn paste(&mut self, s: &str) {
+        let clean: String = s
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+            .collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
+        self.browsing_off();
+    }
+
     /// `C-j`
     pub fn newline(&mut self) {
         self.insert('\n');
@@ -716,6 +739,40 @@ mod tests {
         e.history_next();
         assert_eq!(e.text(), "draft");
         assert!(!e.history.iter().any(|h| h == "first!"));
+    }
+
+    /// A paste is text, whatever it contains: its line breaks become rows, not
+    /// Enter, and it lands at the cursor as one insertion.
+    #[test]
+    fn a_paste_inserts_at_the_cursor_with_its_line_breaks_normalised() {
+        let mut e = ed("see: .", 5);
+        e.paste("one\r\ntwo\rthree\nfour");
+        assert_eq!(show(&e), "see: one\ntwo\nthree\nfour|.");
+        assert_eq!(e.rows().len(), 4);
+
+        // Escape sequences and other controls go; tabs and non-ASCII stay.
+        let mut e = Editor::default();
+        e.paste("a\u{1b}[31mb\tü\u{7}");
+        assert_eq!(show(&e), "a[31mb\tü|");
+    }
+
+    /// An empty paste is not an edit, so it cannot strand a parked draft —
+    /// the same rule the kill keys follow.
+    #[test]
+    fn an_empty_paste_does_not_end_history_browsing() {
+        let mut e = Editor::default();
+        e.set("old");
+        e.submit();
+        e.set("draft");
+        e.history_prev();
+        e.paste("\u{1b}");
+        e.history_next();
+        assert_eq!(e.text(), "draft");
+
+        e.history_prev();
+        e.paste("!");
+        e.history_next();
+        assert_eq!(e.text(), "old!", "a real paste is an edit");
     }
 
     #[test]

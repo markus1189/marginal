@@ -416,14 +416,14 @@ fn run(app: &mut App) -> io::Result<()> {
         ));
     }
     let mut terminal = ratatui::init();
+    let _paste = BracketedPaste::enable();
     let mut scroll = app::Anchor::default();
     let outcome = loop {
         if let Err(e) = terminal.draw(|f| ui::draw(f, app, &mut scroll)) {
             break Err(e);
         }
         match event::read() {
-            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => handle_key(app, k),
-            Ok(_) => {}
+            Ok(ev) => handle_event(app, ev),
             Err(e) => break Err(e),
         }
         if app.quit {
@@ -432,6 +432,49 @@ fn run(app: &mut App) -> io::Result<()> {
     };
     ratatui::restore();
     outcome
+}
+
+/// Bracketed paste for as long as this value lives, however the scope is left
+/// — a normal return, an early `break` or a panic unwinding through it.
+///
+/// Without it a terminal delivers a paste as the keystrokes that would type it,
+/// and the first newline in it is Enter: the comment committed half-way, and
+/// the rest of the clipboard ran as Normal-mode commands. `see:\nxx` committed
+/// `see:` and then `x`, `x` removed two annotations; a `q` anywhere quit.
+struct BracketedPaste;
+
+impl BracketedPaste {
+    fn enable() -> Self {
+        // A terminal that ignores the request is no worse off than before.
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+        Self
+    }
+}
+
+impl Drop for BracketedPaste {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+    }
+}
+
+/// One terminal event. Key releases and repeats, focus, mouse and resize carry
+/// nothing to act on — a resize is picked up by the redraw every event causes.
+fn handle_event(app: &mut App, ev: Event) {
+    match ev {
+        Event::Key(k) if k.kind == KeyEventKind::Press => handle_key(app, k),
+        Event::Paste(s) => handle_paste(app, &s),
+        _ => {}
+    }
+}
+
+/// A paste is text for the comment editor and nothing else. Outside it there
+/// is no text to put it in, and replaying it as keys is the bug bracketed paste
+/// exists to prevent — so it is dropped whole, with a word on the status line.
+fn handle_paste(app: &mut App, s: &str) {
+    match app.mode {
+        Mode::Input => app.editor.paste(s),
+        Mode::Normal => app.status = "paste ignored".into(),
+    }
 }
 
 fn handle_key(app: &mut App, k: KeyEvent) {
@@ -1571,6 +1614,55 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.annotations.len(), 2);
         assert_eq!(app.annotations[1].text, INPUT_TEXT);
+    }
+
+    /// A paste used to arrive as keystrokes: the newline in `see:\nxx` was
+    /// Enter, which committed `see:`, and the two `x` that followed were
+    /// Normal-mode `x` — two annotations removed with no undo. With bracketed
+    /// paste on, the terminal hands it over as one `Event::Paste`, and this is
+    /// what has to happen to it: all of it in the comment, none of it a key.
+    #[test]
+    fn a_multi_line_paste_is_comment_text_not_keystrokes() {
+        let mut app = annotated();
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Input, "setup failed");
+        handle_event(&mut app, Event::Paste("see:\r\nxx\rq".into()));
+        assert_eq!(app.mode, Mode::Input, "the paste committed the comment");
+        assert_eq!(app.editor.text(), "see:\nxx\nq");
+        assert_eq!(app.annotations.len(), 1, "the paste removed an annotation");
+        assert!(!app.quit, "the paste quit");
+
+        // Enter is still the only commit, and the comment keeps its rows.
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 2);
+        assert_eq!(app.annotations[1].text, "see:\nxx\nq");
+    }
+
+    /// Outside the editor there is nowhere for text to go, and replaying it as
+    /// keys is the bug itself — so a paste in Normal mode does nothing at all,
+    /// over an annotation and behind the peek overlay alike.
+    #[test]
+    fn a_paste_in_normal_mode_is_ignored_not_replayed() {
+        let mut app = annotated();
+        let cursor = app.cursor;
+        handle_event(&mut app, Event::Paste("xxJjq\nc".into()));
+        assert_eq!(
+            app.annotations.len(),
+            1,
+            "x from a paste removed an annotation"
+        );
+        assert!(!app.quit, "q from a paste quit");
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "c or \\n from a paste began a comment"
+        );
+        assert_eq!(app.cursor, cursor, "j/J from a paste moved the cursor");
+        assert!(app.status.contains("paste ignored"), "{}", app.status);
+
+        let mut app = peeking();
+        handle_event(&mut app, Event::Paste("q".into()));
+        assert!(app.peek && !app.quit, "a paste closed the overlay or quit");
     }
 
     /// The other half of "a bad `--result` must not cost the session", and the
