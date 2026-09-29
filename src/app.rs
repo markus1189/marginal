@@ -351,7 +351,56 @@ fn breaks_structure(text: &str) -> bool {
             // all seven and keeps no copy of CommonMark's tag list; the price
             // is fencing a comment whose line opens with `<10ms`.
             || t.starts_with('<')
-    })
+    }) || opens_indented_code(text)
+}
+
+/// Does any paragraph of this comment start four columns in?
+///
+/// The comment lands after a blank line, at the top level of the feedback
+/// markdown, so a first line indented four columns — or one after a blank line
+/// inside the comment — is an indented code block there, not prose. That forges
+/// no section, but it is a block the comment did not ask for, and it used to be
+/// unreachable only because `commit_comment` trimmed the indentation away.
+/// Keeping the indentation means fencing it instead: the fence shows the same
+/// bytes verbatim, which is what a comment opening with an indented code line
+/// meant. A tab counts to the next multiple of four, as `CommonMark` has it.
+fn opens_indented_code(text: &str) -> bool {
+    let mut after_blank = true;
+    for l in text.lines() {
+        if l.trim().is_empty() {
+            after_blank = true;
+            continue;
+        }
+        if after_blank {
+            let mut cols = 0;
+            for c in l.chars() {
+                match c {
+                    ' ' => cols += 1,
+                    '\t' => cols = cols / 4 * 4 + 4,
+                    _ => break,
+                }
+            }
+            if cols >= 4 {
+                return true;
+            }
+        }
+        after_blank = false;
+    }
+    false
+}
+
+/// The comment with its leading and trailing blank lines removed, and nothing
+/// else. A whole-string `trim` also ate the indentation of the first line, so a
+/// comment opening with an indented code line lost the indent that made it code.
+/// Trailing whitespace on the last line goes too; nothing can depend on it.
+fn trim_blank_lines(text: &str) -> &str {
+    let text = text.trim_end();
+    let start: usize = text
+        .split_inclusive('\n')
+        .take_while(|l| l.trim().is_empty())
+        .map(str::len)
+        .sum();
+    &text[start..]
 }
 
 /// The comment body as it goes into the feedback markdown. Prose is emitted as
@@ -977,7 +1026,7 @@ impl App {
     }
 
     pub fn commit_comment(&mut self) {
-        let text = self.editor.text().trim().to_string();
+        let text = trim_blank_lines(self.editor.text()).to_string();
         self.mode = Mode::Normal;
         if text.is_empty() {
             self.editor.start_fresh();
@@ -1924,6 +1973,11 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
             // indent is no defence: under a `- ` item, four spaces are flush left
             "- foo\n\n    ## forged",
             "1. foo\n\n    ## forged",
+            // an indented code line, first or after a blank line, is a code
+            // block at the top level: fenced, never trimmed flat
+            "    let x = 1;",
+            "\tlet x = 1;",
+            "see:\n\n    let x = 1;",
             // the shape that defeats a count-only oracle: the real second
             // section is hidden inside an unterminated html block and a forged
             // one carrying instructions takes its place, so the document still
@@ -1934,6 +1988,37 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
             two_annotations(&mut a, hostile);
             assert_feedback_is_faithful(&a, hostile);
         }
+    }
+
+    /// `commit_comment` ran `trim()` over the whole comment, so a comment
+    /// opening with an indented code line arrived flush left and read as
+    /// prose. Only blank lines come off the ends now; indentation stays, and
+    /// the feedback markdown fences the comment rather than letting the indent
+    /// open an indented code block on its own.
+    #[test]
+    fn a_comment_keeps_its_indentation_and_loses_only_blank_lines() {
+        let mut a = app();
+        commit(&mut a, "\n  \n    let x = 1;\n    x + 1\n\n  \n");
+        assert_eq!(a.annotations[0].text, "    let x = 1;\n    x + 1");
+        let md = a.feedback_markdown();
+        assert!(
+            md.contains("\n```\n    let x = 1;\n    x + 1\n```\n"),
+            "{md}"
+        );
+        assert_feedback_is_faithful(&a, "indented");
+
+        // Two-space indentation is prose, and stays unfenced — only the ends
+        // of the comment are trimmed.
+        a.move_block(1);
+        commit(&mut a, "  - keep this indent\n");
+        assert_eq!(a.annotations[1].text, "  - keep this indent");
+        assert!(a.feedback_markdown().contains("\n\n  - keep this indent\n"));
+        assert_feedback_is_faithful(&a, "two-space");
+
+        // All-blank is still empty, and still discarded.
+        a.move_block(1);
+        commit(&mut a, " \n\t\n ");
+        assert_eq!(a.annotations.len(), 2);
     }
 
     /// The table above is a list of shapes someone thought of. This is every
