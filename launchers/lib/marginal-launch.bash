@@ -123,10 +123,22 @@ marginal_run_on_tty() {
 
     # if-blocks, not `[ -n "$x" ] && popup+=(…)`: a false test is a failed
     # command, and under `set -e` an unset LC_ALL would end the script here.
+    # 90% leaves the agent's pane visible around the edges, which is worth
+    # having on a big terminal. On a small one it is not: every row matters,
+    # and the full client shows two more document rows than 90% does at 40x12,
+    # 50x16 and 80x16. Below 60x20 the popup takes the whole client. If the
+    # size cannot be read, 90%.
+    local size="" cw="" ch="" extent=90%
+    size="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{client_width} #{client_height}' 2>/dev/null)" || size=""
+    read -r cw ch <<<"$size" || true
+    if [[ "$cw" =~ ^[0-9]+$ && "$ch" =~ ^[0-9]+$ ]] && { [ "$cw" -lt 60 ] || [ "$ch" -lt 20 ]; }; then
+      extent=100%
+    fi
+
     # -T is expanded as a tmux format, and the title carries the caller's
     # arguments: `#(cmd)` in a git pathspec ran cmd, `#{…}` was substituted.
     # `##` is a literal `#`.
-    local popup=(-E -w 90% -h 90% -T " marginal · ${title//#/##} ")
+    local popup=(-E -w "$extent" -h "$extent" -T " marginal · ${title//#/##} ")
     if [ -n "${TMUX_PANE:-}" ]; then popup+=(-t "$TMUX_PANE"); fi
     if [ -n "${LANG:-}" ]; then popup+=(-e "LANG=$LANG"); fi
     if [ -n "${LC_ALL:-}" ]; then popup+=(-e "LC_ALL=$LC_ALL"); fi
