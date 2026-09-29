@@ -32,8 +32,7 @@
 //! same measure for the same reason: `Tables::pads` compares it against the body
 //! pane.
 
-use crate::app::chrome_counts;
-use crate::blocks::Block;
+use crate::blocks::TreeNode;
 use crate::wrap::{cells_drawn, Piece, Row};
 
 /// Cells the screen shows that no byte of the file accounts for: `n` of `fill`,
@@ -123,9 +122,12 @@ pub struct Tables {
 }
 
 impl Tables {
-    pub fn new(lines: &[String], blocks: &[Block]) -> Self {
+    /// `tree` is the backend's containment tree. A backend with no `table`
+    /// nodes in it — the plain one — gets no alignment, which is right: it has
+    /// no idea what a table is.
+    pub fn new(lines: &[String], tree: &TreeNode) -> Self {
         let mut out = vec![None; lines.len()];
-        for (from, to) in extents(lines, blocks) {
+        for Extent { from, to, rows } in extents(tree) {
             // Tabs become one space each before anything measures a column, the
             // same substitution `App::display_line` makes and for the same
             // reason: one byte for one cell keeps byte offsets and screen
@@ -139,7 +141,7 @@ impl Tables {
             }
             let starts: Vec<usize> = (from..=to)
                 .zip(&texts)
-                .map(|(l, t)| content_start(t, l, blocks))
+                .map(|(l, t)| content_start(t, l, &rows))
                 .collect();
             let Some(padding) = align(&texts, &starts) else {
                 continue;
@@ -184,49 +186,58 @@ pub fn row(len: usize, pads: &[Pad]) -> Row {
     out
 }
 
-/// Line ranges of the tables in the document, from the flat block list rather
-/// than by looking for `|---|`: a delimiter row inside a fenced code block is
-/// text, and comrak is the only thing that knows the difference.
+/// One table: its first and last line, and where each row comrak built a node
+/// for starts, as `(line, 1-based byte column)`.
+struct Extent {
+    from: usize,
+    to: usize,
+    rows: Vec<(usize, usize)>,
+}
+
+/// The tables in the document, one per `table` node of the tree — never by
+/// looking for `|---|`, since a delimiter row inside a fenced code block is
+/// text and comrak is the only thing that knows the difference.
 ///
-/// A table's rows are line-contiguous — `blocks.rs` stretches the header row
-/// over the delimiter row precisely so there is no gap — so a break in the
-/// numbering is a break between two tables.
-///
-/// Contiguity alone is not enough, though: a blockquote ends a top-level table
-/// without needing a blank line, so a quoted table on the very next line is
-/// contiguous with the one above it and is not the same table. The rows of one
-/// table sit at one container depth; two tables either side of a container
-/// boundary do not.
-///
-/// **Depth, not the text of the prefix.** GFM lets a row wear up to three
-/// spaces of indentation, and lets a quote marker be followed by a space, a tab
-/// or nothing at all — so `| a |` and ` | a |`, or `>| a |` and `> | a |`, are
-/// each two rows of one table that agree on nothing but their marker count.
-/// Comparing the run byte for byte broke a table apart wherever its rows
-/// disagreed about whitespace, and the pieces below the split had no delimiter
-/// row left to align against.
-fn extents(lines: &[String], blocks: &[Block]) -> Vec<(usize, usize)> {
-    // Whether a tab counts as chrome decides more than it looks: `>\t>` is two
-    // containers, and a scan that stops at the tab calls it one and merges a
-    // doubly quoted table into the singly quoted one above it. `chrome_counts`
-    // is shared with `app.rs` so the two cannot drift on that question.
-    let depth = |l: usize| lines.get(l - 1).map_or(0, |s| chrome_counts(s).0);
-    let mut out: Vec<(usize, usize)> = Vec::new();
-    for b in blocks.iter().filter(|b| b.kind == "table-row") {
-        match out.last_mut() {
-            Some(last) if last.1 + 1 == b.start() && depth(last.0) == depth(b.start()) => {
-                last.1 = b.end();
+/// Taken from the tree's table nodes and not by joining line-contiguous
+/// `table-row` units, which is what this used to do and which got two shapes
+/// wrong. Two tables with nothing between them — adjacent footnote
+/// definitions, each opening on its own `[^n]:` line — ran together into one
+/// grid, the second table padded to the first's delimiter row. And a table
+/// inside a list item is not row units at all, so it was never aligned. A
+/// contiguity rule needed a container-depth check on top to keep a quoted
+/// table apart from the one above it; the tree has no such ambiguity, because
+/// comrak already decided where each table ends.
+fn extents(tree: &TreeNode) -> Vec<Extent> {
+    fn go(n: &TreeNode, out: &mut Vec<Extent>) {
+        for c in &n.children {
+            if c.kind == "table" {
+                out.push(Extent {
+                    from: c.span.start.line,
+                    to: c.span.end.line,
+                    rows: c
+                        .children
+                        .iter()
+                        .filter(|r| r.kind == "table-row")
+                        .map(|r| (r.span.start.line, r.span.start.col))
+                        .collect(),
+                });
+            } else {
+                go(c, out);
             }
-            _ => out.push((b.start(), b.end())),
         }
     }
+    let mut out = Vec::new();
+    go(tree, &mut out);
+    // comrak moves footnote definitions to the end of the document, so tree
+    // order is not line order.
+    out.sort_by_key(|e| e.from);
     out
 }
 
 /// Byte offset at which line `line`'s table row begins — everything before it
 /// is the container the table sits in, not a cell.
 ///
-/// A row comrak built a node for says so itself: its unit starts at the row's
+/// A row comrak built a node for says so itself: its node starts at the row's
 /// first byte, past `> `, a list item's indent or a footnote's `[^1]: `. The
 /// delimiter row has no node, and only container chrome can precede it — a
 /// quote marker or whitespace, since it can never share a line with a list
@@ -235,14 +246,11 @@ fn extents(lines: &[String], blocks: &[Block]) -> Vec<(usize, usize)> {
 /// Reading the row from byte 0 instead counted `> ` as a first cell, so a
 /// quoted delimiter row had a non-rule first cell, `is_delimiter` said no, and
 /// the table was never aligned.
-fn content_start(text: &str, line: usize, blocks: &[Block]) -> usize {
-    blocks
-        .iter()
-        .find(|b| b.kind == "table-row" && b.start() == line)
-        .map_or_else(
-            || text.len() - text.trim_start_matches(['>', ' ']).len(),
-            |b| (b.span.start.col - 1).min(text.len()),
-        )
+fn content_start(text: &str, line: usize, rows: &[(usize, usize)]) -> usize {
+    rows.iter().find(|(l, _)| *l == line).map_or_else(
+        || text.len() - text.trim_start_matches(['>', ' ']).len(),
+        |(_, col)| (col - 1).min(text.len()),
+    )
 }
 
 /// Byte offsets of the `|` that separate cells. A backslash escapes the next
@@ -466,7 +474,7 @@ mod tests {
     /// Render a document's tables the way the source view would, at `width`.
     fn render(src: &str, width: usize) -> Vec<String> {
         let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
-        let tables = Tables::new(&lines, &blocks::parse(src));
+        let tables = Tables::new(&lines, &blocks::parse_tree(src));
         lines
             .iter()
             .enumerate()
@@ -581,8 +589,7 @@ mod tests {
     fn a_quoted_table_is_not_merged_into_the_one_above_it() {
         let src =
             "| a | bbbb |\n|---|---|\n| ccccc | d |\n> | qqqqqq | w |\n> |---|---|\n> | e | r |\n";
-        let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
-        assert_eq!(extents(&lines, &blocks::parse(src)), [(1, 3), (4, 6)]);
+        assert_eq!(ext(src), [(1, 3), (4, 6)]);
         let out = render(src, 40);
         for (i, l) in out.iter().enumerate().skip(3) {
             assert!(
@@ -599,6 +606,53 @@ mod tests {
         );
         // …and is aligned to its own grid, not left ragged.
         assert_pipes_line_up(&out[3..]);
+    }
+
+    /// Line ranges of the tables `extents` finds in `src`.
+    fn ext(src: &str) -> Vec<(usize, usize)> {
+        extents(&blocks::parse_tree(src))
+            .into_iter()
+            .map(|e| (e.from, e.to))
+            .collect()
+    }
+
+    /// Two footnote definitions, each opening a table on its label line, with
+    /// nothing between them. `extents` joined line-contiguous `table-row`
+    /// units at one container depth, and these are both: one grid of four
+    /// lines, the second header padded to the first table's columns and its
+    /// own delimiter row padded with spaces as if it were a body row.
+    ///
+    /// Tables from the tree's `table` nodes cannot run together, and comrak's
+    /// habit of moving footnote definitions to the end of the document is why
+    /// the list is sorted afterwards.
+    #[test]
+    fn adjacent_tables_in_footnotes_stay_two_tables() {
+        let src = "[^1]: | a | b |\n      |---|---|\n[^2]: | cccccc | d |\n      |---|---|\n\nx[^1][^2]\n";
+        assert_eq!(ext(src), [(1, 2), (3, 4)]);
+        let out = render(src, 80);
+        for (i, l) in out.iter().enumerate().take(4) {
+            if i % 2 == 1 {
+                assert!(!l.contains("- "), "rule padded with spaces: {out:#?}");
+            }
+        }
+        // Each table on its own grid: header and rule one width per table, and
+        // the first never widened to fit `cccccc`.
+        let w = |i: usize| out[i].chars().count();
+        assert_eq!(w(0), w(1), "{out:#?}");
+        assert_eq!(w(2), w(3), "{out:#?}");
+        assert!(w(0) < w(2), "first table padded to the second: {out:#?}");
+    }
+
+    /// A table inside a list item is not row units — the item covers it — so
+    /// an `extents` built from `table-row` units never saw it, and it was
+    /// never aligned. From the tree it is one table like any other.
+    #[test]
+    fn a_table_inside_a_list_item_is_aligned() {
+        let src = "- x\n\n  | a | bbbb |\n  |---|---|\n  | ccccc | d |\n";
+        assert_eq!(ext(src), [(3, 5)]);
+        let out = render(src, 80);
+        assert_ne!(out, src.lines().collect::<Vec<_>>(), "left unaligned");
+        assert_pipes_line_up(&out[2..]);
     }
 
     fn assert_pipes_line_up(out: &[String]) {
@@ -659,12 +713,7 @@ mod tests {
                 "| id | description |\n|---|---|\n{}| 1 | short |\n| 22 | longer |\n",
                 " ".repeat(n)
             );
-            let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
-            assert_eq!(
-                extents(&lines, &blocks::parse(&src)),
-                [(1, 4)],
-                "{n} spaces split the table"
-            );
+            assert_eq!(ext(&src), [(1, 4)], "{n} spaces split the table");
             let out = render(&src, 80);
             let w = out[0].chars().count();
             assert!(
@@ -691,8 +740,8 @@ mod tests {
         let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
         let bs = blocks::parse(src);
         assert!(bs.iter().all(|b| b.kind != "table-row" || b.end() <= 2));
-        assert_eq!(extents(&lines, &bs), [(1, 2)]);
-        let tables = Tables::new(&lines, &bs);
+        assert_eq!(ext(src), [(1, 2)]);
+        let tables = Tables::new(&lines, &blocks::parse_tree(src));
         assert!((3..=4).all(|l| tables.pads(l, 80).is_none()));
     }
 
@@ -704,12 +753,10 @@ mod tests {
     #[test]
     fn quote_markers_are_compared_by_depth_not_by_their_spacing() {
         let one = ">| q | w |\n> |---|---|\n>\t| e | r |\n>  | t | y |\n";
-        let lines: Vec<String> = one.lines().map(ToString::to_string).collect();
-        assert_eq!(extents(&lines, &blocks::parse(one)), [(1, 4)]);
+        assert_eq!(ext(one), [(1, 4)]);
 
         let two = "> | q | w |\n> |---|---|\n>\t> | e | r |\n>\t> |---|---|\n";
-        let lines: Vec<String> = two.lines().map(ToString::to_string).collect();
-        assert_eq!(extents(&lines, &blocks::parse(two)), [(1, 2), (3, 4)]);
+        assert_eq!(ext(two), [(1, 2), (3, 4)]);
     }
 
     /// Spaces in the rule would read as a hole in the table's one horizontal
@@ -747,7 +794,7 @@ mod tests {
     fn an_already_aligned_table_is_not_touched() {
         let src = "| a  | bb |\n| -- | -- |\n| cc | d  |\n";
         let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
-        let tables = Tables::new(&lines, &blocks::parse(src));
+        let tables = Tables::new(&lines, &blocks::parse_tree(src));
         assert!((1..=3).all(|l| tables.pads(l, 80).is_none()));
     }
 
@@ -757,7 +804,7 @@ mod tests {
     fn a_delimiter_row_inside_a_code_fence_is_not_a_table() {
         let src = "```\n| a | b |\n|---|---|\n| c | dddddd |\n```\n";
         let lines: Vec<String> = src.lines().map(ToString::to_string).collect();
-        let tables = Tables::new(&lines, &blocks::parse(src));
+        let tables = Tables::new(&lines, &blocks::parse_tree(src));
         assert!((1..=5).all(|l| tables.pads(l, 80).is_none()));
     }
 

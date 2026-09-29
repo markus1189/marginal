@@ -394,7 +394,7 @@ impl App {
         let questions = blocks::questions(&tree, src);
         let steps = blocks::steps(&tree, src);
         let cursor = blocks.first().map_or(Pos::new(1, 1), |b| b.span.start);
-        let tables = Tables::new(&lines, &blocks);
+        let tables = Tables::new(&lines, &tree);
         Self {
             path,
             label: None,
