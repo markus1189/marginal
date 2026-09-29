@@ -399,7 +399,16 @@ fn is_table_preface<'a>(para: &'a AstNode<'a>) -> bool {
 
 /// Source ranges of every run comrak unescaped, as `(line, start, end)` in
 /// 1-based byte columns.
-fn unescaped_runs<'a>(node: &'a AstNode<'a>, lines: &[&str], out: &mut Vec<(usize, usize, usize)>) {
+fn unescaped_runs<'a>(
+    node: &'a AstNode<'a>,
+    lines: &[&str],
+    nest: usize,
+    out: &mut Vec<(usize, usize, usize)>,
+) {
+    // `walk_tree` builds nothing below the cap, so there is nothing to correct.
+    if nest >= MAX_DEPTH {
+        return;
+    }
     for child in node.children() {
         {
             let data = child.data.borrow();
@@ -419,13 +428,13 @@ fn unescaped_runs<'a>(node: &'a AstNode<'a>, lines: &[&str], out: &mut Vec<(usiz
                 _ => {}
             }
         }
-        unescaped_runs(child, lines, out);
+        unescaped_runs(child, lines, nest + 1, out);
     }
 }
 
 fn pipe_shift<'a>(root: &'a AstNode<'a>, lines: &[&str]) -> PipeShift {
     let mut ranges = Vec::new();
-    unescaped_runs(root, lines, &mut ranges);
+    unescaped_runs(root, lines, 0, &mut ranges);
     ranges.sort_unstable();
 
     let mut runs: Vec<Unescaped> = Vec::new();
@@ -487,22 +496,61 @@ const fn is_list(v: &NodeValue) -> bool {
     matches!(v, NodeValue::List(_) | NodeValue::DescriptionList)
 }
 
+/// How deep into the AST any walk in this crate descends. A node this far down
+/// is taken as a leaf: its own span stays, its children are not visited.
+///
+/// Every walk here recurses — over comrak's AST, and then over the
+/// [`TreeNode`]s built from it, in `highlight` and `app`, and in the derived
+/// `Drop`, `Clone` and `PartialEq` too — so an unbounded document depth is an
+/// unbounded stack. comrak parses a line of 50,000 `>` without complaint;
+/// walking the result overflowed the 8 MiB main-thread stack and aborted the
+/// process. Capping the tree once, where it is built, bounds every one of those
+/// consumers at the same time, including the ones in files that never heard of
+/// the problem.
+///
+/// Nothing a person writes comes near this. The cost past it is a coarser
+/// unit, not a lost line: the capped container is still a unit, and still
+/// covers every line under it.
+pub const MAX_DEPTH: usize = 1000;
+
 // ---------------------------------------------------------------------------
 // Flat navigation units
 // ---------------------------------------------------------------------------
 
-fn walk_flat<'a>(node: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut Vec<Block>) {
+/// `depth` is the list nesting a unit reports as its `level`; `nest` is how far
+/// down the AST the walk already is, which only [`MAX_DEPTH`] reads.
+fn walk_flat<'a>(
+    node: &'a AstNode<'a>,
+    lines: &[&str],
+    depth: usize,
+    nest: usize,
+    out: &mut Vec<Block>,
+) {
     for child in node.children() {
-        walk_child(child, lines, depth, out);
+        walk_child(child, lines, depth, nest + 1, out);
     }
 }
 
 /// One child of a container, as navigation units. Split out of `walk_flat` so a
 /// list item can put the blocks that follow its sublist through the same rules,
 /// rather than a second, thinner copy of them.
-fn walk_child<'a>(child: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mut Vec<Block>) {
+fn walk_child<'a>(
+    child: &'a AstNode<'a>,
+    lines: &[&str],
+    depth: usize,
+    nest: usize,
+    out: &mut Vec<Block>,
+) {
     let value = child.data.borrow().value.clone();
     let span = norm(child.data.borrow().sourcepos, lines);
+
+    // Past the cap, whatever this is becomes one unit covering all of it.
+    if nest >= MAX_DEPTH {
+        if let Some(kind) = kind_of(&value) {
+            push(out, kind, span, depth);
+        }
+        return;
+    }
 
     // Containers that are navigated *through*, not annotated as a unit. The
     // container itself stays reachable via expand-selection.
@@ -512,7 +560,7 @@ fn walk_child<'a>(child: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mu
             NodeValue::BlockQuote | NodeValue::FootnoteDefinition(_)
         )
     {
-        walk_flat(child, lines, depth, out);
+        walk_flat(child, lines, depth, nest, out);
         return;
     }
 
@@ -568,10 +616,10 @@ fn walk_child<'a>(child: &'a AstNode<'a>, lines: &[&str], depth: usize, out: &mu
         push(out, kind, s, depth);
         for grandchild in child.children() {
             if is_list(&grandchild.data.borrow().value) {
-                walk_flat(grandchild, lines, depth + 1, out);
+                walk_flat(grandchild, lines, depth + 1, nest + 1, out);
             } else if norm(grandchild.data.borrow().sourcepos, lines).start.line > s.end.line {
                 // Content the trimmed span no longer covers.
-                walk_child(grandchild, lines, depth, out);
+                walk_child(grandchild, lines, depth, nest + 1, out);
             }
         }
         return;
@@ -600,7 +648,7 @@ pub fn parse(src: &str) -> Vec<Block> {
     let root = parse_document(&arena, src, &options());
 
     let mut out = Vec::new();
-    walk_flat(root, &lines, 0, &mut out);
+    walk_flat(root, &lines, 0, 0, &mut out);
     out.sort_by_key(|b| (b.span.start, b.span.end));
     for (i, b) in out.iter_mut().enumerate() {
         b.id = i;
@@ -630,8 +678,17 @@ pub fn block_at(blocks: &[Block], line: usize) -> Option<usize> {
 // Containment hierarchy
 // ---------------------------------------------------------------------------
 
-fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str], shift: &PipeShift) -> Vec<TreeNode> {
+fn walk_tree<'a>(
+    node: &'a AstNode<'a>,
+    lines: &[&str],
+    shift: &PipeShift,
+    nest: usize,
+) -> Vec<TreeNode> {
     let mut out = Vec::new();
+    // A node at the cap stays in the tree, as a leaf.
+    if nest >= MAX_DEPTH {
+        return out;
+    }
     for child in node.children() {
         let value = child.data.borrow().value.clone();
         let kind = kind_of(&value);
@@ -643,7 +700,7 @@ fn walk_tree<'a>(node: &'a AstNode<'a>, lines: &[&str], shift: &PipeShift) -> Ve
             sp.end.column = shift.source_column(sp.end.line, sp.end.column);
         }
         let span = norm(sp, lines);
-        let kids = walk_tree(child, lines, shift);
+        let kids = walk_tree(child, lines, shift, nest + 1);
         match kind {
             Some(kind) => out.push(TreeNode {
                 kind,
@@ -673,7 +730,7 @@ pub fn parse_tree(src: &str) -> TreeNode {
             end: Pos::new(total, line_len(&lines, total).max(1)),
         },
         setext: false,
-        children: walk_tree(root, &lines, &shift),
+        children: walk_tree(root, &lines, &shift, 0),
     }
 }
 
@@ -1137,6 +1194,49 @@ still para.
                 assert_eq!(n, 1, "line {} {line:?} is in {n} units of {src:?}", i + 1);
             }
         }
+    }
+
+    /// A line of 50,000 `>` aborted `--dump-blocks` with a stack overflow: comrak
+    /// parses it fine, and then every walk over the result recursed once per
+    /// level. Run on a thread with an explicit 2 MiB stack — a quarter of the
+    /// main thread's — so the test fails by overflowing rather than by luck of
+    /// whatever `RUST_MIN_STACK` the harness was given, and through every
+    /// consumer of the tree, since each of them recursed on its own.
+    #[test]
+    fn a_pathologically_deep_document_does_not_overflow_the_stack() {
+        fn depth(n: &TreeNode) -> usize {
+            1 + n.children.iter().map(depth).max().unwrap_or(0)
+        }
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                for src in [
+                    format!("{} x?\n", ">".repeat(50_000)),
+                    format!("{}x\n", "- ".repeat(50_000)),
+                    format!("{}x\n\nafter\n", "> - ".repeat(20_000)),
+                ] {
+                    let bs = parse(&src);
+                    assert!(!bs.is_empty(), "the deep block is still a unit");
+                    let tree = parse_tree(&src);
+                    assert!(depth(&tree) <= MAX_DEPTH + 1, "tree not capped");
+                    let _ = crate::highlight::marks(&tree, &src);
+                    let _ = questions(&tree, &src);
+                    let _ = steps(&tree, &src);
+                    let _ = containment_stack(&tree, Pos::new(1, 1));
+                    let _ = next_inline(&tree, Pos::new(1, 1));
+                    let _ = tree.clone() == tree;
+                    // Every line is still in some unit: the capped container
+                    // is a leaf, not a hole.
+                    for (i, l) in source_lines(&src).iter().enumerate() {
+                        if !l.trim().is_empty() {
+                            assert!(bs.iter().any(|b| b.contains_line(i + 1)), "L{}", i + 1);
+                        }
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
