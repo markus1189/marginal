@@ -834,13 +834,26 @@ fn is_verbatim(kind: &str) -> bool {
     )
 }
 
-fn verbatim_spans(n: &TreeNode, out: &mut Vec<Span>) {
+/// Kinds that hold inline content — the only place prose, and so a question,
+/// can be. Every other byte of the file is markup or something the parser
+/// consumed without building a node: a link reference definition, or a
+/// footnote definition nothing cites.
+fn is_prose(kind: &str) -> bool {
+    matches!(kind, "paragraph" | "heading" | "table-cell")
+}
+
+/// The spans a `?` may stand in (`prose`) and, inside those, the ones it may
+/// not (`verbatim`).
+fn question_spans(n: &TreeNode, prose: &mut Vec<Span>, verbatim: &mut Vec<Span>) {
     if is_verbatim(n.kind) {
-        out.push(n.span);
+        verbatim.push(n.span);
         return;
     }
+    if is_prose(n.kind) {
+        prose.push(n.span);
+    }
     for c in &n.children {
-        verbatim_spans(c, out);
+        question_spans(c, prose, verbatim);
     }
 }
 
@@ -853,7 +866,11 @@ const CLOSERS: [char; 12] = [')', ']', '}', '"', '\'', '»', '”', '’', '*', 
 /// The rule is `?` followed by whitespace or end-of-line, optionally through a
 /// run of closing punctuation — deliberately *not* `?\b`, which matches a `?`
 /// followed by a word character and so selects `example.com?q=1`, the exact
-/// case worth excluding. Verbatim spans are skipped outright.
+/// case worth excluding. Verbatim spans are skipped outright, and so is every
+/// byte outside a paragraph, heading or table cell: comrak builds no node for a
+/// link reference definition or an uncited footnote definition, so the `?` in
+/// `[a]: /u "why? not"` sat on a line no unit covers and nothing could mark as
+/// verbatim — it has to be excluded by *not* being prose instead.
 ///
 /// Takes the already-parsed tree rather than re-parsing, as `highlight::marks`
 /// does: one comrak pass per document, no second parser to disagree with the
@@ -867,15 +884,17 @@ const CLOSERS: [char; 12] = [')', ']', '}', '"', '\'', '»', '”', '’', '*', 
 /// pushing every column after it right as well. Both axes wrong at once, and the
 /// resulting position can name a column past the end of the line it names.
 pub fn questions(root: &TreeNode, src: &str) -> Vec<Pos> {
-    let mut skip = Vec::new();
-    verbatim_spans(root, &mut skip);
+    let (mut prose, mut skip) = (Vec::new(), Vec::new());
+    question_spans(root, &mut prose, &mut skip);
 
     let mut out = Vec::new();
     for (i, text) in source_lines(src).into_iter().enumerate() {
         // '?' is one byte, so `b + 1` is always a character boundary.
         for (b, _) in text.char_indices().filter(|&(_, c)| c == '?') {
             let pos = Pos::new(i + 1, b + 1);
-            if skip.iter().any(|s: &Span| s.contains(pos)) {
+            if !prose.iter().any(|s: &Span| s.contains(pos))
+                || skip.iter().any(|s: &Span| s.contains(pos))
+            {
                 continue;
             }
             let tail = text[b + 1..].trim_start_matches(CLOSERS);
@@ -1825,6 +1844,34 @@ Really??
     fn a_question_mark_inside_a_code_span_or_block_is_not_a_question() {
         assert!(!qlines(QDOC).contains(&5), "code span on line 5");
         assert!(!qlines(QDOC).contains(&8), "fenced block on line 8");
+    }
+
+    /// Neither a link reference definition nor a footnote definition nothing
+    /// cites builds a node — comrak consumes both — so no verbatim span could
+    /// exclude them, and the `?` in a definition's title or body was a stop in
+    /// the ring on a line that belongs to no unit. A question lives in inline
+    /// content, and inline content lives in a paragraph, heading or cell.
+    #[test]
+    fn a_definition_the_parser_consumed_holds_no_questions() {
+        for src in [
+            "[a]: http://x.com?q \"why? not\"\n\npara\n",
+            "> [a]: http://x.com \"why? not\"\n",
+            "[^fn]: really? yes\n\npara\n",
+            "- item\n\n  [a]: /u \"is it? no\"\n",
+        ] {
+            assert!(qlines(src).is_empty(), "{src:?}: {:?}", qlines(src));
+        }
+        // A footnote something *does* cite is prose, and keeps its question.
+        assert_eq!(qlines("x[^fn]\n\n[^fn]: really? yes\n"), vec![3]);
+        // So are a heading and a table cell.
+        assert_eq!(qlines("# Why? Because\n"), vec![1]);
+        assert_eq!(qlines("| a |\n|---|\n| why? not |\n"), vec![3]);
+        // And the plain backend's paragraphs, which are the only nodes it has.
+        let src = "Is this plain? yes\n";
+        assert_eq!(
+            questions(&crate::plain::parse_tree(src), src),
+            vec![Pos::new(1, 14)]
+        );
     }
 
     /// `?\\b` — the obvious first guess — matches exactly this and nothing that
