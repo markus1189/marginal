@@ -424,6 +424,15 @@ the first two characters of every path. Combined (merge) diffs are refused
 outright — `@@@` headers carry two prefix columns, and every counter here
 assumes one.
 
+Paths come from the `diff --git` header first, because a binary file, a mode
+change and an empty new file have no `---`/`+++` pair to name them, and are
+then refined by `rename`/`copy` lines and the `---`/`+++` pair. The TAB git
+appends to a `---`/`+++` path containing a space is dropped. A path that git
+C-quotes is decoded when all it holds is a `"` or a `\`. When it holds a
+control character (TAB, newline) it stays in git's quoted form, `"tab\there.txt"`,
+because that can't sit on one line of a document or in a field of the map. A
+mode change is shown as `mode 100644 → 100755` under the file heading.
+
 ## Keys
 
 | Key | Action |
