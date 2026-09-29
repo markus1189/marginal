@@ -19,6 +19,12 @@ jobs:
     - uses: cachix/install-nix-action@v31
       with:
         nix_path: nixpkgs=channel:nixos-unstable
+    # As in build.yml. A bump moves rustc, so most of this rebuilds anyway,
+    # but the vendored crates and unchanged checks do not.
+    - uses: DeterminateSystems/magic-nix-cache-action@v15
+      with:
+        use-flakehub: false
+        diagnostic-endpoint: ""
     - name: configure git
       run: |
         git config user.name "GitHub Actions Bot"
