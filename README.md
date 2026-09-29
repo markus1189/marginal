@@ -167,8 +167,9 @@ section headed by the bare name and no blockquote:
 split this plan in two
 ```
 
-`version` is `2` since general comments exist; that is the only difference from
-`1`, whose consumers could assume every annotation has a span.
+`version` is `2` since general comments exist, because a `1` consumer could
+assume every annotation has a span. The top-level `final` key below is additive
+and did not bump it.
 
 ### The result file
 

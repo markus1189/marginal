@@ -109,14 +109,14 @@ Put it behind a cargo feature so the lean build stays the default.
   grammar; the hand-rolled scanner is the option that keeps the dependency diet
   above, and tree-sitter is the one that does not.
 - **horizontal scrolling** — deliberately, now. See below.
-- the annotations pane is still a fixed six rows with no scroll keys, but it no
-  longer hides entries silently: the window ends on the annotation the `▸` is
-  on, and the title counts what is off screen (`annotations 5-8/8`). What is
-  missing is a way to read an entry the cursor is nowhere near without moving
-  the cursor to it. The comment editor still caps at eight, but it scrolls both
-  ways, so the row being typed on is always on screen — except below a nine-row
-  terminal, where the fixed six leave the box no content row at all to put it
-  on.
+- the annotations pane has no scroll keys. It sizes to its list — one content
+  row per annotation, up to four — and gives way entirely on a terminal under
+  twelve rows, so it never starves the source view. It does not hide entries
+  silently: the window ends on the annotation the `▸` is on, and the title
+  counts what is off screen (`annotations 5-8/8`). What is missing is a way to
+  read an entry the cursor is nowhere near without moving the cursor to it. The
+  comment editor caps at eight rows and scrolls both ways, so the row being
+  typed on is always on screen.
 
 ## Pretty mode — soft wrap and aligned tables
 

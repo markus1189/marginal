@@ -280,9 +280,9 @@ a line no row of which is 3,497 cells wide.
 
 ### Still open
 
-- The annotations pane is a fixed six rows and does not scroll; the comment
-  editor caps at eight and does not scroll either. Neither wraps. Same
-  primitive would serve both.
+- The annotations pane sizes to its list, up to four entries, and has no
+  scroll keys; the comment editor caps at eight rows and scrolls to keep the
+  row being typed on visible. Neither wraps. Same primitive would serve both.
 - No proportional scrollbar, by choice — Axis A option 3 is the upgrade path if
   one is ever wanted, and nothing here forecloses it.
 

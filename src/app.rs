@@ -357,9 +357,6 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
 /// which contributes nothing. A lead with no chrome at its head gives `(0, 0)`,
 /// and every later line is left whole.
 ///
-/// `table.rs` reads the marker count off a whole source line to tell how deep
-/// a table row sits. Sharing this rather than writing a second scan is what
-/// keeps one file from deciding `>\t` is a container while the other does not.
 pub fn chrome_counts(lead: &str) -> (usize, usize) {
     let (mut markers, mut spaces) = (0, 0);
     for c in lead.chars() {
