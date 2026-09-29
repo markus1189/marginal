@@ -14,8 +14,11 @@
  */
 
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { buildDocument, collectTurns, parseSpec } from "./marginal-annotate.ts";
+import { binaryRuns, buildDocument, collectTurns, parseSpec } from "./marginal-annotate.ts";
 
 const msg = (role, content) => ({ type: "message", id: "x", parentId: null, timestamp: "t", message: { role, content } });
 
@@ -96,4 +99,25 @@ test("nothing to annotate yields no document", () => {
 	assert.equal(buildDocument([], "all"), undefined);
 	assert.equal(buildDocument(collectTurns([msg("user", "hi")]), 1), undefined);
 	assert.equal(buildDocument(collectTurns([msg("user", "hi")]), 2), undefined);
+});
+
+test("a binary is chosen only if it actually runs", () => {
+	// The repo build whose nix loader was garbage-collected: executable, and
+	// exec fails with ENOENT. A dead shebang interpreter fails the same way.
+	const dir = mkdtempSync(join(tmpdir(), "marginal-annotate-test."));
+	try {
+		const script = (name, head, body) => {
+			const path = join(dir, name);
+			writeFileSync(path, `${head}\n${body}\n`);
+			chmodSync(path, 0o755);
+			return path;
+		};
+		const node = `#!${process.execPath}`;
+		assert.equal(binaryRuns(script("ok", node, "process.exit(0)")), true);
+		assert.equal(binaryRuns(script("stale", "#!/nix/store/0000000000000000000000000000000-gone/bin/ld.so", "")), false);
+		assert.equal(binaryRuns(script("fails", node, "process.exit(3)")), false);
+		assert.equal(binaryRuns(join(dir, "absent")), false);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });

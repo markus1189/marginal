@@ -63,14 +63,23 @@ interface MarginalResult {
 	feedbackMarkdown?: string;
 }
 
+/**
+ * Whether `bin` actually runs, not merely exists. A repo build linked against a
+ * nix glibc keeps existing after a garbage collection deletes that glibc's
+ * loader, and then exec fails with ENOENT; `existsSync` chose it anyway, over a
+ * working marginal further down the list. `--help` needs no tty and exits 0.
+ */
+export function binaryRuns(bin: string): boolean {
+	if (!existsSync(bin)) return false;
+	const probe = spawnSync(bin, ["--help"], { stdio: "ignore" });
+	return !probe.error && probe.status === 0;
+}
+
 function resolveBinary(): string | undefined {
-	const fromEnv = process.env.MARGINAL_BIN;
-	if (fromEnv && existsSync(fromEnv)) return fromEnv;
-	if (existsSync(REPO_BUILD)) return REPO_BUILD;
-	if (existsSync(PACKAGED_BIN)) return PACKAGED_BIN;
 	const probe = spawnSync("sh", ["-c", "command -v marginal"], { encoding: "utf8" });
-	const found = probe.stdout?.trim();
-	return found ? found : undefined;
+	const onPath = probe.stdout?.trim();
+	const candidates = [process.env.MARGINAL_BIN, REPO_BUILD, PACKAGED_BIN, onPath];
+	return candidates.find((bin): bin is string => !!bin && binaryRuns(bin));
 }
 
 /** What `/marginal <args>` asked for. `undefined` means the args were nonsense. */
