@@ -51,6 +51,7 @@
 
 use ratatui::buffer::CellWidth as _;
 use ratatui::text::Span;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 /// Cells `s` *claims*: `Span::width()`, the number `Line::width()` sums and the
 /// one a block title's `Rect` is sized from. See the module doc for when this is
@@ -270,27 +271,25 @@ fn units(line: &str) -> Vec<(usize, usize, usize)> {
 }
 
 /// Byte length of the longest prefix of `s` that fits in `limit` cells of pane.
-/// Always a char boundary: it is accumulated a character at a time, never by
+/// Always a grapheme boundary: it is accumulated a cluster at a time, never by
 /// slicing at a computed byte.
 ///
-/// `limit` is a pane, so the measure is [`cells_drawn`]. Charging it per `char`
-/// is exact for the pair the two measures disagree about — [`cells_drawn`] adds
-/// its column per *occurrence* of `U+FF9E`/`U+FF9F`, so a halfwidth katakana and
-/// its dakuten cost 1 apiece whether they are measured together or apart, and
-/// the pane is not over-filled either way. It is **not** exact for a sequence whose
-/// width is a property of the sequence: `"✔\u{FE0F}"` is two cells whole and one
-/// summed per char, the under-count `452b2c8` removed from `shorten_path`. That
-/// gap survives here and is not this function's to close on its own.
+/// `limit` is a pane, so the measure is [`cells_drawn`], charged **per grapheme
+/// cluster** — the unit ratatui's `LineTruncator` lays out and advances by. Per
+/// `char` was exact for halfwidth katakana, where [`cells_drawn`] adds its
+/// column per *occurrence* of `U+FF9E`/`U+FF9F` either way, but not for a
+/// sequence whose width is a property of the sequence: `"✔\u{FE0F}"` is two
+/// cells whole and one summed per char, so a row of VS16 or keycap emoji was
+/// packed to twice the pane and ratatui dropped the second half of it.
 fn prefix_cells(s: &str, limit: usize) -> usize {
-    let mut buf = [0u8; 4];
     let (mut n, mut w) = (0usize, 0usize);
-    for ch in s.chars() {
-        let cw = cells_drawn(ch.encode_utf8(&mut buf));
+    for g in s.graphemes(true) {
+        let cw = cells_drawn(g);
         if w + cw > limit {
             break;
         }
         w += cw;
-        n += ch.len_utf8();
+        n += g.len();
     }
     n
 }
@@ -299,6 +298,10 @@ fn prefix_cells(s: &str, limit: usize) -> usize {
 /// after a URL or path separator, and between two adjacent wide characters,
 /// which is the only break CJK offers since it is written without spaces.
 ///
+/// Walked by grapheme cluster, so no break lands inside one: `✔\u{FE0F}` is
+/// one wide cluster, not a narrow check mark and a zero-width selector, and a
+/// separator carrying a combining mark is not a separator.
+///
 /// "Wide" is [`cells_drawn`] because the question is about the screen, and the
 /// answer has to be the one the row-packing loop below will act on. Halfwidth
 /// katakana is not wide under either measure, so a dakuten run offers no break
@@ -306,19 +309,18 @@ fn prefix_cells(s: &str, limit: usize) -> usize {
 /// charge the right number of cells.
 fn break_points(word: &str) -> Vec<usize> {
     let mut out = Vec::new();
-    let mut buf = [0u8; 4];
     let mut prev_wide = false;
-    for (i, ch) in word.char_indices() {
-        let wide = cells_drawn(ch.encode_utf8(&mut buf)) > 1;
+    for (i, g) in word.grapheme_indices(true) {
+        let wide = cells_drawn(g) > 1;
         if wide && prev_wide && i > 0 {
             out.push(i);
         }
         prev_wide = wide;
         if matches!(
-            ch,
-            '/' | '-' | '_' | '.' | ',' | ';' | ':' | '?' | '&' | '=' | '#'
+            g,
+            "/" | "-" | "_" | "." | "," | ";" | ":" | "?" | "&" | "=" | "#"
         ) {
-            let after = i + ch.len_utf8();
+            let after = i + g.len();
             if after < word.len() {
                 out.push(after);
             }
@@ -413,9 +415,9 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                 // the `else` and pack `indent + sw` cells into a `limit` pane.
                 if w + sw > limit {
                     let mut j = prev;
-                    let mut buf = [0u8; 4];
-                    for ch in line[prev..bp].chars() {
-                        let cw = cells_drawn(ch.encode_utf8(&mut buf));
+                    // Per grapheme, charged whole: see `prefix_cells`.
+                    for g in line[prev..bp].graphemes(true) {
+                        let cw = cells_drawn(g);
                         // Not `brk!`: the loop sets `cur_end` itself on every
                         // character, so seeding it here would be a dead store.
                         if w > 0 && w + cw > limit {
@@ -427,7 +429,7 @@ pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
                             w = 0;
                         }
                         w += cw;
-                        j += ch.len_utf8();
+                        j += g.len();
                         cur_end = j;
                     }
                 } else {
@@ -530,7 +532,7 @@ mod tests {
             for &(s, e) in &rows {
                 let seg = &line[s..e];
                 assert!(
-                    cells_drawn(seg) <= width || seg.chars().count() == 1,
+                    cells_drawn(seg) <= width || seg.graphemes(true).count() == 1,
                     "width {width}: a row of {} drawn cells in a {width}-cell pane",
                     cells_drawn(seg)
                 );
@@ -764,5 +766,46 @@ mod tests {
         assert_eq!(visible(line), "a b?c¿d\u{fffd}e\u{fffd}f");
         // What makes a ZWJ emoji one glyph is not a control and stays.
         assert_eq!(visible("👩\u{200d}👩"), "👩\u{200d}👩");
+    }
+
+    /// A cluster whose width belongs to the sequence was charged per `char`:
+    /// `✔\u{FE0F}` is two cells drawn and one summed, so twelve of them at a
+    /// six-cell pane came back as two rows of twelve cells, and ratatui drew
+    /// the first six cells of each and dropped the rest without a marker. The
+    /// same for a keycap and for a ZWJ family, which sums to eight.
+    ///
+    /// The existing width tests all used characters whose width is their own —
+    /// ASCII, CJK, halfwidth katakana — where per-char and per-cluster agree.
+    #[test]
+    fn a_row_of_emoji_sequences_fits_the_pane_it_was_wrapped_for() {
+        for (unit, cells) in [
+            ("✔\u{FE0F}", 2),
+            ("1\u{FE0F}\u{20E3}", 2),
+            ("👩\u{200D}👩\u{200D}👧\u{200D}👦", 2),
+            ("e\u{301}", 1),
+        ] {
+            assert_eq!(cells_drawn(unit), cells, "{unit:?}");
+            let line = unit.repeat(12);
+            for width in [2usize, 3, 5, 6, 7, 11, 24] {
+                let rows = wrap_line(&line, width, width);
+                let mut kept = String::new();
+                for &(s, e) in &rows {
+                    let seg = &line[s..e];
+                    assert!(
+                        cells_drawn(seg) <= width,
+                        "{unit:?} at {width}: a row of {} cells",
+                        cells_drawn(seg)
+                    );
+                    assert!(seg.graphemes(true).all(|g| g == unit), "split cluster");
+                    kept.push_str(seg);
+                }
+                assert_eq!(kept, line, "{unit:?} at {width}: dropped bytes");
+                assert_eq!(
+                    rows.len(),
+                    12usize.div_ceil(width / cells),
+                    "{unit:?} at {width}"
+                );
+            }
+        }
     }
 }

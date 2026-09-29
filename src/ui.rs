@@ -2974,10 +2974,14 @@ mod tests {
     ///
     /// The line is one word with no break point in it — no separator, and
     /// halfwidth katakana is not wide — so it goes to `wrap_line`'s hard cut,
-    /// which packs a character at a time. `ｶ`, `ﾞ` and a digit are one drawn cell
-    /// each, so a correct row is exactly `body_w` characters and the count is
-    /// exact rather than a bound. That a cluster may be split across two rows is
-    /// the price of a pane with an odd number of columns, and it costs no cell.
+    /// which packs a grapheme cluster at a time. `ｶﾞ` is one two-cell cluster
+    /// and a digit one cell, so a row is `body_w` cells or one short, when the
+    /// next cluster is `ｶﾞ` and only one column is left. The count is therefore
+    /// checked against the rows `line_rows` reports, exactly, and against
+    /// `body_w - 1` cells a row as a floor, so a row that drops its tail fails
+    /// either way. Clusters used to be split across rows here, `ｶ` at the end
+    /// of one and `ﾞ` at the head of the next; charging per grapheme is what
+    /// keeps a `✔\u{FE0F}` inside its pane, and it keeps this pair together.
     ///
     /// The counter between the clusters is not decoration. A line of one
     /// repeated cluster cannot fail `starts_with`: every window of it is a
@@ -3013,9 +3017,23 @@ mod tests {
                 line.starts_with(&shown),
                 "width {w}: the screen is not a prefix of the line: {shown:?}"
             );
+            let (rows, _) = app.line_rows(1);
+            let expected: usize = rows
+                .iter()
+                .take(usize::from(last_body_row))
+                .map(|r| {
+                    line[crate::wrap::row_start(r)..crate::wrap::row_end(r)]
+                        .chars()
+                        .count()
+                })
+                .sum();
+            assert!(
+                expected >= usize::from(body_w - 1) * usize::from(last_body_row),
+                "width {w}: rows hold only {expected} characters"
+            );
             assert_eq!(
                 shown.chars().count(),
-                usize::from(body_w) * usize::from(last_body_row),
+                expected,
                 "width {w}: {} characters on {last_body_row} rows of a {body_w}-cell body — \
                  a short count is text that never reached the terminal",
                 shown.chars().count()
@@ -3524,6 +3542,28 @@ mod tests {
             assert_eq!(pipes("x?y"), want, "BEL row at {w}");
             assert_eq!(pipes("r¿s"), want, "C1 row at {w}");
             assert_eq!(pipes("m\u{fffd}n"), want, "bidi row at {w}");
+        }
+    }
+
+    /// Measured before the fix: twelve `✔\u{FE0F}` in a six-cell body were
+    /// packed as if each took one cell, and the screen showed four check marks
+    /// of the twelve. Counted here off the rendered cells at several widths.
+    #[test]
+    fn every_emoji_sequence_of_a_wrapped_line_reaches_the_screen() {
+        for unit in ["✔\u{FE0F}", "1\u{FE0F}\u{20E3}"] {
+            // The cursor goes on the line above: it is a mark of its own, and this
+            // is about the wrap, not about how the cursor cuts a cluster.
+            let doc = format!("x\n{}\n", unit.repeat(12));
+            // Gutter 6 + borders 2, so body widths 6, 7, 12 and 23.
+            for w in [14u16, 15, 20, 31] {
+                let mut app = App::open("e.txt".into(), &doc, Format::Plain);
+                let buf = render_buf(&mut app, w, 20);
+                let shown = (0..buf.area.height)
+                    .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                    .filter(|&p| buf[p].symbol() == unit)
+                    .count();
+                assert_eq!(shown, 12, "{unit:?} at width {w}");
+            }
         }
     }
 }
