@@ -104,17 +104,20 @@ pub fn parse_tree(src: &str) -> TreeNode {
             end: Pos::new(total, end_col(&lines, total)),
         },
         setext: false,
+        level: 0,
         children: runs(&lines)
             .into_iter()
             .map(|run| TreeNode {
                 kind: "paragraph",
                 span: span_of(&lines, run),
                 setext: false,
+                level: 0,
                 children: (run.0..=run.1)
                     .map(|l| TreeNode {
                         kind: "text",
                         span: span_of(&lines, (l, l)),
                         setext: false,
+                        level: 0,
                         children: Vec::new(),
                     })
                     .collect(),

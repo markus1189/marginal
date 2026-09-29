@@ -5,7 +5,8 @@
 //! * [`parse`] — a flat list of *navigation units*, ordered by position. This
 //!   is what `J`/`K` steps through and what block-wise selection joins.
 //! * [`parse_tree`] — the full containment hierarchy, block **and** inline,
-//!   which powers expand/contract selection.
+//!   which powers expand/contract selection. On top of comrak's nodes it adds
+//!   one kind comrak has no node for, the heading `section` (see `sections`).
 //!
 //! # What the flat list guarantees, and what it does not
 //!
@@ -148,6 +149,9 @@ pub struct TreeNode {
     /// navigation units, and those labels reach `--dump-blocks`, the annotation
     /// JSON and the status line.
     pub setext: bool,
+    /// Heading level for a `heading` and for the `section` it opens; 0 for
+    /// every other kind.
+    pub level: usize,
     pub children: Vec<Self>,
 }
 
@@ -723,6 +727,10 @@ fn walk_tree<'a>(
                 kind,
                 span,
                 setext: matches!(&value, NodeValue::Heading(h) if h.setext),
+                level: match &value {
+                    NodeValue::Heading(h) => h.level as usize,
+                    _ => 0,
+                },
                 children: kids,
             }),
             // Soft/hard breaks and similar: splice their children in rather
@@ -740,6 +748,11 @@ pub fn parse_tree(src: &str) -> TreeNode {
     let arena = Arena::new();
     let root = parse_document(&arena, src, &options());
     let shift = pipe_shift(root, &lines);
+    let mut top = walk_tree(root, &lines, &shift, 0);
+    // comrak moves footnote definitions to the end of the document, so its
+    // child order is not source order. Sections group by position, so they
+    // need source order; nothing else reads the order of siblings.
+    top.sort_by_key(|n| (n.span.start, n.span.end));
     TreeNode {
         kind: "document",
         span: Span {
@@ -747,8 +760,69 @@ pub fn parse_tree(src: &str) -> TreeNode {
             end: Pos::new(total, line_len(&lines, total).max(1)),
         },
         setext: false,
-        children: walk_tree(root, &lines, &shift, 0),
+        level: 0,
+        children: sections(top),
     }
+}
+
+/// Tier 2: the document's top-level blocks, grouped under their headings.
+///
+/// A `section` is a heading and every sibling after it up to the next heading
+/// of the same level or shallower, so `## B` inside `# A` is a section inside a
+/// section and `+` walks paragraph → `## B`'s section → `# A`'s section →
+/// document. It ends on its last child's last byte, not at the next heading:
+/// the blank lines between are nobody's. It starts at column 1 of the
+/// heading's line, not at the heading — a section is a range of lines, and a
+/// heading indented by up to three spaces would otherwise make `App::slice`
+/// trim that much indentation off every later line of the quoted text.
+///
+/// Only **direct document children** open one. A heading inside a blockquote
+/// or a list item is part of that container, and a section cannot end inside
+/// a container it did not start in.
+///
+/// Pure grouping: every existing node keeps its span and its kind, so the
+/// flat units and every consumer of the tree that does not look for
+/// `section` are unaffected. A section holding nothing but its heading has
+/// the heading's line span, and `containment_stack` collapses the pair.
+fn sections(children: Vec<TreeNode>) -> Vec<TreeNode> {
+    fn close(open: &mut Vec<TreeNode>, out: &mut Vec<TreeNode>) {
+        let Some(mut s) = open.pop() else { return };
+        if let Some(last) = s.children.last() {
+            s.span.end = last.span.end;
+        }
+        match open.last_mut() {
+            Some(parent) => parent.children.push(s),
+            None => out.push(s),
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut open: Vec<TreeNode> = Vec::new();
+    for c in children {
+        if c.kind == "heading" {
+            while open.last().is_some_and(|s| s.level >= c.level) {
+                close(&mut open, &mut out);
+            }
+            open.push(TreeNode {
+                kind: "section",
+                span: Span {
+                    start: Pos::new(c.span.start.line, 1),
+                    end: c.span.end,
+                },
+                setext: false,
+                level: c.level,
+                children: vec![c],
+            });
+        } else if let Some(s) = open.last_mut() {
+            s.children.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    while !open.is_empty() {
+        close(&mut open, &mut out);
+    }
+    out
 }
 
 /// Every node containing `pos`, innermost first, ending at the document.
@@ -1773,6 +1847,153 @@ still para.
             }
         }
         assert_eq!(checked, BODIES.len() * ESCAPES.len() * ESCAPES.len());
+    }
+
+    // ---- tier 2: heading sections ----------------------------------------
+
+    fn stack_of(src: &str, pos: Pos) -> Vec<(&'static str, usize, usize)> {
+        containment_stack(&parse_tree(src), pos)
+            .into_iter()
+            .map(|(k, s)| (k, s.start.line, s.end.line))
+            .collect()
+    }
+
+    const SECTIONS: &str = "\
+intro
+
+# A
+
+a para
+
+## B
+
+b para
+
+### C
+
+c para
+
+## D
+
+d para
+
+# E
+
+e para
+";
+
+    /// `+` from content under a heading reaches that heading's section, then
+    /// each enclosing one, then the document. A section ends on its last
+    /// child, never on the blank line before the next heading.
+    #[test]
+    fn expanding_from_content_walks_out_through_nested_sections() {
+        assert_eq!(
+            stack_of(SECTIONS, Pos::new(13, 1)),
+            vec![
+                ("paragraph", 13, 13),
+                ("section", 11, 13),
+                ("section", 7, 13),
+                ("section", 3, 17),
+                ("document", 1, 21),
+            ]
+        );
+        // From the heading itself: the heading, then its section.
+        assert_eq!(
+            stack_of(SECTIONS, Pos::new(7, 4)),
+            vec![
+                ("text", 7, 7),
+                ("heading", 7, 7),
+                ("section", 7, 13),
+                ("section", 3, 17),
+                ("document", 1, 21),
+            ]
+        );
+        // Text before the first heading belongs to no section.
+        assert_eq!(
+            stack_of(SECTIONS, Pos::new(1, 1)),
+            vec![("paragraph", 1, 1), ("document", 1, 21)]
+        );
+    }
+
+    /// A same-level heading closes the section; a shallower one closes every
+    /// deeper section too; a deeper one after a shallower gap still nests.
+    #[test]
+    fn a_section_ends_at_the_next_heading_of_its_level_or_shallower() {
+        let t = parse_tree(SECTIONS);
+        let top: Vec<_> = t
+            .children
+            .iter()
+            .map(|n| (n.kind, n.span.start.line, n.span.end.line))
+            .collect();
+        assert_eq!(
+            top,
+            vec![("paragraph", 1, 1), ("section", 3, 17), ("section", 19, 21)]
+        );
+        // Levels may skip: `###` straight under `#` is still inside it, and a
+        // later `##` closes the `###` but not the `#`.
+        let src = "# A\n\n### C\n\nc\n\n## B\n\nb\n";
+        assert_eq!(
+            stack_of(src, Pos::new(9, 1)),
+            vec![("paragraph", 9, 9), ("section", 7, 9), ("document", 1, 9)],
+            "the # section covers the whole document and collapses into it"
+        );
+        assert_eq!(
+            stack_of(src, Pos::new(5, 1))[1..],
+            [("section", 3, 5), ("document", 1, 9)]
+        );
+    }
+
+    /// comrak moves footnote definitions to the end of the document, so a
+    /// grouping over its child order put a definition written under `# A`
+    /// into whichever section came last.
+    #[test]
+    fn a_footnote_definition_stays_in_the_section_it_is_written_in() {
+        let src = "# A\n\nx[^1]\n\n[^1]: note\n\n# B\n\ny\n";
+        let stack = stack_of(src, Pos::new(5, 7));
+        assert!(stack.contains(&("footnote", 5, 5)), "{stack:?}");
+        assert!(stack.contains(&("section", 1, 5)), "{stack:?}");
+    }
+
+    /// Only direct document children open a section: a heading inside a quote
+    /// or a list item belongs to its container, and a section cannot end in
+    /// the middle of one.
+    #[test]
+    fn a_heading_inside_a_container_opens_no_section() {
+        fn any_section(n: &TreeNode) -> bool {
+            n.kind == "section" || n.children.iter().any(any_section)
+        }
+        for src in [
+            "> # Q\n>\n> quoted\n\nafter\n",
+            "- # L\n\n  item text\n\nafter\n",
+        ] {
+            assert!(!any_section(&parse_tree(src)), "{src:?}");
+        }
+    }
+
+    /// Setext headings open sections like ATX ones, and a section starts at
+    /// column 1 of its heading's line so a slice of it trims nothing from the
+    /// lines below an indented heading.
+    #[test]
+    fn setext_and_indented_headings_open_sections_from_column_one() {
+        let src = "Title\n=====\n\npara\n\n  ## Sub\n\n    code\n";
+        let t = parse_tree(src);
+        let s = &t.children[0];
+        assert_eq!(
+            (s.kind, s.level, s.span.start),
+            ("section", 1, Pos::new(1, 1))
+        );
+        let sub = s.children.iter().find(|c| c.kind == "section").unwrap();
+        assert_eq!((sub.level, sub.span.start), (2, Pos::new(6, 1)));
+        assert_eq!(sub.span.end.line, 8);
+    }
+
+    /// Grouping must not move or relabel anything: the flat units come from a
+    /// separate walk, and every non-section node keeps its span.
+    #[test]
+    fn sections_leave_the_navigation_units_alone() {
+        let kinds: Vec<_> = parse(SECTIONS).iter().map(|b| b.kind).collect();
+        assert!(!kinds.contains(&"section"));
+        assert_eq!(kinds.len(), 11);
     }
 
     #[test]

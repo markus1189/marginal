@@ -67,12 +67,17 @@ Put it behind a cargo feature so the lean build stays the default.
 
 - **tier 1** — tables navigate by row, blockquotes by inner block, plus
   line-wise selection. Done.
+- **tier 2** — heading-scoped sections. Done, as `section` nodes in the
+  containment tree rather than as units: `+` from anywhere under a heading
+  reaches its section, then each enclosing one. A section is a top-level
+  heading plus its following siblings up to the next heading of the same level
+  or shallower, and ends on its last child. Headings inside a blockquote or a
+  list item open none. `J`/`K` and the flat unit list are unchanged.
 - **tier 3** — columns in the cursor, the selection, the rendering, the JSON
   and the feedback locations. Done.
 - **tier 4** — expand/contract on the AST. Done.
 - **tier 5** — semantic `w`/`b` motions between inline nodes. Done, and it
   turned out to be the answer to long lines rather than a nicety: see below.
-- **tier 2** (heading-scoped sections) — not built.
 
 ## Not built yet
 

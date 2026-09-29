@@ -588,13 +588,19 @@ lines in the middle of a forty-line fence.
 onto the innermost thing under it, or `+` to widen:
 
 ```
-text run  →  link  →  paragraph  →  list item  →  list  →  document
+text run  →  link  →  paragraph  →  list item  →  list  →  section  →  document
 ```
 
 You never have to point precisely — land near the thing and adjust. `-` from a
 paragraph gets you the code span inside it; `+` from a table row gets you the
 whole table. Runs of nodes with identical spans collapse, so every press
 visibly moves.
+
+A **section** is a heading and everything after it up to the next heading of
+the same level or shallower, so `+` keeps widening from a `###` section to the
+`##` around it and then the `#`. Only headings at the top level of the
+document open one — a heading inside a blockquote or list item belongs to that
+container.
 
 Note that the cursor must actually sit *inside* a node to reach it: with the
 cursor on the `#` of a heading, `-` has nothing to narrow to, because the text
