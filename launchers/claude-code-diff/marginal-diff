@@ -197,6 +197,7 @@ label="git diff ${git_args[*]}"
 #
 # A `-` in any column means "does not exist on that side".
 
+# shellcheck disable=SC2016  # an awk program: its $0 and $2 are awk's
 render_awk='
 # Every document line is written by `line`, which writes its map row in the
 # same call. They used to be two calls, and ensure_file made one row for three
@@ -477,6 +478,7 @@ fi
 # That is the honest answer: the lines are not in the working tree, and naming a
 # nearby one would be a guess presented as a fact.
 
+# shellcheck disable=SC2016  # an awk program: its $1 and $2 are awk's
 resolve_awk='
 BEGIN { FS = "\037"; nn = 0; no = 0; nh = 0; hasdel = 0 }
 $1 >= S && $1 <= E {

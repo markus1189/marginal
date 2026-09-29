@@ -5,8 +5,9 @@
 #
 # Runs standalone: it calls nix itself and no longer needs `nix develop`.
 set -uo pipefail
-readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+readonly ROOT
+cd "$ROOT" || exit 1
 
 fail=0
 run() {

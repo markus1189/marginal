@@ -189,6 +189,19 @@
           script = "typos";
         };
 
+        # Every shell script in the repo: ./check and the launchers, the
+        # executable files under launchers/ plus the sourced library. -x
+        # follows the launchers' `source=` directive into the library.
+        shellcheck = toolCheck pkgs {
+          name = "shellcheck";
+          fileset = fs.unions [ ./check ./launchers ];
+          tools = [ pkgs.shellcheck pkgs.findutils ];
+          script = ''
+            shellcheck -x check launchers/lib/*.bash \
+              $(find launchers -type f -perm -u+x | sort)
+          '';
+        };
+
         # Previously skipped whenever node was absent, which was always, locally.
         extension = toolCheck pkgs {
           name = "extension";
