@@ -748,6 +748,17 @@ impl App {
         };
     }
 
+    /// `Esc`: back to the unit under the cursor, from any selection shape.
+    ///
+    /// The status goes with it. Every selection announces itself there —
+    /// `block selection — J/K to extend`, `document L1-3` — and a footer still
+    /// reading that after the selection is gone advertises one that no longer
+    /// exists, the same fault `drop_region` fixes for cursor motion.
+    pub fn clear_selection(&mut self) {
+        self.sel = Sel::Here;
+        self.status.clear();
+    }
+
     /// Widen to the smallest hierarchy node strictly containing the selection.
     pub fn expand(&mut self) {
         let stack = self.stack();
@@ -2574,6 +2585,32 @@ https://example.dev/a/very/long/path in it as well.
         assert!(a.status.contains("code-span"), "{}", a.status);
 
         a.goto_first();
+        assert!(matches!(a.sel, Sel::Here));
+        assert!(a.status.is_empty(), "stale status: {}", a.status);
+    }
+
+    /// Found by running the TUI: `v` then `Esc` left the footer reading
+    /// `block selection — J/K to extend`, and `+` then `Esc` left `document
+    /// L1-3`, for selections that had already been dropped.
+    #[test]
+    fn dropping_a_selection_clears_the_status_it_left() {
+        let mut a = app();
+        a.move_block(1);
+        a.toggle_blocks();
+        a.move_block(1);
+        a.clear_selection();
+        assert!(matches!(a.sel, Sel::Here));
+        assert!(a.status.is_empty(), "stale status: {}", a.status);
+
+        a.toggle_lines();
+        a.clear_selection();
+        assert!(matches!(a.sel, Sel::Here));
+        assert!(a.status.is_empty(), "stale status: {}", a.status);
+
+        a.cursor = Pos::new(2, 1);
+        a.expand();
+        assert!(a.status.contains("document"), "{}", a.status);
+        a.clear_selection();
         assert!(matches!(a.sel, Sel::Here));
         assert!(a.status.is_empty(), "stale status: {}", a.status);
     }

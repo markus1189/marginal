@@ -20,7 +20,7 @@ use std::process::ExitCode;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use app::{App, Mode, Sel};
+use app::{App, Mode};
 use format::Format;
 
 const USAGE: &str = "usage: marginal [--dump-blocks] [--raw] [--result[=]PATH] \
@@ -524,7 +524,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // it is what a numbered item is made of, and because every letter
             // near the mark keys is spoken for.
             KeyCode::Char('#') => app.toggle_steps(),
-            KeyCode::Esc => app.sel = Sel::Here,
+            KeyCode::Esc => app.clear_selection(),
             _ => {}
         },
     }
@@ -533,6 +533,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Sel;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
