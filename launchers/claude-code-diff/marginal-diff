@@ -454,7 +454,10 @@ rc=$MARGINAL_RC
          "It most likely never started, but a session that ran and could not write its" \
          "result looks identical from here, and takes the review with it."
 
+final="$(marginal_result_final "$result_json")"
 count="$(jq -r '.annotations | length' "$result_json")"
+# An interrupted review: its notice first, or exit 2 when it holds nothing.
+marginal_check_interrupted "$final" "$count"
 if [ "$count" -eq 0 ]; then
   echo "No annotations — nothing to address."
   exit 0

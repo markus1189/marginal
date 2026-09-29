@@ -57,10 +57,24 @@ const PROMPT_HEADER_MANY = [
 	"",
 ].join("\n");
 
+const PROMPT_INTERRUPTED = [
+	"Note: this review was interrupted. marginal ended before I quit it, so these",
+	"are the comments I had committed up to then: my own, but possibly not all of",
+	"them, and not a sign-off on the rest. Address them, then ask me whether I had",
+	"more to say.",
+	"",
+].join("\n");
+
 interface MarginalResult {
 	decision?: string;
 	annotations?: unknown[];
 	feedbackMarkdown?: string;
+	/**
+	 * `true` only when the human quit; autosaves and every abnormal ending
+	 * write `false`. Absent from a marginal that wrote only on quit, which is
+	 * therefore final.
+	 */
+	final?: boolean;
 }
 
 /**
@@ -217,8 +231,9 @@ export default function (pi: ExtensionAPI) {
 						// captured (stdout has to be the tty) and tui.start()
 						// repaints over it at once. So hold the screen until the
 						// human has seen it and could copy it out. Only when there is
-						// a terminal to wait on; anything else would block forever.
-						if (code === 2 && process.stdin.isTTY) {
+						// a terminal to wait on, since anything else would block
+						// forever, and only when no result file holds the review.
+						if (code === 2 && process.stdin.isTTY && !existsSync(resultPath)) {
 							spawnSync(
 								"sh",
 								[
@@ -240,16 +255,13 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`Could not run ${binary}.`, "error");
 					return;
 				}
-				if (status === 2) {
+				if (!existsSync(resultPath)) {
 					ctx.ui.notify(
-						"marginal failed (exit 2) — nothing was sent. Its output was held on screen before pi resumed; a review it rescued there is the only copy.",
+						status === 2
+							? "marginal failed (exit 2) — nothing was sent. Its output was held on screen before pi resumed; a review it rescued there is the only copy."
+							: "marginal wrote no result file.",
 						"error",
 					);
-					return;
-				}
-
-				if (!existsSync(resultPath)) {
-					ctx.ui.notify("marginal wrote no result file.", "error");
 					return;
 				}
 				// An unguarded parse threw out of the command handler on a
@@ -263,12 +275,30 @@ export default function (pi: ExtensionAPI) {
 				}
 				const count = result.annotations?.length ?? 0;
 				const feedback = result.feedbackMarkdown?.trim();
+				const header = document.label === "conversation" ? PROMPT_HEADER_MANY : PROMPT_HEADER_ONE;
+
+				// Not a verdict, but real work: marginal autosaves with
+				// `final: false`, and that is what is left when the session
+				// ends without the human quitting. Hand the comments back as
+				// interrupted; an empty one is never an approval.
+				if (result.final === false) {
+					if (count === 0 || !feedback) {
+						ctx.ui.notify("The review was interrupted before you quit marginal, with no annotations — nothing sent.", "warning");
+						return;
+					}
+					pi.sendUserMessage(`${PROMPT_INTERRUPTED}\n${header}\n${feedback}\n`);
+					ctx.ui.notify(`Sent ${count} annotation${count === 1 ? "" : "s"} from an interrupted review.`, "warning");
+					return;
+				}
+				if (status === 2) {
+					ctx.ui.notify("marginal failed (exit 2) — nothing was sent.", "error");
+					return;
+				}
 				if (status === 0 || count === 0 || !feedback) {
 					ctx.ui.notify("No annotations — nothing sent.", "info");
 					return;
 				}
 
-				const header = document.label === "conversation" ? PROMPT_HEADER_MANY : PROMPT_HEADER_ONE;
 				pi.sendUserMessage(`${header}\n${feedback}\n`);
 				ctx.ui.notify(`Sent ${count} annotation${count === 1 ? "" : "s"}.`, "info");
 			} finally {

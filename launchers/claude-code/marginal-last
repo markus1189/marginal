@@ -188,11 +188,12 @@ rc=$MARGINAL_RC
 
 # ---------------------------------------------------------------- feedback
 #
-# The result file is the verdict; $rc is only ever a diagnostic. marginal writes
-# it in `finish` — after the last keypress, before it picks its own exit code —
-# on every run that reached the TUI. Reading $rc for the annotated/clean split
-# would report "no annotations" over real feedback on the alacritty path, where
-# rc is always 0.
+# The result file is the verdict when it says `"final": true`; $rc is only ever
+# a diagnostic. marginal writes it final in `finish`, after the last keypress and
+# before it picks its own exit code, and autosaves it non-final after every
+# change before that (see marginal_result_final in the library). Reading $rc for
+# the annotated/clean split would report "no annotations" over real feedback on
+# the alacritty path, where rc is always 0.
 #
 # A missing file does NOT mean the TUI never ran. It usually does — a popup that
 # could not open, a second popup on a client that already has one, a binary that
@@ -215,10 +216,14 @@ rc=$MARGINAL_RC
          "It most likely never started, but a session that ran and could not write its" \
          "result looks identical from here, and takes the review with it."
 
+final="$(marginal_result_final "$result_json")"
 count="$(jq -r '.annotations | length' "$result_json")"
 feedback="$(jq -r '.feedbackMarkdown // ""' "$result_json")"
+if [ -z "${feedback//[[:space:]]/}" ]; then count=0; fi
 
-if [ "$count" -eq 0 ] || [ -z "${feedback//[[:space:]]/}" ]; then
+# An interrupted review: its notice first, or exit 2 when it holds nothing.
+marginal_check_interrupted "$final" "$count"
+if [ "$count" -eq 0 ]; then
   echo "No annotations — nothing to address."
   exit 0
 fi

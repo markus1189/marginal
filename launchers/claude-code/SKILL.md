@@ -36,6 +36,10 @@ cannot see their screen and they are busy using it.
   document, not to any file in the repo, so do not go looking for them on disk.
   A heading ending in **`· general`** is a comment on the whole document, with
   no location and no blockquote; general comments come first.
+- **`**This review was interrupted.**`** above the feedback — marginal ended
+  before the user quit it (a crash, a lost terminal). The comments that follow
+  are real, but may not be all of them. Address them, then ask whether they had
+  more to say. Do not treat anything they did not comment on as approved.
 - **`No annotations — nothing to address.`** — they quit without commenting.
   Acknowledge briefly and carry on with whatever you were doing. Do not re-run
   the command and do not ask them what they meant to say.

@@ -194,8 +194,13 @@ What this means for a consumer:
 | `"final": true` | **The verdict.** The human quit; `decision` and `annotations` are what they meant to hand back. |
 | `"final": false` | **Not a verdict, but real work.** The session ended without the human quitting. Every annotation in it was committed by the human; whether they were done is unknown. Surface it as an interrupted review — do not discard it, and do not report it as approval when it is empty. |
 
-The bundled launchers predate the key and still treat any result file as the
-verdict; reading `.final` is the change they need to tell the two apart.
+The bundled launchers read it that way. On `"final": false` with annotations,
+they hand the annotations back under a notice that the review was interrupted
+and may be incomplete: `marginal-last` and `marginal-diff` on stdout with exit
+`0`, and the pi extension as the next prompt. With no annotations they report
+an interrupted review with no verdict (`2` from the bash launchers, a warning
+in pi), never "No annotations". A file without the key comes from a marginal
+that wrote only on quit, and counts as final.
 
 ## Launchers: annotating an agent's reply
 

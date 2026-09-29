@@ -182,6 +182,28 @@ test("exit 2 sends nothing and says the rescued review is the only copy", async 
 	assert.equal(r.restarted, 1);
 });
 
+test("an interrupted review hands its annotations back, labelled", async () => {
+	// What marginal leaves after a signal: its last autosave, final: false, exit 2.
+	const r = await runCommand(
+		`fs.writeFileSync(result, JSON.stringify({ final: false, annotations: [{}], feedbackMarkdown: "## x · paragraph\\n\\nhalf done" })); process.exit(2);`,
+	);
+	assert.equal(r.sent.length, 1);
+	assert.match(r.sent[0], /^Note: this review was interrupted/);
+	assert.match(r.sent[0], /half done/);
+	assert.deepEqual(r.notes, ["warning: Sent 1 annotation from an interrupted review."]);
+});
+
+test("an interrupted review with nothing in it is not an approval", async () => {
+	// An annotation added and removed again leaves final: false and zero
+	// annotations, with `decision: "approved"` in the file.
+	const r = await runCommand(
+		`fs.writeFileSync(result, JSON.stringify({ final: false, decision: "approved", annotations: [], feedbackMarkdown: "" })); process.exit(2);`,
+	);
+	assert.equal(r.sent.length, 0);
+	assert.equal(r.notes.length, 1);
+	assert.match(r.notes[0], /^warning: The review was interrupted/);
+});
+
 test("annotations come back as the next prompt", async () => {
 	const r = await runCommand(
 		`fs.writeFileSync(result, JSON.stringify({ annotations: [{}], feedbackMarkdown: "## x · paragraph\\n\\nfix it" })); process.exit(1);`,

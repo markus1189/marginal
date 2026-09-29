@@ -158,3 +158,42 @@ marginal_run_on_tty() {
   MARGINAL_CHILD=""
   trap - TERM INT HUP
 }
+
+# ---------------------------------------------------------------- the result
+#
+# marginal rewrites the result file after every change to the annotations with
+# `"final": false`, and once more with `"final": true` when the human quits
+# (README, "The result file"). So a file is not by itself a verdict:
+#
+#   absent          no verdict — the caller says so and exits 2
+#   final: true     the verdict, as it always was
+#   final: false    the session ended without the human quitting — a crash, a
+#                   lost terminal, a signal. Every annotation in it is real and
+#                   was committed by the human; whether they were done is not
+#                   known. Hand them back, labelled; never call an empty one
+#                   an approval, which its `decision` field would.
+#
+# A file without the key comes from a marginal that wrote only on quit, so it is
+# final. `.final // true` would not do: jq's `//` treats `false` as missing.
+
+marginal_result_final() {
+  jq -r 'if .final == false then "false" else "true" end' "$1"
+}
+
+# marginal_check_interrupted FINAL COUNT — dies when an interrupted review holds
+# nothing, and otherwise prints the notice that goes above the feedback of an
+# interrupted one (nothing for a final review).
+marginal_check_interrupted() {
+  [ "$1" = true ] && return 0
+  [ "$2" -gt 0 ] \
+    || die "the review was interrupted before the user quit (launcher rc=$MARGINAL_RC)," \
+           "with no annotations committed — no verdict is available. It is not an approval."
+  # No rc here: a popup whose marginal was killed by a signal reports 0.
+  cat <<'EOF'
+**This review was interrupted.** marginal ended before the user quit it, so
+what follows are the comments they had committed up to that point: their own
+words, but possibly not all of them, and not a sign-off on the rest. Address
+them, then ask the user whether they had more to say.
+
+EOF
+}

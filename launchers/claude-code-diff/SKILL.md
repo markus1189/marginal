@@ -63,6 +63,11 @@ you cannot see their screen and they are busy using it.
   A heading ending in **`· general`** (`## git diff … · general`) is a comment
   on the change as a whole: no location, no blockquote. These come first.
 
+- **`**This review was interrupted.**`** above the feedback — marginal ended
+  before the user quit it (a crash, a lost terminal). The comments that follow
+  are real, but may not be all of them. Address them, then ask whether they had
+  more to say. Do not treat anything they did not comment on as approved.
+
 - **`No annotations — nothing to address.`** — they quit without commenting.
   Acknowledge briefly and carry on. Do not re-run the command and do not ask
   them what they meant to say.
