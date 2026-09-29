@@ -124,6 +124,130 @@ fn chrome_len(text: &str, lead: usize) -> usize {
         .count()
 }
 
+/// The fence character and run length opening `line` at byte `from`, if a
+/// fence opens there: three or more backticks or tildes.
+fn fence_at(line: &str, from: usize) -> Option<(u8, usize)> {
+    let rest = line.get(from..)?.as_bytes();
+    let c = *rest.first().filter(|c| matches!(c, b'`' | b'~'))?;
+    let n = rest.iter().take_while(|b| **b == c).count();
+    (n >= 3).then_some((c, n))
+}
+
+/// Whether a fence opened `(c, n)` names a unified diff: its info string's
+/// first word is `diff` or `patch`, in any case.
+fn is_diff_fence(line: &str, from: usize, (_, n): (u8, usize)) -> bool {
+    line.get(from + n..)
+        .and_then(|info| info.split_whitespace().next())
+        .is_some_and(|w| w.eq_ignore_ascii_case("diff") || w.eq_ignore_ascii_case("patch"))
+}
+
+/// `@@ -a,b +c,d @@` → the line counts `(b, d)` its body holds. A count
+/// left out is 1, as in the unified format. `None` for a header this cannot
+/// read, which the caller treats as a hunk with no known end.
+fn hunk_counts(header: &str) -> Option<(usize, usize)> {
+    let mut it = header.split_whitespace().skip(1);
+    let count = |s: &str, sign: char| -> Option<usize> {
+        let s = s.strip_prefix(sign)?;
+        s.split_once(',').map_or(Some(1), |(_, n)| n.parse().ok())
+    };
+    Some((count(it.next()?, '-')?, count(it.next()?, '+')?))
+}
+
+/// Per-line tags for the body of a ```` ```diff ```` or ```` ```patch ````
+/// fence: `diff-add` for a `+` line, `diff-del` for a `-` line, `diff-hunk`
+/// for an `@@` header and `diff-meta` for the `---`/`+++` file header pair.
+/// Emitted after the fence's own `code` mark, so they win over it.
+///
+/// The one ambiguity is a removed line whose text starts `--` (a SQL or Lua
+/// comment, a flag): as a diff line it reads `---`, exactly like a file
+/// header. Two rules settle it the way `git apply` does. Inside a hunk whose
+/// header gave line counts, a line is a body line until those counts run out,
+/// whatever it starts with. Outside one, `---` is a header only when a `+++`
+/// line follows it — which is also the only way the `/marginal-diff` launcher's
+/// fences, one hunk body each with the `@@` line lifted into a heading, can
+/// hold a `---` at all.
+fn diff_marks(code: &TreeNode, lines: &[&str], out: &mut [LineMarks]) {
+    let span = code.span;
+    let lead = span.start.col - 1;
+    let opener = lines.get(span.start.line - 1).copied().unwrap_or("");
+    let Some(fence) = fence_at(opener, lead) else {
+        return; // an indented code block has no info string
+    };
+    if !is_diff_fence(opener, lead, fence) {
+        return;
+    }
+    // The last line is a closing fence unless the block ran to the end of
+    // its container unclosed.
+    let body_of = |l: usize| {
+        let text = lines.get(l - 1).copied().unwrap_or("");
+        let a = chrome_len(text, lead);
+        (text, a)
+    };
+    let mut last = span.end.line;
+    if last > span.start.line {
+        let (text, a) = body_of(last);
+        let t = text[a..].trim_matches([' ', '\t']);
+        if t.len() >= fence.1 && t.bytes().all(|b| b == fence.0) {
+            last -= 1;
+        }
+    }
+
+    // Lines left in the current hunk, old side and new side; `None` for a
+    // hunk whose header did not say.
+    let mut hunk: Option<Option<(usize, usize)>> = None;
+    let mut l = span.start.line + 1;
+    while l <= last {
+        let (text, a) = body_of(l);
+        let body = &text[a..];
+        let len = text.len();
+        let next = (l < last).then(|| {
+            let (t, b) = body_of(l + 1);
+            &t[b..]
+        });
+        let tag = if body.starts_with("@@") {
+            hunk = Some(hunk_counts(body));
+            "diff-hunk"
+        } else if let Some(Some((o, n))) = hunk
+            .as_mut()
+            .filter(|h| matches!(h, Some((o, n)) if *o + *n > 0))
+        {
+            match body.as_bytes().first() {
+                Some(b'+') => {
+                    *n = n.saturating_sub(1);
+                    "diff-add"
+                }
+                Some(b'-') => {
+                    *o = o.saturating_sub(1);
+                    "diff-del"
+                }
+                Some(b'\\') => "",
+                _ => {
+                    *o = o.saturating_sub(1);
+                    *n = n.saturating_sub(1);
+                    ""
+                }
+            }
+        } else if body.starts_with("---") && next.is_some_and(|n| n.starts_with("+++")) {
+            let (t, b) = body_of(l + 1);
+            add(out, l, a, len, "diff-meta");
+            add(out, l + 1, b, t.len(), "diff-meta");
+            hunk = None;
+            l += 2;
+            continue;
+        } else if body.starts_with('+') {
+            "diff-add"
+        } else if body.starts_with('-') {
+            "diff-del"
+        } else {
+            ""
+        };
+        if !tag.is_empty() {
+            add(out, l, a, len, tag);
+        }
+        l += 1;
+    }
+}
+
 fn add(out: &mut [LineMarks], line: usize, a: usize, b: usize, tag: &'static str) {
     if b > a {
         if let Some(row) = out.get_mut(line.saturating_sub(1)) {
@@ -173,6 +297,7 @@ fn walk(node: &TreeNode, lines: &[&str], out: &mut Vec<LineMarks>) {
                 let n = l.get(from..).map_or(0, heading_marker_len);
                 add(out, span.start.line, from, from + n, "heading-marker");
             }
+            "code" => diff_marks(child, lines, out),
             "list-item" => {
                 // The marker ends where the item's content begins, and comrak
                 // already reports that: the first child's start column is placed
@@ -588,6 +713,100 @@ mod tests {
             tags("> para [a\nlazy](u)\n", 2),
             vec![(0, 8, "quote"), (0, 8, "link")]
         );
+    }
+
+    /// Only the diff tags of each line, so the fence's own `code` mark under
+    /// them does not have to be spelled out in every case.
+    fn diff_tags(src: &str) -> Vec<Vec<(usize, usize, &'static str)>> {
+        marks(&parse_tree(src), src)
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .filter(|m| m.2.starts_with("diff-"))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_diff_fence_colours_added_removed_hunk_and_header_lines() {
+        let src = "```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n```\n";
+        assert_eq!(
+            diff_tags(src),
+            vec![
+                vec![],
+                vec![(0, 7, "diff-meta")],
+                vec![(0, 7, "diff-meta")],
+                vec![(0, 15, "diff-hunk")],
+                vec![],
+                vec![(0, 4, "diff-del")],
+                vec![(0, 4, "diff-add")],
+                vec![],
+            ]
+        );
+        // `patch` too, any case, with more words after it, and tilde fences.
+        for open in ["```patch", "```DIFF", "``` diff title=x", "~~~diff"] {
+            let close = if open.starts_with('~') { "~~~" } else { "```" };
+            let src = format!("{open}\n+a\n-b\n{close}\n");
+            let t = diff_tags(&src);
+            assert_eq!(t[1], vec![(0, 2, "diff-add")], "{open}");
+            assert_eq!(t[2], vec![(0, 2, "diff-del")], "{open}");
+            assert!(t[3].is_empty(), "closing fence tagged: {open}");
+        }
+    }
+
+    /// Nothing outside a diff fence is a diff: another language, an indented
+    /// code block, and a list of `-` items are all left alone.
+    #[test]
+    fn only_a_diff_or_patch_fence_is_coloured_as_a_diff() {
+        for src in [
+            "```sh\n+a\n-b\n```\n",
+            "```\n+a\n-b\n```\n",
+            "    +a\n    -b\n",
+            "- a\n- b\n",
+            "```diffx\n+a\n```\n",
+        ] {
+            assert!(diff_tags(src).iter().all(Vec::is_empty), "{src:?}");
+        }
+    }
+
+    /// A removed line whose text starts `--` reads `---` in a diff, just like
+    /// a file header. Inside a counted hunk it is a body line; outside one it
+    /// is a header only with a `+++` under it — the `/marginal-diff` launcher
+    /// lifts every `@@` into a heading, so its fences are bare hunk bodies.
+    #[test]
+    fn a_removed_line_starting_with_dashes_is_not_a_file_header() {
+        let counted = "```diff\n@@ -1,2 +1,1 @@\n--- a SQL comment\n+++ not a header\n```\n";
+        let t = diff_tags(counted);
+        assert_eq!(t[2], vec![(0, 17, "diff-del")]);
+        assert_eq!(t[3], vec![(0, 16, "diff-add")]);
+        // The launcher's shape: a hunk body and nothing else.
+        let bare = "```diff\n context\n--- gone\n+kept\n```\n";
+        let t = diff_tags(bare);
+        assert_eq!(t[2], vec![(0, 8, "diff-del")]);
+        assert_eq!(t[3], vec![(0, 5, "diff-add")]);
+        // Once a hunk's counts run out, a header pair is a header again.
+        let two = "```diff\n@@ -1 +1 @@\n-a\n+b\n--- a/y\n+++ b/y\n@@ -3 +3 @@\n-c\n```\n";
+        let t = diff_tags(two);
+        assert_eq!(t[4], vec![(0, 7, "diff-meta")]);
+        assert_eq!(t[5], vec![(0, 7, "diff-meta")]);
+        assert_eq!(t[6], vec![(0, 11, "diff-hunk")]);
+        assert_eq!(t[7], vec![(0, 2, "diff-del")]);
+    }
+
+    /// In a container the tags start where the fence's content does, past the
+    /// quote marker or list indentation — the same chrome rule as every other
+    /// continuation line.
+    #[test]
+    fn a_diff_fence_in_a_container_is_tagged_past_its_chrome() {
+        let t = diff_tags("> ```diff\n> +a\n> -b\n> ```\n");
+        assert_eq!(t[1], vec![(2, 4, "diff-add")]);
+        assert_eq!(t[2], vec![(2, 4, "diff-del")]);
+        let t = diff_tags("- item\n\n  ```diff\n  +a\n  ```\n");
+        assert_eq!(t[3], vec![(2, 4, "diff-add")]);
+        // Unclosed: runs to the end of the document, and the last line is body.
+        let t = diff_tags("```diff\n+a\n-b\n");
+        assert_eq!(t[2], vec![(0, 2, "diff-del")]);
     }
 
     /// Front matter is metadata: one dim tag over every line of it, delimiters

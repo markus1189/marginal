@@ -638,7 +638,13 @@ where you are or what you have chosen, and `**bold**` inside a blockquote wins
 over the quote's own styling.
 
 Code *inside* a fence is not highlighted by language. Deliberately out of
-scope — see `STATUS.md` for the options if it ever matters.
+scope — see `STATUS.md` for the options if it ever matters. The one exception
+is a ```` ```diff ```` or ```` ```patch ```` fence, which is what `/marginal-diff`
+renders every hunk into: added lines are green, removed lines red, `@@` hunk
+headers dim cyan, and a `---`/`+++` file header pair bold. That needs no
+grammar, only the first byte of each line — and a removed line that itself
+starts with `--` stays a removed line, because inside a hunk the `@@` counts
+decide and outside one `---` is a header only with a `+++` under it.
 
 ## Tests and checks
 

@@ -49,7 +49,9 @@ paths). Adding it did not move the crate count.
 ## Highlighting code inside fences
 
 Not done, and it is the one thing the AST cannot provide — comrak sees a fence
-body as opaque text. Options, ranked, if it ever matters:
+body as opaque text. The exception is a `diff`/`patch` fence, coloured per line
+by its first byte in `highlight::diff_marks`; that needs no grammar. Options for
+everything else, ranked, if it ever matters:
 
 1. **syntect** — ~100 syntaxes and themes. Costs back the 38 crates and ~1.9 MB
    above, plus oniguruma; the `regex-fancy` feature trades speed for pure Rust.
