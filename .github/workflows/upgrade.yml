@@ -5,9 +5,11 @@ on:
   workflow_dispatch:
 
 # The repository default for GITHUB_TOKEN is read-only; pushing the updated
-# lock file back needs this explicitly.
+# lock file back needs `contents`, starting the Checks workflow for it needs
+# `actions`.
 permissions:
   contents: write
+  actions: write
 
 jobs:
   upgrade:
@@ -41,7 +43,29 @@ jobs:
       run: |
         nix flake update
         nix flake check --print-build-logs
+    # Only an unchanged lock file is "nothing to do". This used to be
+    # `git commit … && git push origin || echo "nothing to do"`, where the
+    # echo also caught a failed commit and a rejected push (main moved while
+    # the check ran) and turned both green.
     - name: commit and push
+      id: push
       run: |
         git add flake.lock
-        git commit -m "Flake Update" && git push origin || echo "nothing to do"
+        if git diff --cached --quiet; then
+          echo "flake.lock unchanged — nothing to do"
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        git commit -m "Flake Update"
+        git push origin HEAD
+        echo "pushed=true" >> "$GITHUB_OUTPUT"
+    # A push made with GITHUB_TOKEN starts no workflow, so the `push:` trigger
+    # of Checks never fired for these commits and main carried them with no
+    # status at all. workflow_dispatch is the documented exception. The gate
+    # is still `update and verify` above, which ran the same suite on the same
+    # tree before anything was pushed; this puts that result on the commit.
+    - name: run Checks on the pushed commit
+      if: steps.push.outputs.pushed == 'true'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh workflow run build.yml --ref "$GITHUB_REF_NAME"
