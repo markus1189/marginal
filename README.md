@@ -415,9 +415,11 @@ launchers/claude-code-diff/marginal-diff --cached --dump-map  # the line map
 The map is worth printing because it is the one part that can be wrong without
 looking wrong: a bad line number renders as a perfectly ordinary line number.
 
-Five of git's own configuration knobs are overridden on the way in —
-`--no-ext-diff`, `--no-color`, `--no-textconv`, `core.quotepath=false` and an
-explicit `--src-prefix=a/ --dst-prefix=b/`. The last is not decoration: this was
+Six of git's own configuration knobs are overridden on the way in —
+`--no-ext-diff`, `--no-color`, `--no-textconv`, `--submodule=short` (under
+`diff.submodule=log` a submodule bump has no `diff --git` header and vanished),
+`core.quotepath=false` and an explicit `--src-prefix=a/ --dst-prefix=b/`. The
+last is not decoration: this was
 written on a machine with `diff.mnemonicPrefix` set, where git emits
 `--- c/keep.txt`, and under `diff.noprefix` the prefix strip would have eaten
 the first two characters of every path. Combined (merge) diffs are refused

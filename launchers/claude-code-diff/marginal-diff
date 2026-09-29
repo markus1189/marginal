@@ -104,10 +104,15 @@ git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 
 # ---------------------------------------------------------------- the diff
 #
-# Four flags, all defending against the user's own git config rather than
+# Five flags, all defending against the user's own git config rather than
 # against git:
 #   --no-ext-diff   diff.external would return something that is not a unified
 #                   diff at all, and every assumption below would be wrong
+#   --submodule=short
+#                   diff.submodule=log prints `Submodule sub a..b:` with no
+#                   `diff --git` header, so a submodule bump vanished from the
+#                   document; =diff inlines the submodule's own files under
+#                   paths that do not exist in this repository
 #   --no-color      color.ui = always sprays SGR escapes through text whose
 #                   byte columns marginal is about to compute
 #   --no-textconv   textconv filters rewrite content, so the line numbers would
@@ -133,7 +138,7 @@ doc="$workdir/git diff.md"          # the space is deliberate: --label shows it
 map="$workdir/map"
 result_json="$workdir/result.json"
 
-git -c core.quotepath=false diff --no-ext-diff --no-color --no-textconv \
+git -c core.quotepath=false diff --no-ext-diff --no-color --no-textconv --submodule=short \
     --src-prefix=a/ --dst-prefix=b/ "${git_args[@]}" > "$raw"
 
 if [ ! -s "$raw" ]; then
