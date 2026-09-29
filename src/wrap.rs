@@ -66,16 +66,59 @@ pub fn cells_drawn(s: &str) -> usize {
     // `str::cell_width` fast-paths a one-byte string to 1, behind a
     // `debug_assert!` that the byte is not an ASCII control — a guard for
     // callers who were meant to have filtered controls out already. The callers
-    // here cannot: they measure the file under review one character at a time,
-    // `source_lines` ends a line only at `\r` or `\n`, and `display_line`
-    // substitutes only `\t`, so the other thirty ASCII control bytes reach this
-    // function intact. Taking the fast path here is the same answer `cell_width`
+    // here cannot promise it: `display_line` swaps controls for placeholders
+    // now, but the peek overlay, the comment editor and the tests all measure
+    // text that has not been through it, and `source_lines` ends a line only at
+    // `\r` or `\n`, so any of the other thirty ASCII control bytes can arrive
+    // here intact. Taking the fast path here is the same answer `cell_width`
     // gives — 1 for any one-byte string, control or not — without the panic a
     // debug build would otherwise take on a file with a stray `\x0c` in it.
     if s.len() == 1 {
         return 1;
     }
     usize::from(s.cell_width())
+}
+
+/// What the screen shows for `c` instead of `c`, if anything.
+///
+/// ratatui drops a grapheme that contains a control character outright
+/// (`Span::styled_graphemes`), while every measure in this crate charges it a
+/// cell, so a BEL in a line used to shift every column after it left by one on
+/// screen — the cursor on it drew nowhere, and raw mode put a `›` on a line
+/// that fitted. Bidi overrides are worse: the terminal honours them and
+/// reorders the row, which is the whole of the "Trojan Source" trick and the
+/// opposite of what a review tool should show.
+///
+/// **Every replacement is the same number of bytes as what it replaces**, and
+/// one cell wide, so a byte offset into the display text is a byte offset into
+/// the source and the JSON columns stay exact:
+///
+/// - a tab is one space, as it always was — see `draw_source`;
+/// - the other C0 controls and DEL, one byte, become `?`;
+/// - the C1 controls `U+0080`–`U+009F` and the Arabic letter mark `U+061C`,
+///   two bytes, become `¿` (`U+00BF`);
+/// - the bidi marks, embeddings, overrides and isolates and the line and
+///   paragraph separators, three bytes each, become `U+FFFD`.
+///
+/// `\n` is left alone: no source line holds one, and the peek overlay's text is
+/// split on it afterwards.
+pub const fn placeholder(c: char) -> Option<char> {
+    match c {
+        '\t' => Some(' '),
+        '\n' => None,
+        '\0'..='\x1f' | '\x7f' => Some('?'),
+        '\u{80}'..='\u{9f}' | '\u{61c}' => Some('\u{bf}'),
+        '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+            Some('\u{fffd}')
+        }
+        _ => None,
+    }
+}
+
+/// `s` as the screen shows it: every character with a [`placeholder`] swapped
+/// for it. Byte-for-byte the same length as `s`.
+pub fn visible(s: &str) -> String {
+    s.chars().map(|c| placeholder(c).unwrap_or(c)).collect()
 }
 
 #[cfg(test)]
@@ -695,5 +738,31 @@ mod tests {
         for r in &rows {
             assert!(cells_drawn(r) <= 7, "{r:?}");
         }
+    }
+
+    /// The contract `display_line` stands on: a placeholder is exactly as many
+    /// bytes as what it replaces and draws in exactly one cell, so a byte column
+    /// into the screen text is the same byte column into the source, and the
+    /// JSON reports it unchanged. Checked over every scalar value in the planes
+    /// the substitution touches, not just the ones it names.
+    #[test]
+    fn a_placeholder_keeps_the_byte_length_and_takes_one_cell() {
+        let mut replaced = 0;
+        for c in (0u32..0x3000).filter_map(char::from_u32) {
+            if let Some(p) = placeholder(c) {
+                replaced += 1;
+                assert_eq!(p.len_utf8(), c.len_utf8(), "{c:?} -> {p:?}");
+                let mut buf = [0u8; 4];
+                assert_eq!(cells_drawn(p.encode_utf8(&mut buf)), 1, "{p:?}");
+                assert_eq!(cells_claimed(p.encode_utf8(&mut buf)), 1, "{p:?}");
+            }
+        }
+        // 32 C0 minus `\n`, DEL, 32 C1, ALM, LRM/RLM, 7 at U+2028, 4 isolates.
+        assert_eq!(replaced, 31 + 1 + 32 + 1 + 2 + 7 + 4);
+        let line = "a\tb\x07c\u{85}d\u{202e}e\u{2067}f";
+        assert_eq!(visible(line).len(), line.len());
+        assert_eq!(visible(line), "a b?c¿d\u{fffd}e\u{fffd}f");
+        // What makes a ZWJ emoji one glyph is not a control and stays.
+        assert_eq!(visible("👩\u{200d}👩"), "👩\u{200d}👩");
     }
 }

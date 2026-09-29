@@ -128,13 +128,13 @@ impl Tables {
     pub fn new(lines: &[String], tree: &TreeNode) -> Self {
         let mut out = vec![None; lines.len()];
         for Extent { from, to, rows } in extents(tree) {
-            // Tabs become one space each before anything measures a column, the
-            // same substitution `App::display_line` makes and for the same
-            // reason: one byte for one cell keeps byte offsets and screen
-            // columns the same number.
+            // Tabs and control characters are substituted before anything
+            // measures a column, the same substitution `App::display_line`
+            // makes and for the same reason: the padding has to be computed
+            // from the text the screen actually draws.
             let texts: Vec<String> = (from..=to)
                 .filter_map(|l| lines.get(l - 1))
-                .map(|t| t.replace('\t', " "))
+                .map(|t| crate::wrap::visible(t))
                 .collect();
             if texts.len() != to + 1 - from {
                 continue;

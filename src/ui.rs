@@ -207,6 +207,14 @@ fn snap_to_rendered(rows: &[Row], text: &str, b: usize) -> usize {
         .unwrap_or(b)
 }
 
+/// How a control or bidi character's placeholder is drawn. See
+/// `wrap::placeholder`.
+fn placeholder_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::REVERSED)
+}
+
 /// Syntax first, then selection, then the cursor: later marks win, so
 /// highlighting never hides where you are or what you have chosen.
 fn line_marks(
@@ -227,6 +235,15 @@ fn line_marks(
         })
         .unwrap_or_default();
 
+    // A placeholder is not what the file says, so it must not read as if it
+    // were: dimmed and reversed, a tile rather than a character. Before the
+    // selection and the cursor, which still win over it.
+    let raw = app.line_text(lineno);
+    marks.extend(
+        raw.char_indices()
+            .filter(|&(_, c)| c != '\t' && crate::wrap::placeholder(c).is_some())
+            .map(|(i, c)| (i, i + c.len_utf8(), placeholder_style())),
+    );
     if let Some((a, b)) = app.selected_bytes_on(lineno) {
         marks.push((a, b, sel_style));
     }
@@ -299,7 +316,9 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
         // outright, so a tab used to vanish and shift every column after it left
         // by one. A single space is one byte for one cell, which keeps the byte
         // column the screen shows identical to the byte column that goes in the
-        // JSON — worth more here than visually correct indentation.
+        // JSON — worth more here than visually correct indentation. Every other
+        // control character gets a placeholder of its own byte length for the
+        // same reason; see `wrap::placeholder`.
         let text = app.display_line(lineno);
         let on_cursor_line = lineno == app.cursor.line;
         let in_current = current.is_some_and(|c| app.blocks[c].contains_line(lineno));
@@ -984,7 +1003,7 @@ fn inset(area: Rect, dx: u16, dy: u16) -> Rect {
 /// touching the cursor or the one-line-per-row mapping underneath.
 fn draw_peek(f: &mut Frame, area: Rect, app: &mut App) {
     let popup = inset(area, 2, 1);
-    let text = app.peek_text().replace('\t', " ");
+    let text = crate::wrap::visible(&app.peek_text());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
@@ -3399,6 +3418,112 @@ mod tests {
                 "width {w}: 22 keys re-wrapped {n} bytes, {}x the line",
                 n / line.len()
             );
+        }
+    }
+
+    // ---- control characters ------------------------------------------------
+
+    /// The cell under the cursor, if any cell carries the cursor style.
+    fn cursor_cell(buf: &ratatui::buffer::Buffer) -> Option<String> {
+        (0..buf.area.height).find_map(|y| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].style().bg == Some(Color::Yellow))
+                .map(|x| buf[(x, y)].symbol().to_string())
+        })
+    }
+
+    /// ratatui drops any grapheme holding a control character, so the cursor
+    /// on a BEL or an ESC used to be drawn nowhere at all — `has_cursor` came
+    /// back false with the cursor sitting on a real byte of the file. A bidi
+    /// override was not dropped but *obeyed*, reordering the row. Each now
+    /// draws as a placeholder of its own byte length, and the cursor lands on
+    /// it.
+    ///
+    /// No existing test put a control character other than a tab in a line:
+    /// `tabs_render_as_one_space_each` was written for the one control a
+    /// markdown file is expected to contain.
+    #[test]
+    fn the_cursor_is_visible_on_every_kind_of_control_character() {
+        for (c, shown) in [
+            ('\x07', "?"),
+            ('\x1b', "?"),
+            ('\x00', "?"),
+            ('\x7f', "?"),
+            ('\u{85}', "¿"),
+            ('\u{9b}', "¿"),
+            ('\u{202e}', "\u{fffd}"),
+            ('\u{2066}', "\u{fffd}"),
+            ('\u{200f}', "\u{fffd}"),
+        ] {
+            let src = format!("ab{c}cd\n");
+            for pretty in [true, false] {
+                for w in [30u16, 80, 120] {
+                    let mut app = App::open("c.txt".into(), &src, Format::Plain);
+                    if !pretty {
+                        app.toggle_pretty();
+                    }
+                    app.cursor = Pos::new(1, 3);
+                    let buf = render_buf(&mut app, w, 12);
+                    assert_eq!(
+                        cursor_cell(&buf).as_deref(),
+                        Some(shown),
+                        "{c:?} pretty={pretty} width {w}"
+                    );
+                    // The bytes after it stay where their byte column says.
+                    let screen = render(&mut app, w, 12);
+                    assert!(screen.contains(&format!("ab{shown}cd")), "{c:?}: {screen}");
+                }
+            }
+        }
+    }
+
+    /// Raw mode's `›` says "this line runs past the edge". A line of eleven
+    /// `x` and a BEL is twelve bytes in a twelve-cell body and fits; it used to
+    /// be *drawn* as eleven cells but *measured* as twelve, so twelve `x` and a
+    /// BEL got a marker over an `x` that was the last thing on the line.
+    #[test]
+    fn a_control_character_is_drawn_in_the_cell_it_is_measured_in() {
+        // Gutter 6 + borders 2: the body is 12 cells.
+        let fits = format!("{}\x07\n", "x".repeat(11));
+        let mut app = App::open("o.txt".into(), &fits, Format::Plain);
+        app.toggle_pretty();
+        let screen = render(&mut app, 20, 12);
+        assert!(screen.contains("xxxxxxxxxxx?│"), "{screen}");
+        assert!(!screen.contains('›'), "{screen}");
+
+        let over = format!("{}\x07\n", "x".repeat(12));
+        let mut app = App::open("o.txt".into(), &over, Format::Plain);
+        app.toggle_pretty();
+        let screen = render(&mut app, 20, 12);
+        assert!(screen.contains("xxxxxxxxxxx›│"), "{screen}");
+    }
+
+    /// Table padding is computed from the cells' widths. A BEL counted one cell
+    /// there and zero on screen, so its row came out one column short and every
+    /// pipe after it sat left of the pipes above and below.
+    #[test]
+    fn a_control_character_does_not_misalign_its_table_row() {
+        let src = "| a | b |\n|---|---|\n| x\x07y | z |\n| long cell | q |\n| r\u{85}s | w |\n| m\u{202e}n | v |\n";
+        for w in [40u16, 80, 120] {
+            let mut app = App::open("t.md".into(), src, Format::Markdown);
+            let buf = render_buf(&mut app, w, 16);
+            let pipes = |needle: &str| -> Vec<u16> {
+                let y = (0..buf.area.height)
+                    .find(|&y| {
+                        (0..buf.area.width)
+                            .map(|x| buf[(x, y)].symbol())
+                            .collect::<String>()
+                            .contains(needle)
+                    })
+                    .unwrap_or_else(|| panic!("no row with {needle:?}"));
+                (8..buf.area.width - 1)
+                    .filter(|&x| buf[(x, y)].symbol() == "|")
+                    .collect()
+            };
+            let want = pipes("long cell");
+            assert_eq!(pipes("x?y"), want, "BEL row at {w}");
+            assert_eq!(pipes("r¿s"), want, "C1 row at {w}");
+            assert_eq!(pipes("m\u{fffd}n"), want, "bidi row at {w}");
         }
     }
 }

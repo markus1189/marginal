@@ -596,10 +596,11 @@ impl App {
     // every function here is the identity; with it on, one source line is one
     // or more rows and the mapping runs through `wrap_source`.
 
-    /// The line as the screen shows it. Tabs become one space each so a byte
-    /// offset stays a cell offset — see the note in `draw_source`.
+    /// The line as the screen shows it: tabs as one space each, control and
+    /// bidi characters as a visible placeholder of the same byte length, so a
+    /// byte offset stays a byte offset — see `wrap::placeholder`.
     pub fn display_line(&self, line: usize) -> String {
-        self.line_text(line).replace('\t', " ")
+        wrap::visible(self.line_text(line))
     }
 
     /// Rows of line `line` — source bytes and any alignment padding, in screen
