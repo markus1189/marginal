@@ -112,7 +112,11 @@ def plumbing:
   machine
   or test("^<(command-name|command-message|command-args|bash-input|user-memory-input|background-task-input)>");
 
-[ .[]
+# Raw lines, parsed one at a time. The transcript is appended to while this
+# runs — by the very turn that invoked it — so its last line can be half
+# written, and `jq -s` failed the whole read over it. A line that does not
+# parse is skipped; every complete one before it is still there.
+[ inputs | fromjson? // empty
   | select((.isSidechain // false) | not)
   | select((.isMeta // false) | not)
   # the summary `/compact` leaves behind, written as a user message that
@@ -156,7 +160,7 @@ JQ
 
 # --argjson so `1` is a number and `01` cannot become a different view
 if [ "$spec" = "all" ]; then count_arg='"all"'; else count_arg="$spec"; fi
-document="$(jq -s --argjson count "$count_arg" "$JQ_PROG" "$transcript")"
+document="$(jq -nR --argjson count "$count_arg" "$JQ_PROG" "$transcript")"
 [ "$document" != "null" ] || die "no assistant message with text in $(basename "$transcript")"
 
 workdir="$(mktemp -d -t claude-code.marginal-last.XXXXXX)"
