@@ -25,6 +25,7 @@ fn tag_of(kind: &str) -> Option<&'static str> {
         "strike" => "strike",
         "html" | "html-inline" => "html",
         "hr" => "hr",
+        "front-matter" => "front-matter",
         "blockquote" => "quote",
         "table-row" => "table",
         "table-cell" => "cell",
@@ -523,6 +524,16 @@ mod tests {
                 ("list-marker", "3. ")
             ]
         );
+    }
+
+    /// Front matter is metadata: one dim tag over every line of it, delimiters
+    /// included, and none of the heading and rule marks it used to get.
+    #[test]
+    fn front_matter_is_tagged_as_one_block() {
+        let src = "---\ntitle: x\n---\n\nbody\n";
+        assert_eq!(tags(src, 1), vec![(0, 3, "front-matter")]);
+        assert_eq!(tags(src, 2), vec![(0, 8, "front-matter")]);
+        assert_eq!(tags(src, 3), vec![(0, 3, "front-matter")]);
     }
 
     #[test]

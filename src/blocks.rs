@@ -161,6 +161,12 @@ pub fn options() -> Options<'static> {
     o.extension.strikethrough = true;
     o.extension.autolink = true;
     o.extension.footnotes = true;
+    // YAML front matter. Without this the opening `---` is a thematic break
+    // and the closing one a setext underline, so `title: x` became a level-2
+    // heading and every `?` in the YAML a question stop. comrak only takes the
+    // block when it opens on line 1 and is closed; `---` / `---` with nothing
+    // between is still two rules.
+    o.extension.front_matter_delimiter = Some("---".to_owned());
     o
 }
 
@@ -471,6 +477,7 @@ const fn kind_of(v: &NodeValue) -> Option<&'static str> {
         NodeValue::Heading(_) => "heading",
         NodeValue::CodeBlock(_) => "code",
         NodeValue::HtmlBlock(_) => "html",
+        NodeValue::FrontMatter(_) => "front-matter",
         NodeValue::ThematicBreak => "hr",
         NodeValue::Table(_) => "table",
         NodeValue::TableRow(_) => "table-row",
@@ -821,7 +828,10 @@ fn fold_inline(
 /// other language — a glob, a regex, a ternary, a query string — and stopping
 /// on it is how a jump key loses the reader's trust.
 fn is_verbatim(kind: &str) -> bool {
-    matches!(kind, "code" | "code-span" | "html" | "html-inline")
+    matches!(
+        kind,
+        "code" | "code-span" | "html" | "html-inline" | "front-matter"
+    )
 }
 
 fn verbatim_spans(n: &TreeNode, out: &mut Vec<Span>) {
@@ -1237,6 +1247,33 @@ still para.
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    /// Without the front-matter extension the opening `---` was a rule and the
+    /// closing one a setext underline, so `title: x` became a level-2 heading
+    /// and the YAML's `?` a question stop. comrak reports the block at `1:1`
+    /// through the closing delimiter whatever the line ending, BOM or not.
+    #[test]
+    fn yaml_front_matter_is_one_unit_and_not_markdown() {
+        for src in [
+            "---\ntitle: x?\n---\n\nbody\n",
+            "---\r\ntitle: x?\r\n---\r\n\r\nbody\r\n",
+            "\u{feff}---\ntitle: x?\n---\n\nbody\n",
+        ] {
+            assert_eq!(
+                flat(src),
+                vec![("front-matter", 1, 3), ("paragraph", 5, 5)],
+                "{src:?}"
+            );
+            assert!(questions(&parse_tree(src), src).is_empty(), "{src:?}");
+        }
+        // Only a closed block on line 1 is front matter. Two bare rules are
+        // still two rules, and a `---` pair lower down is markdown as before.
+        assert_eq!(flat("---\n---\n"), vec![("hr", 1, 1), ("hr", 2, 2)]);
+        assert_eq!(
+            flat("para\n\n---\ntitle: x\n---\n"),
+            vec![("paragraph", 1, 1), ("hr", 3, 3), ("heading", 4, 5)]
+        );
     }
 
     #[test]

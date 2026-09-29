@@ -66,7 +66,7 @@ the TUI or `--dump-blocks` sees a unit:
 
 | extension | backend | what you get |
 |---|---|---|
-| `.md`, `.markdown` | **markdown**, via comrak | everything below: headings, list items, table rows, the inline hierarchy, syntax colour |
+| `.md`, `.markdown` | **markdown**, via comrak | everything below: headings, list items, table rows, YAML front matter as one unit, the inline hierarchy, syntax colour |
 | anything else | **plain** | paragraphs, lines, comments, JSON |
 
 `--format markdown` and `--format plain` override the guess in either direction.

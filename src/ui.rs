@@ -66,6 +66,7 @@ fn syntax_style(tag: &str) -> Style {
         "strike" => s.add_modifier(Modifier::CROSSED_OUT),
         "html" => s.fg(Color::DarkGray),
         "hr" => s.fg(Color::DarkGray),
+        "front-matter" => s.fg(Color::DarkGray).add_modifier(Modifier::DIM),
         "quote" => s.fg(Color::Indexed(245)).add_modifier(Modifier::ITALIC),
         "table" => s.fg(Color::DarkGray),
         "cell" => s.fg(Color::Reset),
