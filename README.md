@@ -290,6 +290,10 @@ The transcript is read from `~/.claude/projects/*/$CLAUDE_CODE_SESSION_ID.jsonl`
 rather than from a session API. `isSidechain` entries (subagents) are dropped
 along with thinking, tool calls, tool results and `isMeta` entries — the last of
 those matters, since the injected skill body itself arrives as a user message.
+So are the assistant entries Claude Code writes in the model's place: model
+`<synthetic>` ("No response requested." after an interrupt) and
+`isApiErrorMessage` ("API Error: …"). Either one would otherwise be offered as
+"the last message".
 
 There is deliberately **no fallback** when the session id is missing. A project
 directory accumulates hundreds of past sessions and two windows on one repo

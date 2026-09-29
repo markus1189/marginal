@@ -107,6 +107,11 @@ def plumbing: test("^<[a-z][a-z0-9-]*>");
   | select((.isMeta // false) | not)
   | select(.type == "assistant" or .type == "user")
   | select(.message.role == "assistant" or .message.role == "user")
+  # Claude Code's own stand-ins for a reply the model never gave: "No response
+  # requested." after an interrupt, "API Error: …" after a failed request.
+  # Neither is a message anyone read as the agent's answer.
+  | select(.message.model != "<synthetic>")
+  | select((.isApiErrorMessage // false) | not)
   | { role: .message.role, text: ((turn_text // "") | trimmed) }
   | select(.text != "")
 ]
