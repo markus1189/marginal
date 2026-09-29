@@ -3348,4 +3348,57 @@ mod tests {
             }
         }
     }
+
+    /// Bytes `wrap_line` was handed while `f` ran.
+    fn bytes_wrapped(f: impl FnOnce()) -> usize {
+        let before = crate::wrap::WRAPPED_BYTES.with(std::cell::Cell::get);
+        f();
+        crate::wrap::WRAPPED_BYTES.with(std::cell::Cell::get) - before
+    }
+
+    /// Every row stepped inside a wrapped line used to re-wrap the whole line:
+    /// `step_row` asks `row_count`, which asked `line_rows`, which ran
+    /// `wrap_line` from byte 0. `keep_cursor_visible` takes up to a viewport of
+    /// those steps per frame, so a `C-n` inside a 1 MB line cost ~146 ms and
+    /// inside a 5 MB line ~830 ms in a release build. Bytes wrapped is the
+    /// timing-free measure: a keypress inside the line should cost at most one
+    /// wrap of it, not one per row walked.
+    ///
+    /// No existing test could see it: every one of them is about *what* the
+    /// rows are, and the rows were always right — only their price was wrong.
+    #[test]
+    fn moving_inside_a_long_line_does_not_rewrap_it_per_row() {
+        let line = "word ".repeat(40_000);
+        let src = format!("{line}\nnext\n");
+        for w in [60u16, 95, 120] {
+            let mut app = App::open("big.txt".into(), &src, Format::Plain);
+            let mut scroll = Anchor::default();
+            render_kept(&mut app, &mut scroll, w, 20);
+            for _ in 0..50 {
+                app.move_row(1);
+            }
+            render_kept(&mut app, &mut scroll, w, 20);
+            assert_eq!(scroll.line, 1, "setup: left the long line at {w}");
+
+            let n = bytes_wrapped(|| {
+                for _ in 0..10 {
+                    app.move_row(1);
+                    render_kept(&mut app, &mut scroll, w, 20);
+                }
+                for _ in 0..10 {
+                    app.move_row(-1);
+                    render_kept(&mut app, &mut scroll, w, 20);
+                }
+                app.page(1, false);
+                render_kept(&mut app, &mut scroll, w, 20);
+                app.page(-1, true);
+                render_kept(&mut app, &mut scroll, w, 20);
+            });
+            assert!(
+                n <= line.len(),
+                "width {w}: 22 keys re-wrapped {n} bytes, {}x the line",
+                n / line.len()
+            );
+        }
+    }
 }

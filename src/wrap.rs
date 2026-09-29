@@ -78,6 +78,14 @@ pub fn cells_drawn(s: &str) -> usize {
     usize::from(s.cell_width())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bytes `wrap_line` has been handed on this thread. Test-only: it is how
+    /// a test bounds how often a long line is re-wrapped without timing
+    /// anything. Per thread, so tests running in parallel do not share it.
+    pub static WRAPPED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One piece of a rendered row.
 ///
 /// A row used to be a single byte range. It is a sequence now because pretty
@@ -287,6 +295,8 @@ fn break_points(word: &str) -> Vec<usize> {
 /// place. Trailing spaces are left outside every range so they overhang the
 /// edge instead of taking a row of their own.
 pub fn wrap_line(line: &str, first: usize, rest: usize) -> Vec<(usize, usize)> {
+    #[cfg(test)]
+    WRAPPED_BYTES.with(|n| n.set(n.get() + line.len()));
     if first == 0 || rest == 0 {
         return Vec::new();
     }

@@ -10,7 +10,9 @@
 //! * `+`/`-` — a node from the markdown containment hierarchy, from an inline
 //!   code span up to the whole document
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use serde::Serialize;
 
@@ -209,6 +211,8 @@ pub struct App {
     /// Where every line starts in row space. Rebuilt when the geometry it was
     /// measured at changes; see `RowIndex`.
     rows: RowIndex,
+    /// The last few long lines `line_rows` wrapped; see `WrapCache`.
+    wrapped: WrapCache,
     next_id: usize,
 }
 
@@ -247,6 +251,62 @@ impl RowIndex {
             pretty: false,
             prefix: Vec::new(),
         }
+    }
+}
+
+/// One line's rows, as `line_rows` hands them out.
+type Wrapped = Rc<(Vec<Row>, usize)>;
+
+/// The rows of the last few **long** lines, keyed by what they were wrapped at.
+///
+/// Motion is anchor-addressed and walks one row at a time, and every step asks
+/// `row_count` how tall the line it is on is. Uncached that is a fresh
+/// `wrap_line` over the whole line per row stepped: `keep_cursor_visible`
+/// alone takes up to a viewport of steps a frame, so one `C-n` inside a 1 MB
+/// line cost ~146 ms and inside a 5 MB line ~830 ms, `C-f` twice that. The
+/// walk is O(viewport) in *rows* as designed; it was the measuring of each row
+/// that was O(line).
+///
+/// Only lines of `MIN` bytes or more are kept. A short line re-wraps in
+/// microseconds, and admitting every line would let a screenful of them evict
+/// the one line that is actually expensive. `&self` readers, so the cache is a
+/// `RefCell` — every borrow is local to `get` and never held across a call.
+///
+/// The key is the whole of what a line's rows depend on: the source never
+/// changes, and `line_rows` reads nothing else but `body_width` and `pretty`.
+#[derive(Default)]
+struct WrapCache(RefCell<Vec<(usize, usize, bool, Wrapped)>>);
+
+impl WrapCache {
+    const MIN: usize = 4096;
+    const SLOTS: usize = 4;
+
+    fn get(
+        &self,
+        line: usize,
+        width: usize,
+        pretty: bool,
+        len: usize,
+        make: impl FnOnce() -> (Vec<Row>, usize),
+    ) -> Wrapped {
+        if len < Self::MIN {
+            return Rc::new(make());
+        }
+        if let Some(hit) = self
+            .0
+            .borrow()
+            .iter()
+            .find(|e| (e.0, e.1, e.2) == (line, width, pretty))
+        {
+            return Rc::clone(&hit.3);
+        }
+        let rows = Rc::new(make());
+        let mut slots = self.0.borrow_mut();
+        if slots.len() == Self::SLOTS {
+            slots.remove(0);
+        }
+        slots.push((line, width, pretty, Rc::clone(&rows)));
+        rows
     }
 }
 
@@ -525,6 +585,7 @@ impl App {
             body_width: 0,
             tables,
             rows: RowIndex::new(),
+            wrapped: WrapCache::default(),
             next_id: 1,
         }
     }
@@ -548,18 +609,28 @@ impl App {
     /// the padding for any table whose aligned width does not fit, so the two
     /// transforms never have to compose on one line.
     pub fn line_rows(&self, line: usize) -> (Vec<Row>, usize) {
-        let text = self.display_line(line);
-        if self.pretty {
-            if let Some(pads) = self.tables.pads(line, self.body_width) {
-                return (vec![table::row(text.len(), pads)], 0);
-            }
-        }
-        let width = if self.pretty { self.body_width } else { 0 };
-        wrap::wrap_source(&text, width)
+        (*self.wrapped_rows(line)).clone()
+    }
+
+    /// `line_rows` without the copy, through the cache that makes walking a
+    /// long line affordable. See `WrapCache`.
+    fn wrapped_rows(&self, line: usize) -> Wrapped {
+        let len = self.line_text(line).len();
+        self.wrapped
+            .get(line, self.body_width, self.pretty, len, || {
+                let text = self.display_line(line);
+                if self.pretty {
+                    if let Some(pads) = self.tables.pads(line, self.body_width) {
+                        return (vec![table::row(text.len(), pads)], 0);
+                    }
+                }
+                let width = if self.pretty { self.body_width } else { 0 };
+                wrap::wrap_source(&text, width)
+            })
     }
 
     pub fn row_count(&self, line: usize) -> usize {
-        self.line_rows(line).0.len().max(1)
+        self.wrapped_rows(line).0.len().max(1)
     }
 
     /// Bring the row index up to the current geometry, rebuilding it only when
@@ -625,9 +696,11 @@ impl App {
     /// subtracted its way to a panic; a row shape that reopens that gap should
     /// give a wrong row rather than no row.
     pub fn cursor_row(&self) -> usize {
-        let (rows, _) = self.line_rows(self.cursor.line);
+        let wrapped = self.wrapped_rows(self.cursor.line);
         let b = self.cursor.col.saturating_sub(1);
-        rows.iter()
+        wrapped
+            .0
+            .iter()
             .rposition(|r| wrap::row_start(r) <= b)
             .unwrap_or(0)
     }
