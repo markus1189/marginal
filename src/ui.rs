@@ -249,10 +249,15 @@ fn line_marks(
     }
     if lineno == app.cursor.line {
         let c0 = snap_to_rendered(rows, text, cursor_byte(app, text));
+        // One grapheme cluster, not one char — the rule `draw_input` already
+        // follows for the comment caret. A span is segmented on its own, so a
+        // cursor mark ending after `✔` hands ratatui `✔` and `\u{FE0F}…` as two
+        // clusters: the check mark draws one cell narrow and the selector
+        // attaches to nothing.
         let c1 = text[c0..]
-            .char_indices()
-            .nth(1)
-            .map_or(text.len(), |(i, _)| c0 + i);
+            .graphemes(true)
+            .next()
+            .map_or(text.len(), |g| c0 + g.len());
         if c1 > c0 {
             marks.push((c0, c1, cur_style));
         }
@@ -3563,6 +3568,34 @@ mod tests {
                     .filter(|&p| buf[p].symbol() == unit)
                     .count();
                 assert_eq!(shown, 12, "{unit:?} at width {w}");
+            }
+        }
+    }
+
+    /// The cursor mark covered one `char`, so on `✔\u{FE0F}` it styled the
+    /// check mark alone and left the selector to the next span. ratatui
+    /// segments each span on its own, so the cluster was cut in two: the
+    /// cursor cell drew a one-cell `✔` and the row came out a cell short.
+    #[test]
+    fn the_cursor_covers_the_whole_emoji_sequence_it_sits_on() {
+        for unit in ["✔\u{FE0F}", "1\u{FE0F}\u{20E3}", "e\u{301}"] {
+            let doc = format!("{}\n", unit.repeat(4));
+            for pretty in [true, false] {
+                for w in [20u16, 80, 120] {
+                    let mut app = App::open("e.txt".into(), &doc, Format::Plain);
+                    if !pretty {
+                        app.toggle_pretty();
+                    }
+                    for k in 0..4 {
+                        app.cursor = Pos::new(1, 1 + k * unit.len());
+                        let buf = render_buf(&mut app, w, 12);
+                        assert_eq!(
+                            cursor_cell(&buf).as_deref(),
+                            Some(unit),
+                            "{unit:?} #{k} pretty={pretty} width {w}"
+                        );
+                    }
+                }
             }
         }
     }
