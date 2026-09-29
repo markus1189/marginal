@@ -16,7 +16,7 @@ use ratatui::Frame;
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::app::{Anchor, App, Mode};
-use crate::wrap::{cells_claimed, cells_drawn, wrap, Piece, Row};
+use crate::wrap::{cells_claimed, cells_drawn, row_end, row_start, wrap, Piece, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     // The comment box grows with the comment, up to a point.
@@ -434,8 +434,24 @@ fn draw_source(f: &mut Frame, area: Rect, app: &mut App, scroll: &mut Anchor) {
                 // A cursor past the edge leaves no cursor cell on screen at all.
                 // The marker takes the cursor's colour in that case, so the screen
                 // still says where you are — `w`/`b`, `0` and `z` get you back to it.
-                let hidden =
-                    on_cursor_line && cells_drawn(&text[..cursor_byte(app, &text)]) >= body_w;
+                //
+                // "Past the edge" is where the cursor's cluster *ends*, measured
+                // from the start of this row. ratatui drops a cluster that does
+                // not fit whole, so a wide character straddling the last column
+                // is as gone as one beyond it — and in pretty mode the only row
+                // that can overflow is one wide character in a pane narrower
+                // than it, where the cursor starts at column 0 and was never
+                // counted as past anything.
+                let hidden = on_cursor_line && {
+                    let (s, e) = (row_start(pieces), row_end(pieces));
+                    let c0 = cursor_byte(app, &text);
+                    let c1 = text[c0..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(c0, |g| c0 + g.len());
+                    let lead = if k == 0 { 0 } else { indent };
+                    (s..e).contains(&c0) && lead + cells_drawn(&text[s..c1]) > body_w
+                };
                 let dim = Style::default().fg(Color::DarkGray);
                 overflow.push((idx, if hidden { cur_style } else { dim }));
             }
@@ -3597,6 +3613,49 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A wide character that cannot be drawn in its row is dropped by ratatui,
+    /// and the row's `›` is all that is left of it. When the cursor is on that
+    /// character the marker has to carry the cursor, or there is no cursor on
+    /// screen at all. Two shapes reach this:
+    ///
+    /// - a body one cell wide, where `wrap_line` gives each wide character a
+    ///   row of its own and every such row overflows — the cursor is at the
+    ///   row's column 0, and the old test, "cells before the cursor reach the
+    ///   edge", is never true at column 0;
+    /// - raw mode, a wide character straddling the last column: the cells
+    ///   before it are one short of the edge, so it did not count as past it,
+    ///   but it does not fit whole and so is not drawn either.
+    ///
+    /// The overflow tests all used one-cell characters, where "starts at the
+    /// edge" and "does not fit" are the same condition.
+    #[test]
+    fn the_cursor_on_a_wide_character_that_does_not_fit_is_still_on_screen() {
+        for pretty in [true, false] {
+            // Gutter 6 + borders 2: a 9-column terminal has a one-cell body.
+            let mut app = App::open("w.txt".into(), "日本\n", Format::Plain);
+            if !pretty {
+                app.toggle_pretty();
+            }
+            app.cursor = Pos::new(1, 1);
+            let buf = render_buf(&mut app, 9, 12);
+            assert_eq!(cursor_cell(&buf).as_deref(), Some("›"), "pretty={pretty}");
+        }
+        // Raw, body 12: eleven cells fit, and `日` would need the 12th and 13th.
+        for w in [20u16, 21] {
+            let body = usize::from(w) - 8;
+            let line = format!("{}日x\n", "x".repeat(body - 1));
+            let mut app = App::open("w.txt".into(), &line, Format::Plain);
+            app.toggle_pretty();
+            app.cursor = Pos::new(1, body);
+            let buf = render_buf(&mut app, w, 12);
+            assert_eq!(cursor_cell(&buf).as_deref(), Some("›"), "width {w}");
+            // And one to the left, which is drawn, keeps a real cursor cell.
+            app.cursor = Pos::new(1, body - 1);
+            let buf = render_buf(&mut app, w, 12);
+            assert_eq!(cursor_cell(&buf).as_deref(), Some("x"), "width {w}");
         }
     }
 }
