@@ -780,7 +780,7 @@ fn source_title(app: &App, width: u16) -> String {
     // Two of the three are the border corners, the third is the pad space that
     // `format!` appends below.
     let budget = usize::from(width).saturating_sub(cells_claimed(&rest) + 3);
-    format!("{rest}{} ", shorten_path(app.display_name(), budget))
+    format!("{rest}{} ", shorten_path(&app.display_name(), budget))
 }
 
 /// `1 annotation`, `2 annotations`, `0 annotations`. Every noun the title
