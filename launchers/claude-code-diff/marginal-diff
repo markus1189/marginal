@@ -541,8 +541,11 @@ resolve() { awk -v S="$1" -v E="$2" "$resolve_awk" "$map"; }
 # document around it — the same judgement marginal makes, applied here because
 # the markdown is being rebuilt rather than passed through. Fenced or not, it is
 # the human's comment and not a code sample.
+#
+# Up to three spaces of indent still make a heading or a fence, and `~~~`,
+# thematic breaks, setext underlines and HTML restructure the document too.
 needs_fence() {
-  printf '%s\n' "$1" | grep -qE '^(#|>|[-*+] |[0-9]+[.)] |```|    )'
+  printf '%s\n' "$1" | grep -qE '^ {0,3}(#|>|[-*+]( |$)|[0-9]+[.)]( |$)|```|~~~|[-=_*]{3,}|<)|^(    |	)'
 }
 
 cat <<HDR
@@ -567,8 +570,13 @@ you have changed these files since, re-read them before editing.
 HDR
 
 print_comment() {
+  local cfence
   if needs_fence "$1"; then
-    printf '```\n%s\n```\n\n' "$1"
+    # Longer than any backtick run in the comment: a ``` of its own used to
+    # close a ``` fence early, and a `## ` line after it became a heading
+    # in the agent's feedback that the human never wrote.
+    cfence="$(fence_for <<<"$1")"
+    printf '%s\n%s\n%s\n\n' "$cfence" "$1" "$cfence"
   else
     printf '%s\n\n' "$1"
   fi
