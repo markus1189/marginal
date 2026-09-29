@@ -278,6 +278,14 @@ No tty relocation is involved. pi already owns the terminal, so the extension
 stops the host TUI and starts it again in a `finally`. That is the whole trick,
 and it only works for a host that is itself a terminal program.
 
+The one thing that trick loses is what marginal prints on its way out. On exit
+`2` after a session, where the result file couldn't be written and the review
+went to stdout as its last copy, that text is on the terminal and nowhere
+else. It can't be captured, because stdout has to be the tty. So the extension
+holds the screen ("Press Enter to return to pi") before pi repaints over it,
+then reports that nothing was sent. A result file that isn't valid JSON is
+reported the same way instead of throwing out of the command.
+
 The document builder — which messages go in, how they are headed — has its own
 tests, since it is the part that can be wrong quietly:
 

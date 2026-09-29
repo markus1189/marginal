@@ -18,7 +18,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { binaryRuns, buildDocument, collectTurns, parseSpec } from "./marginal-annotate.ts";
+import register, { binaryRuns, buildDocument, collectTurns, parseSpec } from "./marginal-annotate.ts";
 
 const msg = (role, content) => ({ type: "message", id: "x", parentId: null, timestamp: "t", message: { role, content } });
 
@@ -120,4 +120,73 @@ test("a binary is chosen only if it actually runs", () => {
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+/**
+ * Run `/marginal` against a stand-in pi and a stand-in marginal: a node script
+ * that answers --help, then runs `body` with `result` bound to the --result
+ * path. Returns what the extension told the user and what it sent.
+ */
+async function runCommand(body) {
+	const dir = mkdtempSync(join(tmpdir(), "marginal-annotate-cmd."));
+	const bin = join(dir, "fake-marginal");
+	writeFileSync(
+		bin,
+		`#!${process.execPath}\nconst a = process.argv;\nif (a.includes("--help")) process.exit(0);\nconst result = a[a.indexOf("--result") + 1];\nconst fs = require("node:fs");\n${body}\n`,
+	);
+	chmodSync(bin, 0o755);
+	const saved = process.env.MARGINAL_BIN;
+	process.env.MARGINAL_BIN = bin;
+	let handler;
+	const notes = [];
+	const sent = [];
+	const tui = { started: 0, stop() {}, start() { this.started++; }, requestRender() {} };
+	register({
+		registerCommand: (_name, spec) => { handler = spec.handler; },
+		sendUserMessage: (text) => sent.push(text),
+	});
+	const ctx = {
+		mode: "tui",
+		isIdle: () => true,
+		sessionManager: { getBranch: () => BRANCH },
+		ui: {
+			notify: (text, level) => notes.push(`${level}: ${text}`),
+			custom: (fn) => new Promise((resolve) => { fn(tui, {}, {}, resolve); }),
+		},
+	};
+	try {
+		await handler("", ctx);
+	} finally {
+		if (saved === undefined) delete process.env.MARGINAL_BIN;
+		else process.env.MARGINAL_BIN = saved;
+		rmSync(dir, { recursive: true, force: true });
+	}
+	return { notes, sent, restarted: tui.started };
+}
+
+test("a result file that is not JSON is reported, not thrown", async () => {
+	const r = await runCommand(`fs.writeFileSync(result, "{ truncated"); process.exit(1);`);
+	assert.equal(r.sent.length, 0);
+	assert.equal(r.notes.length, 1);
+	assert.match(r.notes[0], /^error: marginal's result file is unreadable/);
+	assert.equal(r.restarted, 1, "the host TUI is back either way");
+});
+
+test("exit 2 sends nothing and says the rescued review is the only copy", async () => {
+	// The pause before pi repaints waits only on a tty, which this is not; what
+	// is asserted is that nothing is sent and pi comes back.
+	const r = await runCommand(`process.stdout.write("# Review feedback (rescued)\\n"); process.exit(2);`);
+	assert.equal(r.sent.length, 0);
+	assert.equal(r.notes.length, 1);
+	assert.match(r.notes[0], /^error: marginal failed \(exit 2\).*only copy/);
+	assert.equal(r.restarted, 1);
+});
+
+test("annotations come back as the next prompt", async () => {
+	const r = await runCommand(
+		`fs.writeFileSync(result, JSON.stringify({ annotations: [{}], feedbackMarkdown: "## x · paragraph\\n\\nfix it" })); process.exit(1);`,
+	);
+	assert.equal(r.sent.length, 1);
+	assert.match(r.sent[0], /fix it/);
+	assert.deepEqual(r.notes, ["info: Sent 1 annotation."]);
 });

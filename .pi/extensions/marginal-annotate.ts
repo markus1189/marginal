@@ -211,6 +211,23 @@ export default function (pi: ExtensionAPI) {
 							env: process.env,
 						});
 						code = run.error ? null : run.status;
+						// Exit 2 after a session means marginal could not write the
+						// result file and printed the review to stdout instead, as
+						// the last copy of the annotations. That text cannot be
+						// captured (stdout has to be the tty) and tui.start()
+						// repaints over it at once. So hold the screen until the
+						// human has seen it and could copy it out. Only when there is
+						// a terminal to wait on; anything else would block forever.
+						if (code === 2 && process.stdin.isTTY) {
+							spawnSync(
+								"sh",
+								[
+									"-c",
+									'printf "\\n[marginal exited 2 — anything it printed above, a rescued review included, is not saved anywhere. Press Enter to return to pi.] "; read -r _ || true',
+								],
+								{ stdio: "inherit" },
+							);
+						}
 					} finally {
 						tui.start();
 						tui.requestRender(true);
@@ -224,7 +241,10 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				if (status === 2) {
-					ctx.ui.notify("marginal failed (exit 2) — see its message above.", "error");
+					ctx.ui.notify(
+						"marginal failed (exit 2) — nothing was sent. Its output was held on screen before pi resumed; a review it rescued there is the only copy.",
+						"error",
+					);
 					return;
 				}
 
@@ -232,7 +252,15 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("marginal wrote no result file.", "error");
 					return;
 				}
-				const result = JSON.parse(readFileSync(resultPath, "utf8")) as MarginalResult;
+				// An unguarded parse threw out of the command handler on a
+				// truncated or foreign file, with no word to the user about why.
+				let result: MarginalResult;
+				try {
+					result = JSON.parse(readFileSync(resultPath, "utf8")) as MarginalResult;
+				} catch (err) {
+					ctx.ui.notify(`marginal's result file is unreadable (${String(err)}) — nothing sent.`, "error");
+					return;
+				}
 				const count = result.annotations?.length ?? 0;
 				const feedback = result.feedbackMarkdown?.trim();
 				if (status === 0 || count === 0 || !feedback) {
