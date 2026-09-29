@@ -130,7 +130,8 @@ A real run, annotating the inline code span in
       "text": "parse once and reuse the arena"
     }
   ],
-  "feedbackMarkdown": "# Review feedback: PLAN.md\n\n## PLAN.md:5:5-20 · code-span\n> `parse_document`\n\nparse once and reuse the arena\n"
+  "feedbackMarkdown": "# Review feedback: PLAN.md\n\n## PLAN.md:5:5-20 · code-span\n> `parse_document`\n\nparse once and reuse the arena\n",
+  "final": true
 }
 ```
 
@@ -162,6 +163,32 @@ split this plan in two
 
 `version` is `2` since general comments exist; that is the only difference from
 `1`, whose consumers could assume every annotation has a span.
+
+### The result file
+
+**It is saved as you go, and `final` says whether the session is over.** The
+annotations are the product, so they are not kept only in memory until the last
+keypress: every time one is added, removed or changed, the whole result is
+rewritten with `"final": false`. When you quit, `finish` writes it once more
+with `"final": true`. A session that is killed outright — `SIGKILL`, a power
+cut — therefore leaves every annotation it had committed, and loses at most the
+comment still open in the editor.
+
+Every write goes to a temporary file beside the target that is then renamed
+over it, so a reader sees the previous version or the next one, never a
+truncated or half-written file. The target is the far end of any symlink, so a
+`--result` link stays a link.
+
+What this means for a consumer:
+
+| File | Meaning |
+|---|---|
+| absent | **No verdict.** Nothing was ever committed, or marginal never ran, or the write failed (see below). Before the first annotation nothing is written, so a session killed early still leaves no file. |
+| `"final": true` | **The verdict.** The human quit; `decision` and `annotations` are what they meant to hand back. |
+| `"final": false` | **Not a verdict, but real work.** The session ended without the human quitting. Every annotation in it was committed by the human; whether they were done is unknown. Surface it as an interrupted review — do not discard it, and do not report it as approval when it is empty. |
+
+The bundled launchers predate the key and still treat any result file as the
+verdict; reading `.final` is the change they need to tell the two apart.
 
 ## Launchers: annotating an agent's reply
 
@@ -289,8 +316,10 @@ neither, the launcher fails — a gate that cannot reach the human must say so
 rather than answer for them.
 
 **The result file is the verdict; the exit status is only a diagnostic.**
-marginal writes it in `finish` — after the last keypress, before it picks its own
-exit code — on every run that reached the TUI. That is not a stylistic
+marginal writes it with `"final": true` in `finish` — after the last keypress,
+before it picks its own exit code — on every run that reached the TUI, and keeps
+a `"final": false` snapshot there while the session runs (see "The result file"
+above). That is not a stylistic
 preference: `alacritty -e sh -c 'exit 7'` returns **0**, so a launcher that reads
 the exit status for the annotated/clean split announces "no annotations" over
 real feedback on that path. Terminals that fork outright (ghostty,

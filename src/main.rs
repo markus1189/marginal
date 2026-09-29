@@ -217,32 +217,32 @@ fn write_target(path: &std::path::Path) -> std::path::PathBuf {
 ///   else's file being deleted.
 ///
 /// So: what is already there is opened for writing and left exactly as it is,
-/// and what is not there yet is answered for by a probe file of this process's
-/// own, in the directory that would have to hold it. Nothing that pre-flight
-/// did not create is ever opened for creation or removed, at any interleaving.
-/// A pre-flight still leaves no result file behind, so it cannot make a session
-/// that never ran look like one that did.
+/// and the directory is answered for by a probe file of this process's own.
+/// Nothing that pre-flight did not create is ever opened for creation or
+/// removed, at any interleaving. A pre-flight still leaves no result file
+/// behind, so it cannot make a session that never ran look like one that did.
+///
+/// The directory is asked even when the file exists, because the result is
+/// written by `write_atomic` — a temporary file beside the target, renamed over
+/// it — so a writable file in a directory that takes no new file is a result
+/// that cannot be saved. An existing file must still be writable itself: the
+/// rename would replace a read-only one, and pre-flight refused those before.
 fn preflight(path: &str) -> io::Result<()> {
     let target = write_target(std::path::Path::new(path));
 
     // No `create`, no `truncate`: an existing result file survives the question
     // untouched, and a symlink is followed rather than replaced.
     let absent = match std::fs::OpenOptions::new().write(true).open(&target) {
-        Ok(_) => return Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => e,
+        Ok(_) => None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(e),
         Err(e) => return Err(e),
     };
 
-    // Nothing there yet, so the real question is whether the directory takes a
-    // new file. `""`, `/` and `..` name no file to create, and for those the
-    // open's own error is already the answer.
-    let (Some(dir), Some(_)) = (target.parent(), target.file_name()) else {
-        return Err(absent);
-    };
-    let dir = if dir.as_os_str().is_empty() {
-        std::path::Path::new(".")
-    } else {
-        dir
+    // The real question is whether the directory takes a new file. `""`, `/`
+    // and `..` name no file to create, and for those the open's own error is
+    // already the answer.
+    let Some(dir) = containing_dir(&target) else {
+        return Err(absent.unwrap_or_else(|| io::Error::other("names no file")));
     };
     // Pid and clock: unique against every other process and against a probe an
     // earlier run was killed before removing.
@@ -259,6 +259,130 @@ fn preflight(path: &str) -> io::Result<()> {
         .open(&probe)?;
     let _ = std::fs::remove_file(&probe);
     Ok(())
+}
+
+/// The directory a file at `target` lives in — `.` for a bare name — or `None`
+/// when `target` names no file at all (`""`, `/`, `..`).
+fn containing_dir(target: &std::path::Path) -> Option<&std::path::Path> {
+    target.file_name()?;
+    let dir = target.parent()?;
+    Some(if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    })
+}
+
+/// Replace the file `path` resolves to with `contents`, all or nothing.
+///
+/// `fs::write` truncates first and writes second, so a process killed between
+/// the two — or a disk that fills half-way — left an empty or torn result file,
+/// which a launcher then reads as a verdict or fails to parse. Written to a
+/// temporary file beside the target instead, flushed to disk, and renamed over
+/// it: a reader sees the old file or the new one, never a mix.
+///
+/// The target is the far end of any symlink chain (`write_target`), so the
+/// rename replaces the file a link points at and the link survives — the same
+/// indirection `preflight` is careful to keep. An existing file's permissions
+/// carry over to its replacement.
+fn write_atomic(path: &str, contents: &str) -> io::Result<()> {
+    use io::Write as _;
+    let target = write_target(std::path::Path::new(path));
+    let (Some(dir), Some(name)) = (containing_dir(&target), target.file_name()) else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "names no file"));
+    };
+    let tmp = dir.join(format!(
+        ".{}.marginal-{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let create = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+    };
+    let write = || -> io::Result<()> {
+        // The name carries this pid, so one already there is a leftover of an
+        // earlier process that had the same pid and was killed mid-write.
+        let mut f = match create() {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&tmp)?;
+                create()?
+            }
+            f => f?,
+        };
+        if let Ok(meta) = std::fs::metadata(&target) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &target)
+    };
+    let written = write();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// The result file as written: the review, and whether the session it came
+/// from is over.
+///
+/// `final` is what separates a verdict from a snapshot. The file is rewritten
+/// after every change to the annotations while the session runs, with `final:
+/// false`, so a session that is killed outright still leaves every committed
+/// annotation behind; only the write in `finish` after the human quits says
+/// `true`. See README, "The result file".
+#[derive(serde::Serialize)]
+struct Saved {
+    #[serde(flatten)]
+    outcome: app::Outcome,
+    #[serde(rename = "final")]
+    done: bool,
+}
+
+fn result_json(app: &App, done: bool) -> String {
+    let saved = Saved {
+        outcome: app.result(),
+        done,
+    };
+    serde_json::to_string_pretty(&saved).expect("an Outcome always serialises")
+}
+
+/// Keeps the result file in step with the annotations while the session runs.
+///
+/// Every event is followed by a snapshot, and the snapshot is written only when
+/// it differs from the last one written — which, since nothing else in the
+/// result moves, means after an annotation was added, removed or changed.
+/// Before the first change nothing is written at all, so a session killed
+/// before anyone commented still leaves no file, and "no file, no verdict"
+/// holds for it exactly as before.
+struct Autosave<'a> {
+    path: Option<&'a str>,
+    last: String,
+}
+
+impl<'a> Autosave<'a> {
+    fn new(app: &App, path: Option<&'a str>) -> Self {
+        let last = path.map_or_else(String::new, |_| result_json(app, false));
+        Self { path, last }
+    }
+
+    fn after_event(&mut self, app: &mut App) {
+        let Some(path) = self.path else { return };
+        let now = result_json(app, false);
+        if now == self.last {
+            return;
+        }
+        // Not fatal: the write in `finish` is tried regardless, and the
+        // feedback on stdout is the rescue if that fails too. But the human
+        // should know their work is not reaching the disk.
+        match write_atomic(path, &now) {
+            Ok(()) => self.last = now,
+            Err(e) => app.status = format!("autosave failed: {e}"),
+        }
+    }
 }
 
 /// Would writing the result to `result` overwrite the document under review?
@@ -363,7 +487,7 @@ fn main() -> ExitCode {
     let mut app = App::open(args.file.clone(), &src, format);
     app.label = args.label;
     app.pretty = args.pretty;
-    match run(&mut app) {
+    match run(&mut app, args.result.as_deref()) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("marginal: {e}");
@@ -391,8 +515,7 @@ fn main() -> ExitCode {
 fn finish(app: &App, result: Option<&str>) -> (String, u8) {
     let mut failed = false;
     if let Some(path) = result {
-        let json = serde_json::to_string_pretty(&app.result()).expect("serialize");
-        if let Err(e) = std::fs::write(path, json) {
+        if let Err(e) = write_atomic(path, &result_json(app, true)) {
             eprintln!("marginal: cannot write {path}: {e}");
             failed = true;
         }
@@ -409,7 +532,7 @@ fn finish(app: &App, result: Option<&str>) -> (String, u8) {
     (feedback, code)
 }
 
-fn run(app: &mut App) -> io::Result<()> {
+fn run(app: &mut App, result: Option<&str>) -> io::Result<()> {
     if !io::IsTerminal::is_terminal(&io::stdout()) {
         return Err(io::Error::other(
             "stdout is not a terminal (run under a real tty, or use --dump-blocks)",
@@ -417,13 +540,17 @@ fn run(app: &mut App) -> io::Result<()> {
     }
     let mut terminal = ratatui::init();
     let _paste = BracketedPaste::enable();
+    let mut save = Autosave::new(app, result);
     let mut scroll = app::Anchor::default();
     let outcome = loop {
         if let Err(e) = terminal.draw(|f| ui::draw(f, app, &mut scroll)) {
             break Err(e);
         }
         match event::read() {
-            Ok(ev) => handle_event(app, ev),
+            Ok(ev) => {
+                handle_event(app, ev);
+                save.after_event(app);
+            }
             Err(e) => break Err(e),
         }
         if app.quit {
@@ -1700,6 +1827,8 @@ mod tests {
         let json = std::fs::read_to_string(&out).unwrap();
         assert!(json.contains("keep me"), "{json}");
         assert!(json.contains("changes-requested"), "{json}");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["final"], true, "the human quit, so this is the verdict");
 
         // A clean review prints nothing and exits 0 — but still writes the
         // file, because the result file is the verdict and "no annotations" is
@@ -1723,5 +1852,158 @@ mod tests {
         assert!(feedback.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn entries(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// `fs::write` truncates and then writes, so a kill between the two left an
+    /// empty result file — which a launcher reads as a verdict, or fails to
+    /// parse — and a disk that filled half-way left a torn one. The write now
+    /// goes to a temporary file that is renamed over the target, and every
+    /// property the direct write had is kept: a symlink is written *through*,
+    /// not replaced, and the file's permissions survive.
+    #[cfg(unix)]
+    #[test]
+    fn a_result_write_is_all_or_nothing_and_keeps_links_and_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("atomic");
+        let out = dir.join("out.json");
+        let arg = out.to_str().unwrap();
+
+        write_atomic(arg, "one").unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "one");
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(arg, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "two");
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the replacement lost the file's mode");
+        assert_eq!(entries(&dir), ["out.json"], "a temporary file was left");
+
+        // Through a symlink: the far end is replaced, the link stays a link.
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink("out.json", &link).unwrap();
+        write_atomic(link.to_str().unwrap(), "three").unwrap();
+        assert!(link.is_symlink(), "the rename replaced the link");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "three");
+
+        // A stale temporary file of this pid is a leftover, not an obstacle.
+        std::fs::write(
+            dir.join(format!(".out.json.marginal-{}.tmp", std::process::id())),
+            "stale",
+        )
+        .unwrap();
+        write_atomic(arg, "four").unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "four");
+        assert_eq!(entries(&dir), ["link.json", "out.json"]);
+
+        // A failed write leaves the old file whole and nothing beside it.
+        assert!(write_atomic(dir.join("gone/x.json").to_str().unwrap(), "x").is_err());
+        assert!(write_atomic("", "x").is_err());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "four");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rename needs a new file in the directory, so a writable result file
+    /// in a directory that takes none would pass the old pre-flight and then
+    /// fail on the first save, after the human had started.
+    #[cfg(unix)]
+    #[test]
+    fn preflight_refuses_a_writable_file_in_a_directory_that_takes_no_new_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("ro-dir");
+        let out = dir.join("out.json");
+        std::fs::write(&out, "keep").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root writes anywhere, and then there is nothing to refuse.
+        let root = std::fs::write(dir.join("probe"), "").is_ok();
+        let refused = preflight(out.to_str().unwrap()).is_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !root {
+            assert!(refused, "a result that cannot be renamed into place passed");
+        }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "keep");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Results were written once, in `finish`, after the last key — so a
+    /// session that was killed took every annotation with it. Now each change
+    /// is on disk as soon as it is made, marked `final: false`, and a session
+    /// in which nothing changed writes nothing: "no file, no verdict" still
+    /// holds for a review that never got started.
+    #[test]
+    fn every_change_to_the_annotations_is_on_disk_before_the_next_key() {
+        let dir = scratch("autosave");
+        let out = dir.join("out.json");
+        let path = out.to_str().unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap()
+        };
+        let press = |app: &mut App, save: &mut Autosave, k: KeyEvent| {
+            handle_event(app, Event::Key(k));
+            save.after_event(app);
+        };
+        let plain = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+        let mut save = Autosave::new(&app, Some(path));
+        press(&mut app, &mut save, plain(KeyCode::Char('j')));
+        press(&mut app, &mut save, plain(KeyCode::Char('c')));
+        press(&mut app, &mut save, plain(KeyCode::Char('x')));
+        assert!(
+            !out.exists(),
+            "a file appeared before anything was committed"
+        );
+
+        press(&mut app, &mut save, plain(KeyCode::Enter));
+        let v = read();
+        assert_eq!(v["final"], false, "{v}");
+        assert_eq!(v["annotations"][0]["text"], "x", "{v}");
+        assert_eq!(v["decision"], "changes-requested");
+
+        // Only a change writes: a motion over an unchanged review does not
+        // bring back a file somebody else removed.
+        std::fs::remove_file(&out).unwrap();
+        press(&mut app, &mut save, plain(KeyCode::Char('k')));
+        assert!(!out.exists(), "a key that changed nothing rewrote the file");
+
+        // Removal is a change too, and an emptied review says so.
+        press(&mut app, &mut save, plain(KeyCode::Char('x')));
+        let v = read();
+        assert_eq!(v["annotations"].as_array().unwrap().len(), 0, "{v}");
+        assert_eq!(v["decision"], "approved");
+        assert_eq!(v["final"], false);
+
+        // And the quit overwrites the snapshot with the verdict.
+        let (_, code) = finish(&app, Some(path));
+        assert_eq!((code, read()["final"].clone()), (0, true.into()));
+
+        // Without --result there is nowhere to save and nothing is attempted.
+        let mut app = annotated();
+        let mut none = Autosave::new(&app, None);
+        none.after_event(&mut app);
+        assert!(!app.status.contains("autosave"), "{}", app.status);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save that fails is not fatal — `finish` tries again and the feedback
+    /// on stdout is the rescue — but it must not be silent either.
+    #[test]
+    fn a_failing_autosave_says_so_on_the_status_line() {
+        let bad = tmp("autosave-no-such-dir").join("out.json");
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+        let mut save = Autosave::new(&app, bad.to_str());
+        handle_key(&mut app, key('c', KeyModifiers::NONE));
+        app.editor.set("note");
+        handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        save.after_event(&mut app);
+        assert!(app.status.starts_with("autosave failed"), "{}", app.status);
     }
 }
