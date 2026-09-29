@@ -769,18 +769,28 @@ fn source_title(app: &App, width: u16) -> String {
     };
     // The cursor column is on screen even when the cursor itself is not.
     let rest = format!(
-        " [{}] · L{}:{} · {} lines · {} units · {} annotations · ",
+        " [{}] · L{}:{} · {} · {} · {} · ",
         sel,
         app.cursor.line,
         app.cursor.col,
-        app.lines.len(),
-        app.blocks.len(),
-        app.annotations.len(),
+        counted(app.lines.len(), "line"),
+        counted(app.blocks.len(), "unit"),
+        counted(app.annotations.len(), "annotation"),
     );
     // Two of the three are the border corners, the third is the pad space that
     // `format!` appends below.
     let budget = usize::from(width).saturating_sub(cells_claimed(&rest) + 3);
     format!("{rest}{} ", shorten_path(app.display_name(), budget))
+}
+
+/// `1 annotation`, `2 annotations`, `0 annotations`. Every noun the title
+/// counts takes a plain `s`.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 /// Keep the tail of an over-long path — the file name is what identifies it,
@@ -2226,7 +2236,7 @@ mod tests {
             let screen = render(&mut app, w, 24);
             assert!(!screen.contains('●'), "{w}: a general comment dots no line");
         }
-        assert!(render(&mut app, 120, 24).contains("1 annotations"));
+        assert!(render(&mut app, 120, 24).contains("1 annotation ·"));
     }
 
     /// `e` reopens the comment box on the annotation's own text, and the title
@@ -2405,7 +2415,7 @@ mod tests {
         let src = format!("{}\n", "word ".repeat(400));
         let mut app = App::open("w.md".into(), &src, Format::Markdown);
         let buf = render_buf(&mut app, 60, 24);
-        assert!(top_row(&buf).contains("1 lines"), "{}", top_row(&buf));
+        assert!(top_row(&buf).contains("1 line ·"), "{}", top_row(&buf));
         let bottom = bottom_border(&buf);
         assert!(bottom.contains("rows 1-"), "{bottom}");
         assert!(
@@ -3868,5 +3878,26 @@ mod tests {
                 assert_eq!(source_rows(&buf), h - pane.height - 1 - 2, "height {h}");
             }
         }
+    }
+
+    /// The title said `1 annotations` after the first comment — and `1 lines`
+    /// and `1 units` on a one-line file. Every title test used `DOC`, which
+    /// has six lines, four units and no annotations: all plural.
+    #[test]
+    fn the_title_counts_one_of_a_thing_in_the_singular() {
+        let mut app = App::open("one.md".into(), "just one line\n", Format::Markdown);
+        app.begin_comment();
+        app.editor.set("first");
+        app.commit_comment();
+        for w in [80u16, 120] {
+            let screen = render(&mut app, w, 24);
+            assert!(
+                screen.contains(" 1 line · 1 unit · 1 annotation · one.md"),
+                "width {w}: {screen}"
+            );
+        }
+        app.annotations.clear();
+        let screen = render(&mut app, 120, 24);
+        assert!(screen.contains("· 0 annotations ·"), "{screen}");
     }
 }
