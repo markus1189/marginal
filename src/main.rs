@@ -123,11 +123,22 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
     // as `unknown flag: --result=o.json`, which named the flag *and* the value
     // and blamed both. An `=` after any other flag is still an unknown flag:
     // `--raw=1` and `--=x` are typos, not requests.
+    //
+    // One operand, and a second is refused rather than silently winning: `a.md
+    // b.md` used to open `b.md` without a word, so a glob that matched two files
+    // reviewed whichever sorted last and filed the verdict under that name.
     let mut ended = false;
     let mut it = argv.into_iter();
+    let mut operand = |a: String| match file.replace(a) {
+        None => Ok(()),
+        Some(first) => Err(format!(
+            "one FILE only, got {first} and {}",
+            file.as_deref().unwrap_or_default()
+        )),
+    };
     while let Some(a) = it.next() {
         if ended {
-            file = Some(a);
+            operand(a)?;
             continue;
         }
         match a.as_str() {
@@ -148,7 +159,7 @@ fn parse_argv(argv: Vec<String>) -> Result<Option<Args>, String> {
                 } else if a.starts_with('-') {
                     return Err(format!("unknown flag: {a}"));
                 } else {
-                    file = Some(a);
+                    operand(a)?;
                 }
             }
         }
@@ -836,9 +847,10 @@ mod tests {
         // otherwise print the usage and exit 0 with nothing read.
         assert_eq!(file(&["--", "-h"]), "-h");
         assert_eq!(file(&["--", "--label"]), "--label");
-        // Only the first `--` is the marker; the second is an ordinary operand,
-        // and the last operand is the file, as it has always been.
-        assert_eq!(file(&["--", "--", "f.md"]), "f.md");
+        // Only the first `--` is the marker; the second is an ordinary operand
+        // — so `-- -- f.md` names two files, which is refused like any two.
+        assert_eq!(file(&["--", "--"]), "--");
+        assert!(argv(&["--", "--", "f.md"]).is_err());
         // Flags before it are still flags.
         let a = argv(&["--raw", "--label", "PLAN.md", "--", "-f.md"])
             .unwrap()
@@ -853,6 +865,27 @@ mod tests {
         // exists to catch, not a request for a file named `--`. Say
         // `--result=--` if that is really what you meant.
         assert!(argv(&["--result", "--", "f.md"]).is_err());
+    }
+
+    /// Two operands used to mean "the last one": `marginal --dump-blocks a.md
+    /// b.md` dumped `b.md` and said nothing about `a.md`, and a TUI run filed
+    /// its verdict under whichever name a glob sorted last. Refused now, on
+    /// either side of `--`, with both names in the message.
+    #[test]
+    fn a_second_file_is_refused_not_silently_preferred() {
+        for bad in [
+            &["a.md", "b.md"][..],
+            &["--dump-blocks", "a.md", "b.md"],
+            &["a.md", "--", "b.md"],
+            &["--", "a.md", "b.md"],
+            &["a.md", "--raw", "b.md"],
+        ] {
+            let e = argv(bad).err().unwrap_or_else(|| panic!("{bad:?} parsed"));
+            assert!(e.contains("a.md") && e.contains("b.md"), "{bad:?}: {e}");
+        }
+        // One operand, however it is reached, still parses.
+        assert_eq!(argv(&["--raw", "a.md"]).unwrap().unwrap().file, "a.md");
+        assert_eq!(argv(&["--", "a.md"]).unwrap().unwrap().file, "a.md");
     }
 
     /// `--result=o.json` failed with `unknown flag: --result=o.json`, blaming a
