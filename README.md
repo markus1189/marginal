@@ -100,7 +100,13 @@ machine-readable route, and it carries the same markdown in
 `feedbackMarkdown`.
 
 Exit codes: `0` nothing was annotated, `1` something was, `2` tool failure
-(unreadable file, no tty, bad flag, an argument that is not valid UTF-8).
+(unreadable file, no tty, bad flag, an argument that is not valid UTF-8) — or a
+session that ended without the human quitting: SIGTERM, SIGHUP or SIGINT, a
+terminal that failed or hung up, an internal panic. Those still go through the
+same ending as a quit: the terminal is restored, the result file is written
+(with `"final": false`, see below), the feedback is printed if there is still a
+terminal to print it on, and the reason goes to stderr. Only SIGKILL skips all
+of that, and what it cannot skip is the autosave.
 
 Argv is decoded before a single flag is read, so an argument that is not valid
 UTF-8 is a tool failure whatever else is on the command line — `--help`

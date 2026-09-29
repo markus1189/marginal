@@ -48,6 +48,12 @@ segments every span with it and crossterm reaches it through `derive_more`, so
 it was already in the graph (`cargo tree -i unicode-segmentation` shows both
 paths). Adding it did not move the crate count.
 
+`signal-hook` is the same case: crossterm already depends on it to watch
+SIGWINCH, so making it direct (for SIGTERM/SIGHUP/SIGINT as a flag instead of a
+death) left the crate count where it was — `cargo tree -i signal-hook` shows
+crossterm's path beside ours. Its `flag` module is also what lets a signal be
+caught under `unsafe_code = "forbid"`.
+
 ## Highlighting code inside fences
 
 Not done, and it is the one thing the AST cannot provide — comrak sees a fence

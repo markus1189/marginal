@@ -18,6 +18,9 @@ mod wrap;
 
 use std::io;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -487,19 +490,37 @@ fn main() -> ExitCode {
     let mut app = App::open(args.file.clone(), &src, format);
     app.label = args.label;
     app.pretty = args.pretty;
-    match run(&mut app, args.result.as_deref()) {
-        Ok(()) => {}
+    let end = match run(&mut app, args.result.as_deref()) {
+        Ok(end) => end,
         Err(e) => {
             eprintln!("marginal: {e}");
             return ExitCode::from(2);
         }
-    }
+    };
 
-    let (feedback, code) = finish(&app, args.result.as_deref());
+    // `finish` is the last thing standing between the annotations and the
+    // void, so it gets the same guard as the loop: a panic in it is exit 2,
+    // with the autosaved snapshot still on disk, rather than 101.
+    let (feedback, code) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        finish(&app, args.result.as_deref(), &end)
+    }))
+    .unwrap_or_else(|_| (String::new(), 2));
     if !feedback.is_empty() {
-        print!("{feedback}");
+        // Not `print!`: it panics when stdout is gone, and after a hangup it is.
+        use io::Write as _;
+        let mut out = io::stdout();
+        let _ = out.write_all(feedback.as_bytes());
+        let _ = out.flush();
     }
     ExitCode::from(code)
+}
+
+/// A line on stderr that cannot fail. `eprintln!` panics when the write does,
+/// and once the terminal has hung up it does — so every word said after the
+/// session goes through here instead.
+fn say(msg: &str) {
+    use io::Write as _;
+    let _ = writeln!(io::stderr(), "marginal: {msg}");
 }
 
 /// Everything after the last keypress: write the result file if one was asked
@@ -512,19 +533,29 @@ fn main() -> ExitCode {
 /// the only seam was `main`, which needs a terminal to reach. This is the seam:
 /// exit code and rescued text come back together, both assertable, and the
 /// caller cannot print one without the other.
-fn finish(app: &App, result: Option<&str>) -> (String, u8) {
+///
+/// Every ending goes through here, not just a quit — a signal, a terminal that
+/// failed or went away, a panic in the loop. Those used to `return` from `main`
+/// with exit 2 and nothing written, which is the same early return the
+/// paragraph above describes, reached by a different door. Only a quit is the
+/// human's verdict, so only a quit writes `final: true` and grades 0/1; the
+/// rest write what there is with `final: false` and exit 2.
+fn finish(app: &App, result: Option<&str>, end: &End) -> (String, u8) {
     let mut failed = false;
     if let Some(path) = result {
-        if let Err(e) = write_atomic(path, &result_json(app, true)) {
-            eprintln!("marginal: cannot write {path}: {e}");
+        if let Err(e) = write_atomic(path, &result_json(app, end.is_quit())) {
+            say(&format!("cannot write {path}: {e}"));
             failed = true;
         }
+    }
+    if let Some(why) = end.reason() {
+        say(&format!("session ended early: {why}"));
     }
 
     let feedback = app.feedback_markdown();
     // 2 for a failed write, but the markdown still travels with it, because
     // that is exactly when it is the last copy of the annotations.
-    let code = if failed {
+    let code = if failed || !end.is_quit() {
         2
     } else {
         u8::from(!app.annotations.is_empty())
@@ -532,55 +563,254 @@ fn finish(app: &App, result: Option<&str>) -> (String, u8) {
     (feedback, code)
 }
 
-fn run(app: &mut App, result: Option<&str>) -> io::Result<()> {
+/// How often the loop looks up from waiting for input: to notice a signal, and
+/// a terminal that is no longer there. Idle ticks draw nothing.
+const TICK: Duration = Duration::from_millis(200);
+
+/// How a session ended. Only `Quit` is the human's own.
+#[derive(Debug)]
+enum End {
+    Quit,
+    /// SIGTERM, SIGHUP or SIGINT, by number.
+    Signal(usize),
+    /// A draw or a read failed, or the terminal hung up.
+    Failed(io::Error),
+    Panicked,
+}
+
+impl End {
+    const fn is_quit(&self) -> bool {
+        matches!(self, Self::Quit)
+    }
+
+    fn reason(&self) -> Option<String> {
+        match self {
+            Self::Quit => None,
+            Self::Signal(n) => Some(format!("stopped by {}", signal_name(*n))),
+            Self::Failed(e) => Some(format!("terminal failed: {e}")),
+            Self::Panicked => Some("internal error (panic)".into()),
+        }
+    }
+}
+
+/// The signals that end a session through `finish` instead of killing it with
+/// the review in memory. SIGINT is here although raw mode turns `C-c` into a
+/// key, because `kill -INT` and a parent's process-group interrupt still send it.
+#[cfg(unix)]
+const STOP_SIGNALS: [i32; 3] = [
+    signal_hook::consts::SIGTERM,
+    signal_hook::consts::SIGHUP,
+    signal_hook::consts::SIGINT,
+];
+#[cfg(not(unix))]
+const STOP_SIGNALS: [i32; 2] = [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT];
+
+fn signal_name(n: usize) -> String {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    match i32::try_from(n) {
+        Ok(SIGTERM) => "SIGTERM".into(),
+        Ok(SIGINT) => "SIGINT".into(),
+        #[cfg(unix)]
+        Ok(signal_hook::consts::SIGHUP) => "SIGHUP".into(),
+        _ => format!("signal {n}"),
+    }
+}
+
+/// Turn the stop signals into a number in `stop` rather than a death.
+///
+/// Each of them used to kill the process with its default action: the
+/// annotations went with it, and SIGTERM left the terminal raw and on the
+/// alternate screen. signal-hook's flag handlers only store an atomic — the one
+/// thing a signal handler can soundly do — and the loop reads it every `TICK`.
+fn catch_stop_signals(stop: &Arc<AtomicUsize>) -> io::Result<()> {
+    for sig in STOP_SIGNALS {
+        let n = usize::try_from(sig).map_err(io::Error::other)?;
+        signal_hook::flag::register_usize(sig, Arc::clone(stop), n)?;
+    }
+    Ok(())
+}
+
+/// What the session loop needs from a terminal. A trait so the loop — every
+/// way a session can end — runs headless under `cargo test`.
+trait Screen {
+    fn draw(&mut self, app: &mut App) -> io::Result<()>;
+    /// The next event, or `None` when `wait` passed without one.
+    fn next(&mut self, wait: Duration) -> io::Result<Option<Event>>;
+    /// Is there still a terminal? Asked on every idle tick.
+    fn alive(&self) -> bool;
+}
+
+/// The session: draw, wait, act, until something ends it. Never returns early
+/// with the review in memory — every way out is an `End` for `finish`.
+///
+/// A panic anywhere inside is caught and reported as `End::Panicked`, so it
+/// is exit 2 with the result written instead of exit 101 with it lost. The
+/// `AssertUnwindSafe` is sound in the sense that matters here: after a panic
+/// `app` may hold a half-finished edit, but every field is still a valid
+/// value, and all that is read from it afterwards is the annotation list —
+/// which is also already on disk as of the last completed event.
+fn run_loop(
+    app: &mut App,
+    screen: &mut impl Screen,
+    stop: &AtomicUsize,
+    save: &mut Autosave,
+) -> End {
+    let session = std::panic::AssertUnwindSafe(|| {
+        let mut dirty = true;
+        loop {
+            let sig = stop.load(Ordering::Relaxed);
+            if sig != 0 {
+                return End::Signal(sig);
+            }
+            if dirty {
+                if let Err(e) = screen.draw(app) {
+                    return End::Failed(e);
+                }
+                dirty = false;
+            }
+            match screen.next(TICK) {
+                Ok(Some(ev)) => {
+                    handle_event(app, ev);
+                    save.after_event(app);
+                    dirty = true;
+                }
+                Ok(None) if screen.alive() => {}
+                Ok(None) => return End::Failed(io::Error::other("the terminal went away")),
+                Err(e) => return End::Failed(e),
+            }
+            if app.quit {
+                return End::Quit;
+            }
+        }
+    });
+    std::panic::catch_unwind(session).unwrap_or(End::Panicked)
+}
+
+fn run(app: &mut App, result: Option<&str>) -> io::Result<End> {
     if !io::IsTerminal::is_terminal(&io::stdout()) {
         return Err(io::Error::other(
             "stdout is not a terminal (run under a real tty, or use --dump-blocks)",
         ));
     }
-    let mut terminal = ratatui::init();
-    let _paste = BracketedPaste::enable();
+    let stop = Arc::new(AtomicUsize::new(0));
+    catch_stop_signals(&stop)?;
+    let mut tty = Tty::open()?;
     let mut save = Autosave::new(app, result);
-    let mut scroll = app::Anchor::default();
-    let outcome = loop {
-        if let Err(e) = terminal.draw(|f| ui::draw(f, app, &mut scroll)) {
-            break Err(e);
-        }
-        match event::read() {
-            Ok(ev) => {
-                handle_event(app, ev);
-                save.after_event(app);
-            }
-            Err(e) => break Err(e),
-        }
-        if app.quit {
-            break Ok(());
-        }
-    };
-    ratatui::restore();
-    outcome
+    let end = run_loop(app, &mut tty, &stop, &mut save);
+    // Restored before `finish` says a word, so what it prints lands on the
+    // normal screen rather than on an alternate one about to be discarded.
+    drop(tty);
+    Ok(end)
 }
 
-/// Bracketed paste for as long as this value lives, however the scope is left
-/// — a normal return, an early `break` or a panic unwinding through it.
+/// The real terminal: raw mode, the alternate screen and bracketed paste for
+/// as long as this value lives, however the session ends.
 ///
-/// Without it a terminal delivers a paste as the keystrokes that would type it,
-/// and the first newline in it is Enter: the comment committed half-way, and
-/// the rest of the clipboard ran as Normal-mode commands. `see:\nxx` committed
-/// `see:` and then `x`, `x` removed two annotations; a `q` anywhere quit.
-struct BracketedPaste;
+/// Bracketed paste because without it a terminal delivers a paste as the
+/// keystrokes that would type it, and the first newline in it is Enter: the
+/// comment committed half-way, and the rest of the clipboard ran as Normal-mode
+/// commands — `see:\nxx` committed `see:`, then `x`, `x` removed two
+/// annotations.
+///
+/// Set up by hand rather than by `ratatui::init`, for one reason: every
+/// teardown step in ratatui ends in `eprintln!` on failure — `restore()`, its
+/// panic hook, and `Terminal`'s `Drop` showing the cursor — and `eprintln!`
+/// panics when stderr is a terminal that has hung up. That is exactly the
+/// terminal a hangup leaves behind, so the teardown here ignores every error,
+/// and the `Terminal` is never dropped (its only `Drop` work is the cursor,
+/// which `restore_tty` shows).
+struct Tty {
+    terminal: std::mem::ManuallyDrop<ratatui::DefaultTerminal>,
+    scroll: app::Anchor,
+    events: mpsc::Receiver<io::Result<Event>>,
+}
 
-impl BracketedPaste {
-    fn enable() -> Self {
-        // A terminal that ignores the request is no worse off than before.
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
-        Self
+/// Undo everything `Tty::open` did, in an order that works from any state,
+/// ignoring every error: this runs on a dying terminal as often as a live one.
+fn restore_tty() {
+    use crossterm::{cursor::Show, event::DisableBracketedPaste, terminal::LeaveAlternateScreen};
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
+}
+
+impl Tty {
+    fn open() -> io::Result<Self> {
+        use crossterm::{event::EnableBracketedPaste, terminal::EnterAlternateScreen};
+        // The panic message has to land on the normal screen, so the terminal
+        // is restored before the default hook prints it — the job ratatui's
+        // hook did, minus its `eprintln!`.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_tty();
+            hook(info);
+        }));
+        let setup = || {
+            crossterm::terminal::enable_raw_mode()?;
+            crossterm::execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))
+        };
+        let terminal = setup().inspect_err(|_| restore_tty())?;
+        Ok(Self {
+            terminal: std::mem::ManuallyDrop::new(terminal),
+            scroll: app::Anchor::default(),
+            events: spawn_reader(),
+        })
     }
 }
 
-impl Drop for BracketedPaste {
+impl Drop for Tty {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+        restore_tty();
+    }
+}
+
+/// Terminal events, read on a thread of their own and handed over a channel.
+///
+/// Not `event::poll` on the main thread, because crossterm's unix reader
+/// never returns once the terminal has hung up: a `read` of `Ok(0)` or `EIO`
+/// is retried in a loop that checks no timeout, so the process spun one core
+/// forever on a dead tty (measured: 200 ticks per 2 s, indefinitely, with
+/// SIGHUP ignored). Here the main thread waits on the channel with a timeout,
+/// so it always gets back control to notice the hangup and end the session —
+/// and the spinning reader dies with the process.
+fn spawn_reader() -> mpsc::Receiver<io::Result<Event>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        let ev = event::read();
+        let failed = ev.is_err();
+        if tx.send(ev).is_err() || failed {
+            return;
+        }
+    });
+    rx
+}
+
+impl Screen for Tty {
+    fn draw(&mut self, app: &mut App) -> io::Result<()> {
+        let scroll = &mut self.scroll;
+        self.terminal.draw(|f| ui::draw(f, app, scroll)).map(|_| ())
+    }
+
+    fn next(&mut self, wait: Duration) -> io::Result<Option<Event>> {
+        match self.events.recv_timeout(wait) {
+            Ok(ev) => ev.map(Some),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::other("the terminal event reader stopped"))
+            }
+        }
+    }
+
+    /// `isatty` asks the terminal driver (`TCGETS`), which answers `EIO` once
+    /// the terminal has hung up — the check that notices a dead tty whether or
+    /// not a SIGHUP ever reached this process.
+    fn alive(&self) -> bool {
+        io::IsTerminal::is_terminal(&io::stdout())
     }
 }
 
@@ -1803,7 +2033,7 @@ mod tests {
     #[test]
     fn a_failed_result_write_still_hands_back_the_feedback() {
         let bad = tmp("finish-no-such-dir").join("out.json");
-        let (feedback, code) = finish(&annotated(), Some(bad.to_str().unwrap()));
+        let (feedback, code) = finish(&annotated(), Some(bad.to_str().unwrap()), &End::Quit);
         assert_eq!(code, 2, "a failed write must still exit 2");
         assert!(
             feedback.contains("keep me"),
@@ -1821,7 +2051,7 @@ mod tests {
         let dir = scratch("finish");
 
         let out = dir.join("out.json");
-        let (feedback, code) = finish(&annotated(), Some(out.to_str().unwrap()));
+        let (feedback, code) = finish(&annotated(), Some(out.to_str().unwrap()), &End::Quit);
         assert_eq!(code, 1, "annotations are changes-requested");
         assert!(feedback.contains("keep me"));
         let json = std::fs::read_to_string(&out).unwrap();
@@ -1835,7 +2065,7 @@ mod tests {
         // a verdict. Only stdout is allowed to be empty here.
         let clean = dir.join("clean.json");
         let app = App::open("t.md".into(), DOC, Format::Markdown);
-        let (feedback, code) = finish(&app, Some(clean.to_str().unwrap()));
+        let (feedback, code) = finish(&app, Some(clean.to_str().unwrap()), &End::Quit);
         assert_eq!(code, 0);
         assert!(feedback.is_empty(), "{feedback:?}");
         assert!(std::fs::read_to_string(&clean)
@@ -1844,10 +2074,14 @@ mod tests {
 
         // With no `--result` there is nothing to fail: stdout is the only output
         // and the exit code still splits clean from annotated.
-        let (feedback, code) = finish(&annotated(), None);
+        let (feedback, code) = finish(&annotated(), None, &End::Quit);
         assert_eq!(code, 1);
         assert!(feedback.contains("keep me"));
-        let (feedback, code) = finish(&App::open("t.md".into(), DOC, Format::Markdown), None);
+        let (feedback, code) = finish(
+            &App::open("t.md".into(), DOC, Format::Markdown),
+            None,
+            &End::Quit,
+        );
         assert_eq!(code, 0);
         assert!(feedback.is_empty());
 
@@ -1982,7 +2216,7 @@ mod tests {
         assert_eq!(v["final"], false);
 
         // And the quit overwrites the snapshot with the verdict.
-        let (_, code) = finish(&app, Some(path));
+        let (_, code) = finish(&app, Some(path), &End::Quit);
         assert_eq!((code, read()["final"].clone()), (0, true.into()));
 
         // Without --result there is nowhere to save and nothing is attempted.
@@ -2005,5 +2239,219 @@ mod tests {
         handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         save.after_event(&mut app);
         assert!(app.status.starts_with("autosave failed"), "{}", app.status);
+    }
+
+    /// One scripted step of a fake terminal.
+    enum Step {
+        Ev(Event),
+        /// A tick with no input.
+        Idle,
+        Fail,
+        /// A signal arrives during this wait.
+        Signal(i32),
+        Panic,
+    }
+
+    /// A terminal that plays a script. Running off its end is an error, so a
+    /// loop that fails to stop shows up as `End::Failed("script ran out")`
+    /// rather than as a hung test.
+    struct Fake<'a> {
+        steps: std::collections::VecDeque<Step>,
+        stop: &'a AtomicUsize,
+        alive: bool,
+        /// Fail the draw with this 1-based number; 0 never fails.
+        fail_draw: usize,
+        draws: usize,
+        waits: usize,
+    }
+
+    impl<'a> Fake<'a> {
+        fn new(stop: &'a AtomicUsize, steps: Vec<Step>) -> Self {
+            Self {
+                steps: steps.into(),
+                stop,
+                alive: true,
+                fail_draw: 0,
+                draws: 0,
+                waits: 0,
+            }
+        }
+    }
+
+    impl Screen for Fake<'_> {
+        fn draw(&mut self, _: &mut App) -> io::Result<()> {
+            self.draws += 1;
+            if self.draws == self.fail_draw {
+                return Err(io::Error::other("draw failed"));
+            }
+            Ok(())
+        }
+
+        fn next(&mut self, _: Duration) -> io::Result<Option<Event>> {
+            self.waits += 1;
+            match self.steps.pop_front() {
+                Some(Step::Ev(e)) => Ok(Some(e)),
+                Some(Step::Idle) => Ok(None),
+                Some(Step::Fail) => Err(io::Error::other("read failed")),
+                Some(Step::Signal(n)) => {
+                    self.stop
+                        .store(usize::try_from(n).unwrap(), Ordering::Relaxed);
+                    Ok(None)
+                }
+                Some(Step::Panic) => panic!("injected panic mid-session"),
+                None => Err(io::Error::other("script ran out")),
+            }
+        }
+
+        fn alive(&self) -> bool {
+            self.alive
+        }
+    }
+
+    /// `c`, the text, Enter: one committed annotation, as keys.
+    fn comment(text: &str) -> Vec<Step> {
+        let k = |c| Step::Ev(Event::Key(KeyEvent::new(c, KeyModifiers::NONE)));
+        let mut v = vec![k(KeyCode::Char('c'))];
+        v.extend(text.chars().map(|c| k(KeyCode::Char(c))));
+        v.push(k(KeyCode::Enter));
+        v
+    }
+
+    /// Drive a whole session against `steps` and finish it, as `main` does.
+    /// Returns how it ended, the exit code, the feedback and the result file.
+    fn session(
+        name: &str,
+        steps: Vec<Step>,
+        tweak: impl FnOnce(&mut Fake),
+    ) -> (End, u8, String, serde_json::Value) {
+        let dir = scratch(name);
+        let out = dir.join("out.json");
+        let path = out.to_str().unwrap();
+        let stop = AtomicUsize::new(0);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+        let mut save = Autosave::new(&app, Some(path));
+        let mut fake = Fake::new(&stop, steps);
+        tweak(&mut fake);
+        let end = run_loop(&mut app, &mut fake, &stop, &mut save);
+        let (feedback, code) = finish(&app, Some(path), &end);
+        let json = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (end, code, feedback, json)
+    }
+
+    /// SIGTERM and SIGHUP killed the process outright: the annotations were
+    /// only in memory, and SIGTERM left the terminal raw on the alternate
+    /// screen. Now a stop signal is a flag the loop reads on its next tick,
+    /// and the session goes through `finish` like any other: the review is
+    /// written, marked not final, printed, and the exit is 2.
+    #[test]
+    fn a_stop_signal_ends_the_session_through_finish() {
+        for sig in STOP_SIGNALS {
+            let mut steps = comment("keep me");
+            steps.push(Step::Idle);
+            steps.push(Step::Signal(sig));
+            let (end, code, feedback, json) = session("signal", steps, |_| {});
+            assert!(
+                matches!(end, End::Signal(n) if n == usize::try_from(sig).unwrap()),
+                "{end:?}"
+            );
+            assert_eq!(code, 2, "a signal is not the human's verdict");
+            assert!(feedback.contains("keep me"), "{feedback:?}");
+            assert_eq!(json["final"], false, "{json}");
+            assert_eq!(json["annotations"][0]["text"], "keep me");
+            assert!(end.reason().unwrap().contains("SIG"), "{:?}", end.reason());
+        }
+    }
+
+    /// A draw or a read that failed returned from `main` with exit 2 and
+    /// nothing written — the early return `finish` exists to prevent, reached
+    /// by the other door. Neither is retried: an error ends the session at
+    /// once, so a terminal that errors forever cannot keep it spinning.
+    #[test]
+    fn a_terminal_error_still_writes_the_review() {
+        let mut steps = comment("keep me");
+        steps.push(Step::Fail);
+        steps.push(Step::Idle);
+        let (end, code, feedback, json) = session("read-error", steps, |_| {});
+        assert!(
+            matches!(&end, End::Failed(e) if e.to_string() == "read failed"),
+            "{end:?}"
+        );
+        assert_eq!(code, 2);
+        assert!(feedback.contains("keep me"));
+        assert_eq!(json["annotations"][0]["text"], "keep me");
+        assert_eq!(json["final"], false);
+
+        // A draw that fails: the one after the Enter that committed.
+        let steps = comment("keep me");
+        let enter_draw = steps.len() + 1;
+        let (end, code, feedback, json) =
+            session("draw-error", steps, |f| f.fail_draw = enter_draw);
+        assert!(
+            matches!(&end, End::Failed(e) if e.to_string() == "draw failed"),
+            "{end:?}"
+        );
+        assert_eq!(code, 2);
+        assert!(feedback.contains("keep me"));
+        assert_eq!(json["annotations"][0]["text"], "keep me");
+    }
+
+    /// With SIGHUP ignored, closing the terminal left the process spinning a
+    /// whole core forever: crossterm's reader loops on a hung-up tty without
+    /// ever returning. The loop now looks up every tick, and a terminal that
+    /// is no longer a terminal ends the session on the first idle tick.
+    #[test]
+    fn a_terminal_that_went_away_ends_the_session_on_the_next_tick() {
+        let mut steps = comment("keep me");
+        steps.extend((0..50).map(|_| Step::Idle));
+        let (end, code, _, json) = session("hangup", steps, |f| f.alive = false);
+        assert!(
+            matches!(&end, End::Failed(e) if e.to_string().contains("went away")),
+            "{end:?}"
+        );
+        assert_eq!(code, 2);
+        assert_eq!(json["annotations"][0]["text"], "keep me");
+
+        // On the first idle tick, not after waiting out the rest.
+        let stop = AtomicUsize::new(0);
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+        let mut save = Autosave::new(&app, None);
+        let mut fake = Fake::new(&stop, (0..5).map(|_| Step::Idle).collect());
+        fake.alive = false;
+        let _ = run_loop(&mut app, &mut fake, &stop, &mut save);
+        assert_eq!(fake.waits, 1, "a dead terminal was waited on again");
+
+        // A live one idles through every tick — and without redrawing: one
+        // draw up front, one per event, none per tick.
+        let mut fake = Fake::new(&stop, comment("x"));
+        fake.steps.extend((0..5).map(|_| Step::Idle));
+        let _ = run_loop(&mut app, &mut fake, &stop, &mut save);
+        assert_eq!(fake.waits, 3 + 5 + 1, "the script did not run to its end");
+        assert_eq!(fake.draws, 1 + 3, "an idle tick redrew");
+    }
+
+    /// A panic anywhere in the loop unwound out of `main`: exit 101, and the
+    /// annotations went with it. Caught now, it ends the session like any
+    /// other failure — written, printed, exit 2.
+    #[test]
+    fn a_panic_mid_session_still_writes_the_review() {
+        let mut steps = comment("keep me");
+        steps.push(Step::Panic);
+        let (end, code, feedback, json) = session("panic", steps, |_| {});
+        assert!(matches!(end, End::Panicked), "{end:?}");
+        assert_eq!(code, 2);
+        assert!(feedback.contains("keep me"));
+        assert_eq!(json["annotations"][0]["text"], "keep me");
+        assert_eq!(json["final"], false);
+    }
+
+    /// …and the one ending that is the human's: `q` is final and graded 0/1.
+    #[test]
+    fn only_a_quit_is_final() {
+        let mut steps = comment("keep me");
+        steps.push(Step::Ev(Event::Key(key('q', KeyModifiers::NONE))));
+        let (end, code, _, json) = session("quit", steps, |_| {});
+        assert!(end.is_quit() && end.reason().is_none(), "{end:?}");
+        assert_eq!((code, json["final"].clone()), (1, true.into()));
     }
 }
