@@ -42,6 +42,11 @@ impl Format {
     /// `--format` is the override, and it is the answer for a file with no
     /// extension — including the temp files a launcher opens, though both
     /// launchers in this tree name theirs `.md` today.
+    ///
+    /// The markdown list is the spellings editors and static-site tools treat
+    /// as plain markdown. `.mdx` is deliberately not one: it is JSX embedded in
+    /// markdown, and comrak would read its components as HTML blocks and its
+    /// expressions as text.
     pub fn of_path(path: &str) -> Self {
         let ext = std::path::Path::new(path)
             .extension()
@@ -49,7 +54,7 @@ impl Format {
             .unwrap_or_default()
             .to_ascii_lowercase();
         match ext.as_str() {
-            "md" | "markdown" => Self::Markdown,
+            "md" | "markdown" | "mdown" | "mkd" | "mkdn" | "mdwn" => Self::Markdown,
             _ => Self::Plain,
         }
     }
@@ -97,7 +102,16 @@ mod tests {
 
     #[test]
     fn markdown_is_claimed_by_extension_and_nothing_else_is() {
-        for path in ["PLAN.md", "a/b/PLAN.md", "notes.markdown", "SHOUTING.MD"] {
+        for path in [
+            "PLAN.md",
+            "a/b/PLAN.md",
+            "notes.markdown",
+            "SHOUTING.MD",
+            "x.mdown",
+            "x.mkd",
+            "x.mkdn",
+            "x.MDWN",
+        ] {
             assert_eq!(Format::of_path(path), Format::Markdown, "{path}");
         }
         for path in [
@@ -108,6 +122,7 @@ mod tests {
             "notes.org",
             ".md",           // an extensionless dotfile, not a markdown file
             "archive.md.gz", // the last extension is the one that counts
+            "page.mdx",      // MDX is JSX in markdown; comrak would misparse it
             "",
         ] {
             assert_eq!(Format::of_path(path), Format::Plain, "{path}");
