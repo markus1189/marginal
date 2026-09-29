@@ -134,6 +134,11 @@ A real run, annotating the inline code span in
 }
 ```
 
+`annotations` and the `##` sections of `feedbackMarkdown` run in **document
+order** — by `startLine`, then `startCol` — whatever order they were written
+in. Ids are handed out in creation order and never renumbered, so `a3` can come
+before `a1`, and an id removed with `x` leaves a gap.
+
 `wholeLines` says whether the span covers its lines entirely, so a consumer
 knows to quote whole lines rather than a fragment. It also picks the location
 format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.

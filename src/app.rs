@@ -1202,12 +1202,28 @@ impl App {
         }
     }
 
+    /// The annotations as a reader meets them: by where they start, not by
+    /// when they were written.
+    ///
+    /// `annotations` stays in creation order, because "the most recent one on
+    /// this line" is what `x` removes and that needs the order they were made
+    /// in. Everything that leaves the process — the JSON and the feedback
+    /// markdown — goes through here instead, so an agent working down the
+    /// review works down the file. The sort is stable, so two comments on one
+    /// span keep the order they were written in; ids are not renumbered, and
+    /// `a3` before `a1` is how a consumer can tell the two orders apart.
+    fn in_document_order(&self) -> Vec<&Annotation> {
+        let mut out: Vec<&Annotation> = self.annotations.iter().collect();
+        out.sort_by_key(|a| (a.start_line, a.start_col));
+        out
+    }
+
     pub fn feedback_markdown(&self) -> String {
         if self.annotations.is_empty() {
             return String::new();
         }
         let mut out = format!("# Review feedback: {}\n", self.display_name());
-        for a in &self.annotations {
+        for a in self.in_document_order() {
             let _ = write!(out, "\n## {} · {}\n", self.loc(a), a.block_kind);
             for l in a.original_text.lines() {
                 let _ = writeln!(out, "> {l}");
@@ -1230,7 +1246,7 @@ impl App {
                 label: self.label.clone(),
                 lines: self.lines.len(),
             },
-            annotations: self.annotations.clone(),
+            annotations: self.in_document_order().into_iter().cloned().collect(),
             feedback_markdown: self.feedback_markdown(),
         }
     }
@@ -2695,6 +2711,50 @@ https://example.dev/a/very/long/path in it as well.
         assert_eq!(a.cursor.line, 3);
         a.goto_mark(1);
         assert_eq!(a.cursor.line, 6);
+    }
+
+    /// Written bottom-up, the review used to come out bottom-up: `result()`
+    /// cloned `annotations` in creation order and `feedback_markdown` walked
+    /// it the same way, so an agent was told about line 6 before line 1.
+    #[test]
+    fn output_runs_in_document_order_and_keeps_creation_ids() {
+        let mut a = app();
+        a.goto_last();
+        commit(&mut a, "last paragraph");
+        a.goto_first();
+        commit(&mut a, "heading");
+        a.move_block(1);
+        commit(&mut a, "first item");
+        a.move_block(-1);
+        commit(&mut a, "heading again");
+
+        let out = a.result();
+        let order: Vec<(&str, usize, &str)> = out
+            .annotations
+            .iter()
+            .map(|x| (x.id.as_str(), x.start_line, x.text.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("a2", 1, "heading"),
+                ("a4", 1, "heading again"),
+                ("a3", 3, "first item"),
+                ("a1", 6, "last paragraph"),
+            ]
+        );
+
+        let md = &out.feedback_markdown;
+        let at = |needle: &str| md.find(needle).unwrap_or_else(|| panic!("{needle}: {md}"));
+        assert!(at("\nheading\n") < at("heading again"));
+        assert!(at("heading again") < at("first item"));
+        assert!(at("first item") < at("last paragraph"));
+
+        // Creation order is untouched: `x` still removes the newest on a line.
+        assert_eq!(a.annotations[0].id, "a1");
+        a.goto_first();
+        a.remove_at_cursor();
+        assert!(a.annotations.iter().all(|x| x.id != "a4"));
     }
 
     #[test]
