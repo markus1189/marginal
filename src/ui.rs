@@ -31,10 +31,11 @@ pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     } else {
         0
     };
+    let annotations_h = annotations_height(app.annotations.len(), f.area().height);
     let chunks = Layout::vertical([
         Constraint::Min(3),
         Constraint::Length(input_h),
-        Constraint::Length(6),
+        Constraint::Length(annotations_h),
         Constraint::Length(1),
     ])
     .split(f.area());
@@ -43,13 +44,36 @@ pub fn draw(f: &mut Frame, app: &mut App, scroll: &mut Anchor) {
     if app.mode == Mode::Input {
         draw_input(f, chunks[1], app);
     }
-    draw_annotations(f, chunks[2], app);
+    if annotations_h > 0 {
+        draw_annotations(f, chunks[2], app);
+    }
     draw_footer(f, chunks[3], app);
     if app.peek {
         draw_peek(f, chunks[0], app);
     }
     let area = f.area();
     crate::help::draw(f, area, app);
+}
+
+/// Terminals shorter than this get no annotations pane at all.
+const ANNOTATIONS_MIN_SCREEN: u16 = 12;
+
+/// Rows the annotations pane takes, borders included: one content row per
+/// annotation up to four, one for the "no annotations yet" hint, and none at
+/// all on a terminal under `ANNOTATIONS_MIN_SCREEN` rows.
+///
+/// It was a fixed six. On a ten-row terminal that left the source pane —
+/// the thing being reviewed — one content row, while the pane under it spent
+/// four rows on a single hint line and three blanks. Four rows is still the
+/// cap, so a long list keeps its `annotations 5-8/8` window and count; what
+/// changed is that a short list stops reserving rows it has nothing to put in,
+/// and a screen too short for both gives up the list, which `]`/`[` and the
+/// gutter dots still reach, rather than the source.
+fn annotations_height(n: usize, screen_h: u16) -> u16 {
+    if screen_h < ANNOTATIONS_MIN_SCREEN {
+        return 0;
+    }
+    u16::try_from(n.clamp(1, 4)).unwrap_or(4) + 2
 }
 
 /// Colours for the markdown syntax tags produced by `highlight`.
@@ -2069,19 +2093,25 @@ mod tests {
     /// The annotations pane's rect, from the same layout the renderer solves
     /// rather than from arithmetic in the test. Getting it a row out reads the
     /// first entry as the title and drops the last one.
-    fn annotations_area(area: Rect) -> Rect {
-        Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(0),
-            Constraint::Length(6),
-            Constraint::Length(1),
-        ])
-        .split(area)[2]
+    /// The annotations pane, found on the screen by its title rather than by
+    /// re-solving the layout: its height depends on how many annotations there
+    /// are, and a helper that assumed one height put the title on the wrong
+    /// row the moment it changed.
+    fn annotations_area(buf: &ratatui::buffer::Buffer) -> Rect {
+        let row =
+            |y: u16| -> String { (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect() };
+        let top = (0..buf.area.height)
+            .find(|&y| row(y).starts_with("┌ annotations"))
+            .expect("no annotations pane on screen");
+        let bottom = (top + 1..buf.area.height)
+            .find(|&y| row(y).starts_with('└'))
+            .expect("annotations pane has no bottom border");
+        Rect::new(0, top, buf.area.width, bottom - top + 1)
     }
 
     /// The pane's title, as it reached the screen.
     fn annotations_title(buf: &ratatui::buffer::Buffer) -> String {
-        let y = annotations_area(buf.area).y;
+        let y = annotations_area(buf).y;
         (0..buf.area.width)
             .map(|x| buf[(x, y)].symbol())
             .collect::<String>()
@@ -2089,7 +2119,7 @@ mod tests {
 
     /// The pane's content rows, trimmed of their borders.
     fn annotation_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
-        let pane = annotations_area(buf.area);
+        let pane = annotations_area(buf);
         (pane.y + 1..pane.bottom() - 1)
             .map(|y| {
                 (0..buf.area.width)
@@ -2235,12 +2265,14 @@ mod tests {
 
     /// Cells the track has, from the same layout the renderer solves rather
     /// than from arithmetic in the test that drifts the moment a pane changes
-    /// height. `Length(0)` is the comment box, which is closed here.
+    /// height. `Length(0)` is the comment box, which is closed here, and the
+    /// annotations pane is sized for at most one annotation — every caller
+    /// has zero or one.
     fn track_height(area: Rect) -> u16 {
         Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(0),
-            Constraint::Length(6),
+            Constraint::Length(annotations_height(1, area.height)),
             Constraint::Length(1),
         ])
         .split(area)[0]
@@ -3060,10 +3092,9 @@ mod tests {
         // count is always dropped text and never the end of the document.
         let line: String = (0..500).map(|i| format!("ｶﾞ{i}")).collect();
         let doc = format!("{line}\n");
-        // `draw` gives the annotations pane six rows and the footer one, and the
-        // source block spends two more of what is left on its border.
+        // The source pane's content rows, as the renderer lays them out.
         let h = 20u16;
-        let last_body_row = h - 6 - 1 - 2;
+        let last_body_row = track_height(Rect::new(0, 0, 80, h));
         for w in 20u16..=80 {
             let mut app = App::open("kana.md".into(), &doc, Format::Markdown);
             app.pretty = true;
@@ -3791,6 +3822,51 @@ mod tests {
                     .any(|r| r.contains("list-item..l… merge these bullets")),
                 "width {w}: {rows:?}"
             );
+        }
+    }
+
+    /// Source content rows on screen: the rows between the source pane's two
+    /// borders.
+    fn source_rows(buf: &ratatui::buffer::Buffer) -> u16 {
+        (1..buf.area.height)
+            .find(|&y| buf[(0, y)].symbol() == "└")
+            .map_or(0, |y| y - 1)
+    }
+
+    /// The pane was a fixed six rows. At ten rows of terminal that left the
+    /// source — what is being reviewed — one content row, under a pane
+    /// spending four on a one-line hint. Before, `source_rows` was 1
+    /// at h=10 and 2 at h=11; the tests all rendered at 24 rows, where six
+    /// rows of pane cost nothing anyone looked at.
+    #[test]
+    fn a_short_terminal_gives_its_rows_to_the_source_not_the_annotations() {
+        for h in [6u16, 8, 10, 11] {
+            let mut app = annotated(2);
+            let buf = render_buf(&mut app, 80, h);
+            assert_eq!(source_rows(&buf), h - 3, "height {h}");
+            let screen = render(&mut app, 80, h);
+            assert!(!screen.contains("┌ annotations"), "height {h}: {screen}");
+        }
+    }
+
+    /// Above the cut-off the pane is as tall as what it lists, up to the four
+    /// rows it always had — so the `5-8/8` window is unchanged.
+    #[test]
+    fn the_annotations_pane_is_as_tall_as_its_list_up_to_four_rows() {
+        for h in [12u16, 16, 24] {
+            for (n, rows) in [(0usize, 1u16), (1, 1), (2, 2), (3, 3), (4, 4), (8, 4)] {
+                let mut app = if n == 0 {
+                    App::open("b.md".into(), &para_doc(12), Format::Markdown)
+                } else {
+                    annotated(n)
+                };
+                let buf = render_buf(&mut app, 80, h);
+                let pane = annotations_area(&buf);
+                assert_eq!(pane.height, rows + 2, "{n} annotations at height {h}");
+                // Header, pane, footer and the source's two borders: the source
+                // gets everything else.
+                assert_eq!(source_rows(&buf), h - pane.height - 1 - 2, "height {h}");
+            }
         }
     }
 }
