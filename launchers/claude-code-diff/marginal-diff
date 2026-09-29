@@ -424,7 +424,7 @@ if [ "$dump_only" -eq 1 ]; then
 fi
 
 if [ "$dump_map" -eq 1 ]; then
-  printf 'docline\tkind\toldfile\toldline\tnewfile\tnewline\textra\n'
+  printf 'docline\tkind\toldfile\toldline\tnewfile\tnewline\toldend\tnewend\n'
   # TABs for reading. No field can hold one: see the map comment above.
   tr '\037' '\t' < "$map"
   exit 0
