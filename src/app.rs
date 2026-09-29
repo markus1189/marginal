@@ -959,6 +959,15 @@ impl App {
     // ---- annotating -----------------------------------------------------
 
     pub fn begin_comment(&mut self) {
+        // An empty file has no line 1 to point at, but `V` still builds a
+        // `L1:1-1` span out of cursor arithmetic — and an annotation on it
+        // came out with `startLine: 1` beside `source.lines: 0`, a location
+        // the result itself says does not exist. Refused rather than clamped:
+        // there are no bytes to quote.
+        if self.lines.is_empty() {
+            self.status = "empty file — nothing here".into();
+            return;
+        }
         if self.selection().is_none() {
             self.status = "nothing to annotate".into();
             return;
@@ -3085,6 +3094,35 @@ Say the word and I will implement any tier.
         a.contract();
         a.remove_at_cursor();
         assert_eq!(a.result().decision, "approved");
+    }
+
+    /// `V` builds its span from cursor arithmetic, not from a unit, so it
+    /// reached an empty file's non-existent line 1: the result reported an
+    /// annotation at `startLine: 1` next to `source.lines: 0`.
+    #[test]
+    fn an_empty_file_cannot_be_annotated_by_any_selection() {
+        for select in [
+            App::toggle_lines,
+            App::toggle_blocks,
+            App::expand,
+            App::contract,
+        ] {
+            let mut a = App::open("empty.md".into(), "", Format::Markdown);
+            select(&mut a);
+            a.begin_comment();
+            assert_eq!(a.mode, Mode::Normal);
+            assert!(a.status.contains("empty file"), "{}", a.status);
+            let out = a.result();
+            assert!(out.annotations.is_empty());
+            assert_eq!(out.source.lines, 0);
+        }
+        // A file holding one blank line has a line 1, and it can be pointed at.
+        let mut a = App::open("blank.md".into(), "\n", Format::Markdown);
+        a.toggle_lines();
+        commit(&mut a, "why is this blank");
+        let out = a.result();
+        assert_eq!(out.source.lines, 1);
+        assert_eq!(out.annotations[0].start_line, 1);
     }
 
     /// `move_line` clamps into `1..=line_count()`, and `Ord::clamp` panics when
