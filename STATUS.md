@@ -17,8 +17,8 @@
 - markdown syntax highlighting driven by the same AST, no extra dependency
 - multi-line comment editor with readline bindings and per-session history
 - paging keys (`C-d`/`C-u`/`C-f`/`C-b`, PgDn/PgUp)
-- comments on any selection, removal, result JSON + feedback markdown,
-  exit `0` / `1` / `2`
+- comments on any selection, general comments on the whole document,
+  removal, result JSON + feedback markdown, exit `0` / `1` / `2`
 - no test requires a terminal (UI covered via ratatui `TestBackend`)
 
 ## Dependency diet
@@ -91,8 +91,8 @@ Put it behind a cargo feature so the lean build stays the default.
   the hard half — but it borrows from *this* human's tmux server. An agent with
   no tmux and no `DISPLAY` still has nowhere to put the screen — see the open
   question below.
-- `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations, global
-  comments, approve-with-notes
+- `--gate`, `--stdin`, `$EDITOR` escalation, deletion annotations,
+  approve-with-notes
 - **a format-specific backend for anything but markdown.** The seam is built and
   the plain fallback stands behind it, so a `.tex` file navigates by paragraph
   today. What it cannot do is see a `\section` that has no blank line under it,

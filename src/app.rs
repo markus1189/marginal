@@ -27,6 +27,15 @@ pub enum Mode {
     Input,
 }
 
+/// What the comment being typed becomes when `Enter` commits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// An annotation on the current selection — `Enter` / `c`.
+    Selection,
+    /// A comment on the document as a whole — `C`. Quotes nothing.
+    General,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sel {
     /// Just the navigation unit under the cursor.
@@ -40,28 +49,64 @@ pub enum Sel {
     Region { depth: usize },
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// One comment. `kind` is `"comment"` for a comment on a span and
+/// `"general"` for one on the document as a whole.
+///
+/// A general comment has no span, and its location fields hold `0` — below
+/// every real line, which are 1-based — so every "is the cursor inside it"
+/// test (`annotations_on`, `x`, the pane's `▸`) is false for it without a
+/// special case, and a document-order sort puts it first. The `0`s never leave
+/// the process: `Serialize` below writes a general comment as `id`, `type` and
+/// `text` only, so a consumer cannot mistake it for a comment on line 0.
+#[derive(Debug, Clone)]
 pub struct Annotation {
     pub id: String,
-    #[serde(rename = "type")]
     pub kind: &'static str,
-    #[serde(rename = "blockKind")]
     pub block_kind: String,
-    #[serde(rename = "startLine")]
     pub start_line: usize,
-    #[serde(rename = "startCol")]
     pub start_col: usize,
-    #[serde(rename = "endLine")]
     pub end_line: usize,
-    #[serde(rename = "endCol")]
     pub end_col: usize,
     /// True when the span covers its lines entirely, so consumers can quote
     /// whole lines instead of a fragment.
-    #[serde(rename = "wholeLines")]
     pub whole_lines: bool,
-    #[serde(rename = "originalText")]
     pub original_text: String,
     pub text: String,
+}
+
+impl Annotation {
+    /// A comment on the document as a whole, rather than on a span of it.
+    pub fn is_general(&self) -> bool {
+        self.kind == "general"
+    }
+}
+
+/// Written by hand for the one thing a derive cannot say: a general comment
+/// carries no location at all. Omitted rather than `null`, so `type` is the
+/// discriminant and there is no `startLine` for a consumer to read as a line.
+impl Serialize for Annotation {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        if self.is_general() {
+            let mut m = s.serialize_struct("Annotation", 3)?;
+            m.serialize_field("id", &self.id)?;
+            m.serialize_field("type", self.kind)?;
+            m.serialize_field("text", &self.text)?;
+            return m.end();
+        }
+        let mut m = s.serialize_struct("Annotation", 10)?;
+        m.serialize_field("id", &self.id)?;
+        m.serialize_field("type", self.kind)?;
+        m.serialize_field("blockKind", &self.block_kind)?;
+        m.serialize_field("startLine", &self.start_line)?;
+        m.serialize_field("startCol", &self.start_col)?;
+        m.serialize_field("endLine", &self.end_line)?;
+        m.serialize_field("endCol", &self.end_col)?;
+        m.serialize_field("wholeLines", &self.whole_lines)?;
+        m.serialize_field("originalText", &self.original_text)?;
+        m.serialize_field("text", &self.text)?;
+        m.end()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +164,8 @@ pub struct App {
     pub sel: Sel,
     pub annotations: Vec<Annotation>,
     pub mode: Mode,
+    /// What `commit_comment` files the editor's text as.
+    pub target: Target,
     pub editor: Editor,
     pub status: String,
     pub quit: bool,
@@ -458,6 +505,7 @@ impl App {
             sel: Sel::Here,
             annotations: Vec::new(),
             mode: Mode::Normal,
+            target: Target::Selection,
             editor: Editor::default(),
             status: String::new(),
             quit: false,
@@ -1022,18 +1070,67 @@ impl App {
             return;
         }
         self.mode = Mode::Input;
+        self.target = Target::Selection;
         self.editor.start_fresh();
+    }
+
+    /// `C`: a comment on the whole document, quoting nothing.
+    ///
+    /// The workaround was `+` up to the document node, which quoted the entire
+    /// file into the feedback. Needs no selection and no lines, so it is also
+    /// the one way to say something about an empty file.
+    pub fn begin_general(&mut self) {
+        self.mode = Mode::Input;
+        self.target = Target::General;
+        self.editor.start_fresh();
+    }
+
+    /// What the comment box is about to comment on, for its title.
+    pub fn input_subject(&self) -> String {
+        if self.target == Target::General {
+            return "general comment on the whole document".into();
+        }
+        let range = match self.selection() {
+            Some(s) if s.start.line == s.end.line && s.start.col == 1 => {
+                format!("L{}", s.start.line)
+            }
+            Some(s) if s.start.line == s.end.line => {
+                format!("L{}:{}-{}", s.start.line, s.start.col, s.end.col)
+            }
+            Some(s) => format!("L{}-{}", s.start.line, s.end.line),
+            None => String::new(),
+        };
+        format!("comment on {} {range}", self.selection_kind())
     }
 
     pub fn commit_comment(&mut self) {
         let text = trim_blank_lines(self.editor.text()).to_string();
         self.mode = Mode::Normal;
+        let target = std::mem::replace(&mut self.target, Target::Selection);
         if text.is_empty() {
             self.editor.start_fresh();
             self.status = "empty comment discarded".into();
             return;
         }
         self.editor.submit();
+        if target == Target::General {
+            let id = format!("a{}", self.next_id);
+            self.next_id += 1;
+            self.annotations.push(Annotation {
+                id,
+                kind: "general",
+                block_kind: "general".into(),
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
+                whole_lines: false,
+                original_text: String::new(),
+                text,
+            });
+            self.status = format!("{} annotation(s)", self.annotations.len());
+            return;
+        }
         let Some(span) = self.selection() else { return };
         let kind = self.selection_kind();
         let quoted = self.slice(span);
@@ -1057,6 +1154,7 @@ impl App {
 
     pub fn cancel_input(&mut self) {
         self.mode = Mode::Normal;
+        self.target = Target::Selection;
         self.editor.start_fresh();
         self.status = "cancelled".into();
     }
@@ -1066,7 +1164,7 @@ impl App {
         let hit = self
             .annotations
             .iter()
-            .rposition(|a| line >= a.start_line && line <= a.end_line);
+            .rposition(|a| !a.is_general() && line >= a.start_line && line <= a.end_line);
         match hit {
             Some(i) => {
                 self.annotations.remove(i);
@@ -1134,6 +1232,7 @@ impl App {
         let mut out: Vec<(Pos, &'static str)> = self
             .annotations
             .iter()
+            .filter(|a| !a.is_general())
             .map(|a| (Pos::new(a.start_line, a.start_col), "annotation"))
             .chain(
                 self.questions
@@ -1244,7 +1343,10 @@ impl App {
 
     fn loc(&self, a: &Annotation) -> String {
         let name = self.display_name();
-        if a.whole_lines {
+        if a.is_general() {
+            // A bare name: the comment is about the file, not a place in it.
+            name.to_string()
+        } else if a.whole_lines {
             if a.start_line == a.end_line {
                 format!("{}:{}", name, a.start_line)
             } else {
@@ -1272,7 +1374,8 @@ impl App {
     /// `a3` before `a1` is how a consumer can tell the two orders apart.
     fn in_document_order(&self) -> Vec<&Annotation> {
         let mut out: Vec<&Annotation> = self.annotations.iter().collect();
-        out.sort_by_key(|a| (a.start_line, a.start_col));
+        // General comments first: they frame everything after them.
+        out.sort_by_key(|a| (!a.is_general(), a.start_line, a.start_col));
         out
     }
 
@@ -1293,7 +1396,9 @@ impl App {
 
     pub fn result(&self) -> Outcome {
         Outcome {
-            version: 1,
+            // 2: an annotation may be `"type": "general"`, carrying `id`,
+            // `type` and `text` and no location. Everything else is as in 1.
+            version: 2,
             decision: if self.annotations.is_empty() {
                 "approved"
             } else {
@@ -1861,8 +1966,8 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let ctx = || format!("comment: {case:?}\n--- feedback markdown ---\n{md}");
 
         let want: Vec<String> = a
-            .annotations
-            .iter()
+            .in_document_order()
+            .into_iter()
             .map(|x| format!("{} · {}", a.loc(x), x.block_kind))
             .collect();
         let heads: Vec<&Blk> = blks
@@ -1872,7 +1977,7 @@ Use `parse_document` and the [comrak docs](https://docs.rs) here.
         let got: Vec<String> = heads.iter().map(|b| b.text.clone()).collect();
         assert_eq!(got, want, "sections are not one per annotation\n{}", ctx());
 
-        for (i, ann) in a.annotations.iter().enumerate() {
+        for (i, ann) in a.in_document_order().into_iter().enumerate() {
             let from = heads[i].start;
             let to = heads.get(i + 1).map_or(lines.len(), |h| h.start - 1);
             let body: Vec<&str> = ann.text.lines().collect();
@@ -2849,6 +2954,88 @@ https://example.dev/a/very/long/path in it as well.
         a.goto_first();
         a.remove_at_cursor();
         assert!(a.annotations.iter().all(|x| x.id != "a4"));
+    }
+
+    fn general(a: &mut App, text: &str) {
+        a.begin_general();
+        a.editor.set(text);
+        a.commit_comment();
+    }
+
+    /// `C` used to have no equivalent: the only document-level comment was
+    /// `+` up to the document node, which quoted the entire file.
+    #[test]
+    fn a_general_comment_quotes_nothing_and_carries_no_location() {
+        let mut a = app();
+        a.goto_last();
+        commit(&mut a, "on the paragraph");
+        general(&mut a, "overall: split this plan in two");
+
+        let out = a.result();
+        assert_eq!(out.version, 2);
+        assert_eq!(out.decision, "changes-requested");
+        let json = serde_json::to_value(&out).unwrap();
+        let first = &json["annotations"][0];
+        assert_eq!(
+            first,
+            &serde_json::json!({
+                "id": "a2",
+                "type": "general",
+                "text": "overall: split this plan in two",
+            }),
+            "general comments come first, with no location fields at all"
+        );
+        assert_eq!(json["annotations"][1]["type"], "comment");
+        assert_eq!(json["annotations"][1]["startLine"], 6);
+
+        let md = &out.feedback_markdown;
+        assert!(
+            md.starts_with(
+                "# Review feedback: PLAN.md\n\n## PLAN.md · general\n\noverall: split this plan in two\n\n## PLAN.md:6 · paragraph\n"
+            ),
+            "{md}"
+        );
+        assert_feedback_is_faithful(&a, "general");
+    }
+
+    #[test]
+    fn a_general_comment_is_not_on_any_line() {
+        let mut a = app();
+        general(&mut a, "whole thing");
+        for line in 1..=a.line_count() {
+            assert_eq!(a.annotations_on(line), 0, "line {line}");
+        }
+        // Not a mark: there is nowhere for `]` to go.
+        assert!(a.mark_positions().iter().all(|(p, _)| p.line >= 1));
+        // `x` acts on the cursor's line, and a general comment is on none.
+        a.goto_first();
+        a.remove_at_cursor();
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(a.status, "no annotation here");
+    }
+
+    #[test]
+    fn a_general_comment_works_on_an_empty_file_and_can_be_cancelled() {
+        let mut a = App::open("empty.md".into(), "", Format::Markdown);
+        a.begin_general();
+        assert_eq!(a.mode, Mode::Input);
+        assert!(a.input_subject().contains("whole document"));
+        a.editor.set("this file should not be empty");
+        a.cancel_input();
+        assert!(a.annotations.is_empty());
+        assert_eq!(a.target, Target::Selection);
+
+        general(&mut a, "this file should not be empty");
+        let out = a.result();
+        assert_eq!(out.source.lines, 0);
+        assert_eq!(out.annotations.len(), 1);
+        assert!(out.annotations[0].is_general());
+
+        // An empty general comment is discarded like any other, and does not
+        // leave the next `Enter` filing a span comment as general.
+        general(&mut a, "  ");
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(a.target, Target::Selection);
     }
 
     #[test]

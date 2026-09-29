@@ -460,13 +460,31 @@ selected lines live on:
 The blockquote is the exact diff text they selected, \`+\`/\`-\` markers and all.
 What follows it is their comment. Address every comment.
 
+A heading ending in \`· general\` has no location and no blockquote: it is a
+comment on the change as a whole, not on any line of it.
+
 Line numbers were resolved against the diff as it was when review started. If
 you have changed these files since, re-read them before editing.
 
 HDR
 
+print_comment() {
+  if needs_fence "$1"; then
+    printf '```\n%s\n```\n\n' "$1"
+  else
+    printf '%s\n\n' "$1"
+  fi
+}
+
 for i in $(seq 0 $((count - 1))); do
   a="$(jq -c ".annotations[$i]" "$result_json")"
+  # A general comment (result version 2) has no location to resolve: it is
+  # `id`, `type` and `text` and nothing else.
+  if [ "$(jq -r '.type' <<<"$a")" = general ]; then
+    printf '## %s · general\n\n' "$label"
+    print_comment "$(jq -r '.text' <<<"$a")"
+    continue
+  fi
   s="$(jq -r '.startLine'   <<<"$a")"
   e="$(jq -r '.endLine'     <<<"$a")"
   kind="$(jq -r '.blockKind' <<<"$a")"
@@ -479,9 +497,5 @@ for i in $(seq 0 $((count - 1))); do
   printf '## %s · %s\n\n' "$loc" "$kind"
   printf '%s\n' "$orig" | sed 's/^/> /'
   printf '\n'
-  if needs_fence "$text"; then
-    printf '```\n%s\n```\n\n' "$text"
-  else
-    printf '%s\n\n' "$text"
-  fi
+  print_comment "$text"
 done

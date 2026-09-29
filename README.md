@@ -113,7 +113,7 @@ A real run, annotating the inline code span in
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "decision": "changes-requested",
   "source": { "path": "PLAN.md", "lines": 5 },
   "annotations": [
@@ -135,13 +135,33 @@ A real run, annotating the inline code span in
 ```
 
 `annotations` and the `##` sections of `feedbackMarkdown` run in **document
-order** — by `startLine`, then `startCol` — whatever order they were written
-in. Ids are handed out in creation order and never renumbered, so `a3` can come
+order** — general comments first, then by `startLine` and `startCol` — whatever
+order they were written in. Ids are handed out in creation order and never renumbered, so `a3` can come
 before `a1`, and an id removed with `x` leaves a gap.
 
 `wholeLines` says whether the span covers its lines entirely, so a consumer
 knows to quote whole lines rather than a fragment. It also picks the location
 format: `PLAN.md:5` for whole lines, `PLAN.md:5:5-20` for a fragment.
+
+**General comments** (`C`) are about the document as a whole and quote nothing.
+In the JSON one is `type: "general"` and carries **only** `id`, `type` and
+`text` — no `blockKind`, no line or column fields, no `originalText`, not even as
+`null`. Branch on `type` before reading a location; a span comment is always
+`type: "comment"` and always has all of them. In `feedbackMarkdown` each gets a
+section headed by the bare name and no blockquote:
+
+```json
+{ "id": "a3", "type": "general", "text": "split this plan in two" }
+```
+
+```markdown
+## PLAN.md · general
+
+split this plan in two
+```
+
+`version` is `2` since general comments exist; that is the only difference from
+`1`, whose consumers could assume every annotation has a span.
 
 ## Launchers: annotating an agent's reply
 
@@ -386,6 +406,7 @@ assumes one.
 | `P` | pretty on / off — soft wrap and aligned tables (on by default; `--raw` starts off) |
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `Enter` (also `c`) | comment on the selection |
+| `C` | general comment — on the whole document, quoting nothing |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `]` / `[` | next / previous **mark**, in document order, wrapping at both ends |
 | `#` | steps of numbered lists in or out of the mark ring (in by default) |

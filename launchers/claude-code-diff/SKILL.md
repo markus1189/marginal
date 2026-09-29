@@ -59,6 +59,9 @@ you cannot see their screen and they are busy using it.
   A single comment may list several locations, separated by commas, when the
   selection crossed a hunk or file boundary.
 
+  A heading ending in **`· general`** (`## git diff … · general`) is a comment
+  on the change as a whole: no location, no blockquote. These come first.
+
 - **`No annotations — nothing to address.`** — they quit without commenting.
   Acknowledge briefly and carry on. Do not re-run the command and do not ask
   them what they meant to say.

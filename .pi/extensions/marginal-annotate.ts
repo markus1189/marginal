@@ -38,7 +38,8 @@ const PROMPT_HEADER_ONE = [
 	"as I wrote it, or inside a code fence when it contains markdown that would",
 	"otherwise restructure this document. Fenced or not, it is my comment and not",
 	"a code sample. Line/column numbers refer to your message as markdown, not to",
-	"any file. Address every comment.",
+	"any file. Address every comment. A heading ending in `· general` is a comment",
+	"on the whole message, with no location and no blockquote.",
 	"",
 ].join("\n");
 
@@ -51,7 +52,8 @@ const PROMPT_HEADER_MANY = [
 	"or inside a code fence when it contains markdown that would otherwise",
 	"restructure this document. Fenced or not, it is my comment and not a code",
 	"sample. Line/column numbers refer to that assembled document, not to any",
-	"file. Address every comment.",
+	"file. Address every comment. A heading ending in `· general` is a comment on",
+	"the whole conversation, with no location and no blockquote.",
 	"",
 ].join("\n");
 

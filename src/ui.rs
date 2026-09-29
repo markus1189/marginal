@@ -870,18 +870,9 @@ fn caret_hscroll(prompt: &str, before: &str, caret: &str, inner_w: u16) -> u16 {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let range = match app.selection() {
-        Some(s) if s.start.line == s.end.line && s.start.col == 1 => format!("L{}", s.start.line),
-        Some(s) if s.start.line == s.end.line => {
-            format!("L{}:{}-{}", s.start.line, s.start.col, s.end.col)
-        }
-        Some(s) => format!("L{}-{}", s.start.line, s.end.line),
-        None => String::new(),
-    };
     let title = format!(
-        " comment on {} {} — Enter saves · C-j newline · Esc cancels ",
-        app.selection_kind(),
-        range
+        " {} — Enter saves · C-j newline · Esc cancels ",
+        app.input_subject()
     );
 
     let caret = Style::default().bg(Color::Yellow).fg(Color::Black);
@@ -1074,7 +1065,9 @@ fn draw_annotations(f: &mut Frame, area: Rect, app: &App) {
                 // window: `x remove` acts on the cursor and the numbers are how
                 // you check you are about to remove the one you mean.
                 let i = top + row;
-                let loc = if a.whole_lines && a.start_line == a.end_line {
+                let loc = if a.is_general() {
+                    "document".to_string()
+                } else if a.whole_lines && a.start_line == a.end_line {
                     format!("L{}", a.start_line)
                 } else if a.whole_lines {
                     format!("L{}-{}", a.start_line, a.end_line)
@@ -2056,6 +2049,34 @@ mod tests {
         let title = annotations_title(&render_buf(&mut app, 100, 24));
         assert!(title.contains(" annotations "), "{title}");
         assert!(!title.contains('/'), "{title}");
+    }
+
+    /// A general comment has no line to show, so the pane names the document
+    /// instead, and the title bar counts it with the rest. The comment box says
+    /// what it is commenting on, which is how `C` is told apart from `c`.
+    #[test]
+    fn a_general_comment_is_listed_and_counted_but_marks_no_line() {
+        let mut app = App::open("PLAN.md".into(), DOC, Format::Markdown);
+        app.begin_general();
+        for w in [60, 80, 120] {
+            let screen = render(&mut app, w, 24);
+            assert!(
+                screen.contains(" general comment on the whole"),
+                "{w}: {screen}"
+            );
+        }
+        app.editor.set("split this in two");
+        app.commit_comment();
+        for w in [60, 80, 120] {
+            let buf = render_buf(&mut app, w, 24);
+            let rows = annotation_rows(&buf);
+            assert!(rows[0].contains("1 document"), "{w}: {rows:?}");
+            assert!(rows[0].contains("general"), "{w}: {rows:?}");
+            assert!(!rows[0].contains('▸'), "{w}: no line holds it: {rows:?}");
+            let screen = render(&mut app, w, 24);
+            assert!(!screen.contains('●'), "{w}: a general comment dots no line");
+        }
+        assert!(render(&mut app, 120, 24).contains("1 annotations"));
     }
 
     // ---- the scrollbar -----------------------------------------------------

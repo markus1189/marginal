@@ -514,6 +514,8 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             // Enter is the primary; `c` stays bound because it is what the
             // first two weeks of muscle memory reach for.
             KeyCode::Enter | KeyCode::Char('c') => app.begin_comment(),
+            // Capital for the document-level variant of the same action.
+            KeyCode::Char('C') => app.begin_general(),
             KeyCode::Char('x') => app.remove_at_cursor(),
             // `]`/`[` rather than `n`/`N`: search will want those, and vim
             // already spells "next/previous change hunk" with brackets.

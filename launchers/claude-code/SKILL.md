@@ -34,6 +34,8 @@ cannot see their screen and they are busy using it.
   document. Fenced or not, it is their comment and not a code sample. Address
   every comment. The line and column numbers refer to the assembled markdown
   document, not to any file in the repo, so do not go looking for them on disk.
+  A heading ending in **`· general`** is a comment on the whole document, with
+  no location and no blockquote; general comments come first.
 - **`No annotations — nothing to address.`** — they quit without commenting.
   Acknowledge briefly and carry on with whatever you were doing. Do not re-run
   the command and do not ask them what they meant to say.
