@@ -84,7 +84,16 @@ impl Annotation {
     pub fn is_general(&self) -> bool {
         self.kind == "general"
     }
+
+    fn is_on(&self, span: Span) -> bool {
+        !self.is_general()
+            && (self.start_line, self.start_col, self.end_line, self.end_col)
+                == (span.start.line, span.start.col, span.end.line, span.end.col)
+    }
 }
+
+/// The texts `y` and `n` write, and the only two that replace each other.
+const ANSWERS: [&str; 2] = ["yes", "no"];
 
 /// Written by hand for the one thing a derive cannot say: a general comment
 /// carries no location at all. Omitted rather than `null`, so `type` is the
@@ -504,6 +513,17 @@ fn opens_indented_code(text: &str) -> bool {
 /// else. A whole-string `trim` also ate the indentation of the first line, so a
 /// comment opening with an indented code line lost the indent that made it code.
 /// Trailing whitespace on the last line goes too; nothing can depend on it.
+/// A comment as the status line names it: its first line, cut short.
+fn preview(text: &str) -> String {
+    const MAX: usize = 40;
+    let first = text.lines().next().unwrap_or_default();
+    if first.chars().count() > MAX || first.len() < text.len() {
+        format!("{}…", first.chars().take(MAX).collect::<String>())
+    } else {
+        first.to_string()
+    }
+}
+
 fn trim_blank_lines(text: &str) -> &str {
     let text = text.trim_end();
     let start: usize = text
@@ -1151,6 +1171,16 @@ impl App {
     // ---- annotating -----------------------------------------------------
 
     pub fn begin_comment(&mut self) {
+        if !self.can_annotate() {
+            return;
+        }
+        self.mode = Mode::Input;
+        self.target = Target::Selection;
+        self.editor.start_fresh();
+    }
+
+    /// Says why not on the status line when there is nothing to annotate.
+    fn can_annotate(&mut self) -> bool {
         // An empty file has no line 1 to point at, but `V` still builds a
         // `L1:1-1` span out of cursor arithmetic — and an annotation on it
         // came out with `startLine: 1` beside `source.lines: 0`, a location
@@ -1158,15 +1188,42 @@ impl App {
         // there are no bytes to quote.
         if self.lines.is_empty() {
             self.status = "empty file — nothing here".into();
-            return;
+            return false;
         }
         if self.selection().is_none() {
             self.status = "nothing to annotate".into();
+            return false;
+        }
+        true
+    }
+
+    /// `y` / `n`: annotate the selection with `text` without opening the editor.
+    ///
+    /// An annotation already on exactly this span with the same text is left
+    /// alone, and an answer there is flipped rather than joined by the other
+    /// one: a span saying both `yes` and `no` is a contradiction, and changing
+    /// your mind should cost the one key that made it up. Exactly this span,
+    /// not the cursor's line as `x`/`e` use, so an answer on a list item
+    /// survives a `y` on the whole list.
+    pub fn place(&mut self, text: &str) {
+        if !self.can_annotate() {
             return;
         }
-        self.mode = Mode::Input;
-        self.target = Target::Selection;
-        self.editor.start_fresh();
+        let Some(span) = self.selection() else { return };
+        self.editor.remember(text);
+        let here = |a: &Annotation, t: &str| a.is_on(span) && a.text == t;
+        if let Some(a) = self.annotations.iter().rfind(|a| here(a, text)) {
+            self.status = format!("{} already says {}", a.id, preview(text));
+        } else if let Some(a) = self.annotations.iter_mut().rev().find(|a| {
+            ANSWERS.contains(&text) && a.is_on(span) && ANSWERS.contains(&a.text.as_str())
+        }) {
+            let was = std::mem::replace(&mut a.text, text.to_string());
+            self.status = format!("{}: {text} (was {was})", a.id);
+        } else {
+            let id = self.push_on_selection(span, text.to_string());
+            self.status = format!("{id}: {}", preview(text));
+        }
+        self.sel = Sel::Here;
     }
 
     /// `C`: a comment on the whole document, quoting nothing.
@@ -1284,12 +1341,19 @@ impl App {
             return;
         }
         let Some(span) = self.selection() else { return };
+        self.push_on_selection(span, text);
+        self.sel = Sel::Here;
+        self.status = format!("{} annotation(s)", self.annotations.len());
+    }
+
+    /// `span` must be the current selection: its kind is read from `sel`.
+    fn push_on_selection(&mut self, span: Span, text: String) -> String {
         let kind = self.selection_kind();
         let quoted = self.slice(span);
         let id = format!("a{}", self.next_id);
         self.next_id += 1;
         self.annotations.push(Annotation {
-            id,
+            id: id.clone(),
             kind: "comment",
             block_kind: kind,
             start_line: span.start.line,
@@ -1300,8 +1364,7 @@ impl App {
             original_text: quoted,
             text,
         });
-        self.sel = Sel::Here;
-        self.status = format!("{} annotation(s)", self.annotations.len());
+        id
     }
 
     /// Replace annotation `id`'s text, keeping its id and span. Emptying it
@@ -3415,6 +3478,104 @@ https://example.dev/a/very/long/path in it as well.
         a.goto_mark(1);
         assert_eq!(a.cursor, Pos::new(3, 1));
         assert_eq!(a.status, "no marks");
+    }
+
+    // ---- one-key answers ----------------------------------------------------
+
+    #[test]
+    fn y_annotates_the_selection_like_a_typed_yes() {
+        let mut a = app();
+        a.move_block(1);
+        a.place("yes");
+        let mut typed = app();
+        typed.move_block(1);
+        commit(&mut typed, "yes");
+        let (got, want) = (&a.annotations[0], &typed.annotations[0]);
+        assert_eq!(
+            (
+                got.block_kind.as_str(),
+                got.start_line,
+                got.end_col,
+                &got.original_text,
+                &got.text
+            ),
+            (
+                want.block_kind.as_str(),
+                want.start_line,
+                want.end_col,
+                &want.original_text,
+                &want.text
+            ),
+        );
+        assert_eq!(a.status, "a1: yes");
+        assert_eq!(a.mode, Mode::Normal, "an answer opens no editor");
+    }
+
+    #[test]
+    fn an_answer_flips_the_other_answer_on_the_same_span() {
+        let mut a = app();
+        a.move_block(1);
+        a.place("yes");
+        a.place("no");
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(a.annotations[0].text, "no");
+        assert_eq!(a.status, "a1: no (was yes)");
+
+        a.place("no");
+        assert_eq!(a.annotations.len(), 1, "a repeated answer stacked");
+        assert_eq!(a.status, "a1 already says no");
+    }
+
+    /// The flip is for answers only: a typed comment is something you said,
+    /// and `y` beside it is a second thing, not a correction.
+    #[test]
+    fn an_answer_joins_a_typed_comment_rather_than_replacing_it() {
+        let mut a = app();
+        a.move_block(1);
+        commit(&mut a, "needs a test");
+        a.place("yes");
+        let texts: Vec<_> = a.annotations.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, ["needs a test", "yes"]);
+    }
+
+    /// Exactly the span, not the line: `y` on the whole list must not overwrite
+    /// the `no` its first item already carries.
+    #[test]
+    fn an_answer_on_a_wider_span_leaves_a_narrower_one_alone() {
+        let mut a = app();
+        a.move_block(1);
+        a.place("no");
+        a.expand();
+        a.place("yes");
+        let texts: Vec<_> = a.annotations.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, ["no", "yes"]);
+    }
+
+    #[test]
+    fn an_answer_drains_its_question_from_the_ring() {
+        let mut a = qapp();
+        a.goto_mark(1);
+        a.place("yes");
+        assert!(!a.open_question_on(3));
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 7, "] did not move on to the next question");
+    }
+
+    #[test]
+    fn an_answer_is_offered_back_by_c_p() {
+        let mut a = app();
+        a.place("no");
+        a.begin_comment();
+        a.editor.history_prev();
+        assert_eq!(a.editor.text(), "no");
+    }
+
+    #[test]
+    fn an_answer_on_an_empty_file_is_refused() {
+        let mut a = App::open("e.md".into(), "", Format::Markdown);
+        a.place("yes");
+        assert!(a.annotations.is_empty());
+        assert_eq!(a.status, "empty file — nothing here");
     }
 
     // ---- questions in the ring ---------------------------------------------

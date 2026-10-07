@@ -989,12 +989,14 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Enter | KeyCode::Char('c') => app.begin_comment(),
             // Capital for the document-level variant of the same action.
             KeyCode::Char('C') => app.begin_general(),
+            KeyCode::Char('y') => app.place("yes"),
+            KeyCode::Char('n') => app.place("no"),
             KeyCode::Char('x') => app.remove_at_cursor(),
             // Edit in place: the line's annotation, or the newest general one.
             KeyCode::Char('e') => app.edit_at_cursor(),
             KeyCode::Char('E') => app.edit_general(),
-            // `]`/`[` rather than `n`/`N`: search will want those, and vim
-            // already spells "next/previous change hunk" with brackets.
+            // `]`/`[` rather than `n`/`N`: vim already spells "next/previous
+            // change hunk" with brackets, and `n` is the one-key `no`.
             KeyCode::Char(']') => app.goto_mark(1),
             KeyCode::Char('[') => app.goto_mark(-1),
             // The escape hatch for a document that is one long numbered list,
@@ -1452,6 +1454,22 @@ mod tests {
         assert!(app.annotations.is_empty(), "plain x stopped working");
         handle_key(&mut app, key('q', KeyModifiers::NONE));
         assert!(app.quit, "plain q stopped working");
+    }
+
+    /// `n` is the one-key `no`, `C-n` is a row motion and `M-n` binds
+    /// nothing. Only the first of the three may annotate.
+    #[test]
+    fn plain_y_and_n_answer_and_their_chords_do_not() {
+        let mut app = App::open("t.md".into(), DOC, Format::Markdown);
+        handle_key(&mut app, key('n', KeyModifiers::CONTROL));
+        handle_key(&mut app, key('n', KeyModifiers::ALT));
+        handle_key(&mut app, key('y', KeyModifiers::ALT));
+        assert!(app.annotations.is_empty(), "a chord answered");
+
+        handle_key(&mut app, key('y', KeyModifiers::NONE));
+        handle_key(&mut app, key('n', KeyModifiers::NONE));
+        let texts: Vec<_> = app.annotations.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, ["no"]);
     }
 
     fn annotated() -> App {

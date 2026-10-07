@@ -53,6 +53,10 @@ pub const KEYS: [(&str, &[(&str, &str)]); 5] = [
         &[
             ("Enter (also c)", "comment on the selection"),
             ("C", "general comment on the whole document"),
+            (
+                "y / n",
+                "annotate the selection yes / no; flips the other answer",
+            ),
             ("x", "remove the newest annotation on this line"),
             (
                 "e",

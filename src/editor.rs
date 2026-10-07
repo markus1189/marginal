@@ -75,11 +75,17 @@ impl Editor {
     /// Record a submitted comment for `C-p` recall and reset for the next one.
     pub fn submit(&mut self) -> String {
         let out = self.text.clone();
-        if !out.trim().is_empty() && self.history.last() != Some(&out) {
-            self.history.push(out.clone());
-        }
+        self.remember(&out);
         self.start_fresh();
         out
+    }
+
+    /// File `text` for `C-p` recall without it ever being in the buffer: the
+    /// one-key answers commit text nobody typed here.
+    pub fn remember(&mut self, text: &str) {
+        if !text.trim().is_empty() && self.history.last().map(String::as_str) != Some(text) {
+            self.history.push(text.to_string());
+        }
     }
 
     /// Abandon the comment without losing it: whatever the user composed goes

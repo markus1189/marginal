@@ -497,6 +497,7 @@ mode change is shown as `mode 100644 → 100755` under the file heading.
 | `z` | peek: the selection, wrapped, over the source view — `j`/`k` scroll, `z`/`Esc`/`q` close |
 | `Enter` (also `c`) | comment on the selection |
 | `C` | general comment — on the whole document, quoting nothing |
+| `y` / `n` | annotate the selection `yes` / `no` without opening the editor — on a span that already carries the other answer, **replaces** it |
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `e` | edit that same annotation: its text reopens in the comment editor; `Enter` keeps its id and span, `Esc` leaves it as it was, and saving it **empty removes it** |
 | `E` | edit the most recent **general** comment, by the same rules — emptying it is how a general comment is removed, since it sits on no line for `x` to find |
