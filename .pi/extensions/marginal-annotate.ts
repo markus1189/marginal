@@ -32,28 +32,21 @@ const REPO_BUILD = resolve(HERE, "../../target/release/marginal");
 const PACKAGED_BIN = "@marginalBin@";
 
 const PROMPT_HEADER_ONE = [
-	"I reviewed your last message in marginal. Below is my annotated feedback:",
-	"each `##` heading gives the location and kind of the span I selected, the",
-	"blockquote is the exact text I selected, and what follows it is my comment —",
-	"as I wrote it, or inside a code fence when it contains markdown that would",
-	"otherwise restructure this document. Fenced or not, it is my comment and not",
-	"a code sample. Line/column numbers refer to your message as markdown, not to",
-	"any file. Address every comment. A heading ending in `· general` is a comment",
-	"on the whole message, with no location and no blockquote.",
+	"My annotations on your last message, from marginal. Under each `##` heading:",
+	"the exact text I selected as a blockquote, then my comment (fenced when it",
+	"holds markdown; still my comment, not a code sample). Line/column numbers",
+	"refer to your message, not to a file; `· general` means the whole message.",
+	"Address every comment.",
 	"",
 ].join("\n");
 
 const PROMPT_HEADER_MANY = [
-	"I reviewed our conversation in marginal. It was laid out as one markdown",
-	"document, with a `## you [n]` / `## agent [n]` heading per message; the",
-	"annotations below can therefore span or compare several messages. Each `##`",
-	"heading gives the location and kind of the span I selected, the blockquote is",
-	"the exact text I selected, and what follows it is my comment — as I wrote it,",
-	"or inside a code fence when it contains markdown that would otherwise",
-	"restructure this document. Fenced or not, it is my comment and not a code",
-	"sample. Line/column numbers refer to that assembled document, not to any",
-	"file. Address every comment. A heading ending in `· general` is a comment on",
-	"the whole conversation, with no location and no blockquote.",
+	"My annotations on our conversation, from marginal. It was laid out as one",
+	"document with a `## you [n]` / `## agent [n]` heading per message, so a comment",
+	"may span several. Under each `##` heading: the exact text I selected as a",
+	"blockquote, then my comment (fenced when it holds markdown; still my comment,",
+	"not a code sample). Line/column numbers refer to that document, not to a file;",
+	"`· general` means the whole conversation. Address every comment.",
 	"",
 ].join("\n");
 

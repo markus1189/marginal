@@ -85,7 +85,7 @@ describe('/marginal', () => {
     expect(shown.text).toContain('last message')
     expect(fed).toBe('second answer\n')
     expect(sent.length).toBe(1)
-    expect(sent[0]).toContain('I reviewed your last message')
+    expect(sent[0]).toContain('My annotations on your last message')
     expect(sent[0]).toContain('wrong')
     expect(toasts).toEqual(['Sent 2 annotations.'])
   })
