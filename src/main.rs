@@ -991,6 +991,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('C') => app.begin_general(),
             KeyCode::Char('y') => app.place("yes"),
             KeyCode::Char('n') => app.place("no"),
+            KeyCode::Char('.') => app.repeat(),
             KeyCode::Char('x') => app.remove_at_cursor(),
             // Edit in place: the line's annotation, or the newest general one.
             KeyCode::Char('e') => app.edit_at_cursor(),
@@ -1470,6 +1471,17 @@ mod tests {
         handle_key(&mut app, key('n', KeyModifiers::NONE));
         let texts: Vec<_> = app.annotations.iter().map(|a| a.text.as_str()).collect();
         assert_eq!(texts, ["no"]);
+    }
+
+    #[test]
+    fn dot_repeats_and_its_alt_chord_does_not() {
+        let mut app = annotated();
+        handle_key(&mut app, key('J', KeyModifiers::SHIFT));
+        handle_key(&mut app, key('.', KeyModifiers::ALT));
+        assert_eq!(app.annotations.len(), 1, "M-. repeated");
+        handle_key(&mut app, key('.', KeyModifiers::NONE));
+        assert_eq!(app.annotations.len(), 2);
+        assert_eq!(app.annotations[1].text, "keep me");
     }
 
     fn annotated() -> App {

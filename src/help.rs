@@ -57,6 +57,7 @@ pub const KEYS: [(&str, &[(&str, &str)]); 5] = [
                 "y / n",
                 "annotate the selection yes / no; flips the other answer",
             ),
+            (".", "the last comment again, on the selection"),
             ("x", "remove the newest annotation on this line"),
             (
                 "e",

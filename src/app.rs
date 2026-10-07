@@ -181,6 +181,10 @@ pub struct App {
     /// What `commit_comment` files the editor's text as.
     pub target: Target,
     pub editor: Editor,
+    /// What `.` repeats: the last text committed by any route, typed, answered
+    /// or edited. Not the editor history's newest entry, which can be a
+    /// cancelled draft nobody meant to file.
+    last_comment: Option<String>,
     pub status: String,
     pub quit: bool,
     /// Source rows currently visible. Owned by the renderer, which is the only
@@ -591,6 +595,7 @@ impl App {
             mode: Mode::Normal,
             target: Target::Selection,
             editor: Editor::default(),
+            last_comment: None,
             status: String::new(),
             quit: false,
             viewport: 20,
@@ -1179,6 +1184,15 @@ impl App {
         self.editor.start_fresh();
     }
 
+    /// `.`: the last comment again, on the selection, by `place`'s rules, so
+    /// it never stacks a copy and a repeated answer still flips the other one.
+    pub fn repeat(&mut self) {
+        match self.last_comment.clone() {
+            Some(text) => self.place(&text),
+            None => self.status = "nothing to repeat yet".into(),
+        }
+    }
+
     /// Says why not on the status line when there is nothing to annotate.
     fn can_annotate(&mut self) -> bool {
         // An empty file has no line 1 to point at, but `V` still builds a
@@ -1211,6 +1225,7 @@ impl App {
         }
         let Some(span) = self.selection() else { return };
         self.editor.remember(text);
+        self.last_comment = Some(text.to_string());
         let here = |a: &Annotation, t: &str| a.is_on(span) && a.text == t;
         if let Some(a) = self.annotations.iter().rfind(|a| here(a, text)) {
             self.status = format!("{} already says {}", a.id, preview(text));
@@ -1321,6 +1336,7 @@ impl App {
             self.status = "empty comment discarded".into();
             return;
         }
+        self.last_comment = Some(text.clone());
         self.editor.submit();
         if target == Target::General {
             let id = format!("a{}", self.next_id);
@@ -1382,6 +1398,7 @@ impl App {
             return;
         }
         self.editor.submit();
+        self.last_comment = Some(text.clone());
         self.annotations[i].text = text;
         self.status = format!("{id} updated");
     }
@@ -3576,6 +3593,83 @@ https://example.dev/a/very/long/path in it as well.
         a.place("yes");
         assert!(a.annotations.is_empty());
         assert_eq!(a.status, "empty file — nothing here");
+    }
+
+    // ---- repeat -------------------------------------------------------------
+
+    #[test]
+    fn dot_with_nothing_committed_says_so() {
+        let mut a = app();
+        a.repeat();
+        assert!(a.annotations.is_empty());
+        assert_eq!(a.status, "nothing to repeat yet");
+    }
+
+    #[test]
+    fn dot_puts_the_last_comment_on_the_next_span_and_never_twice_on_one() {
+        let mut a = app();
+        a.move_block(1);
+        commit(&mut a, "needs a test\nand a doc");
+        a.move_block(1);
+        a.repeat();
+        assert_eq!(a.status, "a2: needs a test…");
+        a.repeat();
+        let spans: Vec<_> = a
+            .annotations
+            .iter()
+            .map(|x| (x.start_line, x.text.as_str()))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                (3, "needs a test\nand a doc"),
+                (4, "needs a test\nand a doc")
+            ]
+        );
+        assert_eq!(a.status, "a2 already says needs a test…");
+    }
+
+    /// The editor history files a cancelled draft as its newest entry, and `.`
+    /// handing that back would commit something you decided not to say.
+    #[test]
+    fn dot_repeats_what_was_committed_not_what_was_cancelled() {
+        let mut a = app();
+        a.move_block(1);
+        commit(&mut a, "kept");
+        a.begin_comment();
+        a.editor.set("thought better of it");
+        a.cancel_input();
+        a.move_block(1);
+        a.repeat();
+        assert_eq!(a.annotations[1].text, "kept");
+    }
+
+    #[test]
+    fn dot_after_an_edit_repeats_the_edited_text() {
+        let mut a = app();
+        a.move_block(1);
+        commit(&mut a, "draft");
+        a.edit_at_cursor();
+        a.editor.set("final");
+        a.commit_comment();
+        a.move_block(1);
+        a.repeat();
+        assert_eq!(a.annotations[1].text, "final");
+    }
+
+    /// `n` then `.` is "no" again — and on a span that says `yes`, the same
+    /// flip `n` itself would do, because `.` goes through `place`.
+    #[test]
+    fn dot_after_an_answer_repeats_it_and_flips_like_the_key_would() {
+        let mut a = app();
+        a.move_block(1);
+        a.place("yes");
+        a.move_block(1);
+        a.place("no");
+        a.move_block(-1);
+        a.repeat();
+        let texts: Vec<_> = a.annotations.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, ["no", "no"]);
     }
 
     // ---- questions in the ring ---------------------------------------------
