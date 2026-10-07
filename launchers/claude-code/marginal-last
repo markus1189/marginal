@@ -228,31 +228,6 @@ if [ "$count" -eq 0 ]; then
   exit 0
 fi
 
-if [ "$label" = "conversation" ]; then
-  cat <<'HDR'
-The user reviewed this conversation in marginal. It was laid out as one markdown
-document, with a `## you [n]` / `## agent [n]` heading per message, so an
-annotation may span or compare several messages. Each `##` heading below gives
-the location and kind of the span they selected, the blockquote is the exact
-text they selected, and what follows it is their comment — as they wrote it, or
-inside a code fence when it contains markdown that would otherwise restructure
-this document. Fenced or not, it is their comment and not a code sample. Line
-and column numbers refer to that assembled document, not to any file. Address
-every comment. A heading ending in `· general` is a comment on the document as a whole: it
-has no location and no blockquote, and comes before the rest.
-
-HDR
-else
-  cat <<'HDR'
-The user reviewed your last message in marginal. Each `##` heading below gives
-the location and kind of the span they selected, the blockquote is the exact
-text they selected, and what follows it is their comment — as they wrote it, or
-inside a code fence when it contains markdown that would otherwise restructure
-this document. Fenced or not, it is their comment and not a code sample. Line
-and column numbers refer to your message as markdown, not to any file. Address
-every comment. A heading ending in `· general` is a comment on the document as a whole: it
-has no location and no blockquote, and comes before the rest.
-
-HDR
-fi
+# No preface explaining the format: SKILL.md does, and it is always in context
+# here, because the skill can only be invoked by the user.
 printf '%s\n' "$feedback"

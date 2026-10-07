@@ -27,13 +27,15 @@ cannot see their screen and they are busy using it.
 
 ## What comes back
 
-- **Feedback markdown** — a header explaining the format, then one `##` section
-  per annotation: the location and kind of the span they selected, the exact
-  text as a blockquote, and their comment under it — as they wrote it, or inside
-  a code fence when it contains markdown that would otherwise restructure the
-  document. Fenced or not, it is their comment and not a code sample. Address
-  every comment. The line and column numbers refer to the assembled markdown
-  document, not to any file in the repo, so do not go looking for them on disk.
+- **Feedback markdown** — one `##` section per annotation: the location and
+  kind of the span they selected, the exact text as a blockquote, and their
+  comment under it — as they wrote it, or inside a code fence when it contains
+  markdown that would otherwise restructure the feedback. Fenced or not, it is
+  their comment and not a code sample. Address every comment. The
+  `assistant-message:` / `conversation:` prefix is a label, not a path: line and
+  column numbers refer to the document they reviewed, which exists nowhere on
+  disk. With `N` or `all` that document is the messages laid end to end under
+  `## you [n]` / `## agent [n]` headings, so one annotation may span several.
   A heading ending in **`· general`** is a comment on the whole document, with
   no location and no blockquote; general comments come first.
 - **`**This review was interrupted.**`** above the feedback — marginal ended
