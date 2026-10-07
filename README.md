@@ -210,17 +210,18 @@ tty anywhere in reach, so one has to be borrowed from tmux. The document model �
 which messages go in, how they are headed, what `--label` they carry — is the
 same in both, deliberately.
 
-All three ride the package, so `nix profile install github:markus1189/marginal`
+All four ride the package, so `nix profile install github:markus1189/marginal`
 is the whole install and there is no separate version to keep in step:
 
 ```
 $out/bin/marginal
 $out/share/pi/extensions/marginal-annotate.ts
 $out/share/claude-code/skills/marginal-{last,diff}/{SKILL.md,marginal-*}
+$out/share/claude-code/mods/marginal/
 $out/share/claude-code/lib/marginal-launch.bash
 ```
 
-The two bash launchers share one file, `launchers/lib/marginal-launch.bash`:
+The two bash launchers and the mod share one file, `launchers/lib/marginal-launch.bash`:
 the binary lookup and the tty borrowing below. They source it, from
 `../lib/` in a checkout and from its store path once packaged.
 
@@ -232,7 +233,7 @@ different version than the running server fails with a protocol mismatch. In
 a checkout, a missing tool is named on stderr instead of surfacing as a
 misleading error. A missing `iconv` used to report "not valid UTF-8".
 
-Each of the three looks its binary up as `$MARGINAL_BIN`, then
+Each of them looks its binary up as `$MARGINAL_BIN`, then
 `<repo>/target/release/marginal`, then the absolute path baked in at install
 time, then `marginal` on `PATH`. The repo build wins in a checkout, so you
 review with what you just compiled; a packaged copy finds the binary it was
@@ -405,6 +406,35 @@ marginal's `0`/`1` split is deliberately not propagated to the agent: a tool cal
 that exits non-zero reads as a broken command, and "the human commented" is not a
 failure. The launcher exits `0` for both and puts the distinction in stdout,
 which is what the agent actually reads; `2` is every failure, jq's included.
+
+### Claude Code — `/marginal` (mod)
+
+`launchers/claude-code-mod` is the same command as a Claude Code mod, a plugin
+of function hooks, and it closes the gaps that make `/marginal-last` a
+workaround. It reads `$.session.messages()` instead of guessing a transcript
+path, and it runs as a command outside the agent loop, so there is no
+in-flight turn to cut away. The feedback is submitted as your own next prompt,
+as in pi, rather than handed to the model in a tool result for it to relay.
+The plumbing filter is `/marginal-last`'s, by the same tag names.
+
+The tty is still borrowed from tmux: the command spawns an inline bash helper
+that sources `marginal-launch.bash` (sentinel `@marginalLaunchLib@`, or the
+library beside the `marginal` on `PATH` in an unpackaged copy). The document
+goes in on its stdin and the result file comes back on its stdout. The review
+runs detached from the command hook, whose time budget it would outlast. A
+second `/marginal` while one is open is refused.
+
+Install by putting `$out/share/claude-code/mods/marginal` on
+`CLAUDE_CODE_PLUGIN_DIRS`. Unverified so far: `/marginal` while a turn is
+running (pi refuses then; this reviews whatever is there), and a reload of the
+mod mid-review. A reload ends the helper, its trap closes the popup, and any
+comment not yet committed is lost.
+
+The `claude-mod` check runs `claude plugin validate --strict` and
+`claude plugin test` against the `claude-code` of this flake's nixpkgs. Strict
+`tsc` is out of the sandbox, because the engine writes the declarations it needs
+(`.claude-plugin/types/`, gitignored by the engine itself) only when a session
+loads the mod. After that, `tsc -p launchers/claude-code-mod` checks it by hand.
 
 ## Reviewing a git diff — `/marginal-diff`
 
@@ -789,8 +819,9 @@ a docs-only edit re-runs `typos` and nothing else.
 It covers: `cargo fmt --check`, `taplo` on the TOML, `cargo clippy -D
 warnings`, the test suite (via the package's check phase), `typos`, `cargo
 machete` (unused deps), `cargo deny check` for licenses/bans/provenance, the
-`.pi` extension's node tests, `shellcheck` over `./check` and the launchers,
-and a `marginal-diff` regression check. That last one builds a fixture git
+`.pi` extension's node tests, the Claude Code mod's own tests,
+`shellcheck` over `./check` and the launchers, and a `marginal-diff` regression
+check. That last one builds a fixture git
 repository in the sandbox (spaced, quoted and tabbed paths, binary, mode-only,
 empty, deleted, renamed, a submodule, a markdown fence, no newline at EOF) and
 compares `--dump`, `--dump-map` and a full review round trip with golden files

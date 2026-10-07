@@ -22,13 +22,15 @@
       graph = fs.unions [ ./Cargo.toml ./Cargo.lock ./deny.toml ./src/main.rs ];
       manifest = ./Cargo.toml;
       extension = ./.pi/extensions;
-      # Shipped alongside the binary: the pi extension and the two Claude Code
-      # skills. They ride the package rather than a separate output so the
-      # launcher and the binary it spawns can never be different versions —
-      # `nix profile install` is then the whole install, on either host. The
-      # price is that editing one of them rebuilds the crate. The extension's
-      # node test is deliberately left out: it is checked on its own and would
-      # buy a full rebuild for a file nothing at runtime reads.
+      mod = ./launchers/claude-code-mod;
+      # Shipped alongside the binary: the pi extension, the two Claude Code
+      # skills and the Claude Code mod. They ride the package rather than a
+      # separate output so the launcher and the binary it spawns can never be
+      # different versions — `nix profile install` is then the whole install,
+      # on either host. The price is that editing one of them rebuilds the
+      # crate. The extension's node test is deliberately left out: it is
+      # checked on its own and would buy a full rebuild for a file nothing at
+      # runtime reads.
       # launchers/test is left out for the same reason as the node test.
       hosts = fs.unions [
         (fs.difference ./launchers ./launchers/test)
@@ -99,6 +101,12 @@
               $out/share/claude-code/skills/marginal-diff/marginal-diff
             install -Dm644 launchers/claude-code-diff/SKILL.md \
               $out/share/claude-code/skills/marginal-diff/SKILL.md
+            # Tests included: `claude plugin test` on the store path is how a
+            # consumer gates the mod against the engine it will run under.
+            # tsconfig.json not: it extends declarations a store path never gets.
+            mkdir -p $out/share/claude-code/mods
+            cp -r launchers/claude-code-mod $out/share/claude-code/mods/marginal
+            rm $out/share/claude-code/mods/marginal/tsconfig.json
             # Outside skills/, so symlinking that whole directory into
             # ~/.claude/skills does not offer it as a skill.
             install -Dm644 launchers/lib/marginal-launch.bash \
@@ -117,6 +125,7 @@
             substituteInPlace \
               $out/share/claude-code/skills/marginal-last/marginal-last \
               $out/share/claude-code/skills/marginal-diff/marginal-diff \
+              $out/share/claude-code/mods/marginal/hooks/register.ts \
               --replace-fail '@marginalLaunchLib@' \
                 "$out/share/claude-code/lib/marginal-launch.bash"
 
@@ -228,6 +237,28 @@
           fileset = extension;
           tools = [ pkgs.nodejs ];
           script = "node --test .pi/extensions/marginal-annotate.test.mjs";
+        };
+
+        # The mod against the engine of this flake's nixpkgs, which may trail
+        # the one a host runs. Its tests stand in for the engine's hooks, so
+        # no session, network or tty is involved. tsc is not here: the
+        # declarations it needs are written by a live session loading the mod.
+        claude-mod = toolCheck pkgs {
+          name = "claude-mod";
+          fileset = mod;
+          tools = [
+            (import nixpkgs {
+              inherit (pkgs) system;
+              config.allowUnfreePredicate = p: nixpkgs.lib.getName p == "claude-code";
+            }).claude-code
+          ];
+          script = ''
+            export HOME=$TMPDIR
+            # Mods are early access, and off unless asked for in 2.1.285.
+            export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
+            claude plugin validate --strict launchers/claude-code-mod
+            claude plugin test launchers/claude-code-mod
+          '';
         };
       });
 

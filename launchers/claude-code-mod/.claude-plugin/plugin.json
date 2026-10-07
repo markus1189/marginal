@@ -1,0 +1,6 @@
+{
+  "name": "marginal",
+  "version": "0.1.0",
+  "description": "/marginal [N|all]: annotate the agent's last message(s) in marginal and send the feedback back as your prompt",
+  "author": { "name": "Markus Hauck" }
+}
