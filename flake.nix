@@ -23,6 +23,8 @@
       manifest = ./Cargo.toml;
       extension = ./.pi/extensions;
       mod = ./launchers/claude-code-mod;
+      # document.ts there is a symlink into the mod, so the mod's copy rides along.
+      opencode = fs.unions [ ./launchers/opencode ./launchers/claude-code-mod/hooks/document.ts ];
       # Shipped alongside the binary: the pi extension, the two Claude Code
       # skills and the Claude Code mod. They ride the package rather than a
       # separate output so the launcher and the binary it spawns can never be
@@ -33,7 +35,7 @@
       # runtime reads.
       # launchers/test is left out for the same reason as the node test.
       hosts = fs.unions [
-        (fs.difference ./launchers ./launchers/test)
+        (fs.difference ./launchers (fs.unions [ ./launchers/test ./launchers/opencode/review.test.ts ]))
         ./.pi/extensions/marginal-annotate.ts
       ];
       # typos reads prose too. Subtracting the lock files rather than listing
@@ -107,6 +109,11 @@
             mkdir -p $out/share/claude-code/mods
             cp -r launchers/claude-code-mod $out/share/claude-code/mods/marginal
             rm $out/share/claude-code/mods/marginal/tsconfig.json
+            # A directory, not a file: tui.ts imports its siblings, and
+            # -L turns document.ts from a link into the mod into a copy.
+            mkdir -p $out/share/opencode/plugins/marginal
+            cp -L launchers/opencode/{tui,review,document}.ts \
+              $out/share/opencode/plugins/marginal/
             # Outside skills/, so symlinking that whole directory into
             # ~/.claude/skills does not offer it as a skill.
             install -Dm644 launchers/lib/marginal-launch.bash \
@@ -120,6 +127,7 @@
             # shipping a launcher that quietly cannot find marginal.
             substituteInPlace \
               $out/share/pi/extensions/marginal-annotate.ts \
+              $out/share/opencode/plugins/marginal/tui.ts \
               $out/share/claude-code/lib/marginal-launch.bash \
               --replace-fail '@marginalBin@' "$out/bin/marginal"
             substituteInPlace \
@@ -237,6 +245,14 @@
           fileset = extension;
           tools = [ pkgs.nodejs ];
           script = "node --test .pi/extensions/marginal-annotate.test.mjs";
+        };
+
+        # Under bun, the runtime opencode is compiled with.
+        opencode = toolCheck pkgs {
+          name = "opencode";
+          fileset = opencode;
+          tools = [ pkgs.bun ];
+          script = "bun test launchers/opencode";
         };
 
         # The mod against the engine of this flake's nixpkgs, which may trail

@@ -210,7 +210,7 @@ tty anywhere in reach, so one has to be borrowed from tmux. The document model �
 which messages go in, how they are headed, what `--label` they carry — is the
 same in both, deliberately.
 
-All four ride the package, so `nix profile install github:markus1189/marginal`
+All five ride the package, so `nix profile install github:markus1189/marginal`
 is the whole install and there is no separate version to keep in step:
 
 ```
@@ -218,6 +218,7 @@ $out/bin/marginal
 $out/share/pi/extensions/marginal-annotate.ts
 $out/share/claude-code/skills/marginal-{last,diff}/{SKILL.md,marginal-*}
 $out/share/claude-code/mods/marginal/
+$out/share/opencode/plugins/marginal/
 $out/share/claude-code/lib/marginal-launch.bash
 ```
 
@@ -435,6 +436,28 @@ The `claude-mod` check runs `claude plugin validate --strict` and
 `tsc` is out of the sandbox, because the engine writes the declarations it needs
 (`.claude-plugin/types/`, gitignored by the engine itself) only when a session
 loads the mod. After that, `tsc -p launchers/claude-code-mod` checks it by hand.
+
+### opencode 2 — `/marginal` (TUI plugin)
+
+`launchers/opencode/tui.ts` is the pi extension's command for opencode 2: same
+arguments, same document, same prompts, and the same suspend-and-resume of a
+host that already owns the terminal. It is also on the palette and on
+`<leader>m`, as the command `marginal.annotate`. A second review while one is
+open, and a review while the agent is running, are refused.
+
+Install by linking the directory, not `tui.ts` alone, since it imports its two
+siblings:
+
+```sh
+ln -s "$(nix build --print-out-paths .#marginal)/share/opencode/plugins/marginal" \
+  ~/.config/opencode/plugins/marginal
+```
+
+`document.ts` there is a copy of the mod's (a symlink in the checkout), so the
+document model and the prompt prefaces have one source. The `opencode` check
+runs `bun test launchers/opencode`. Unverified: rebinding the key through
+`cli.json`'s `keybinds."marginal.annotate"`, which did not take in the one run
+that tried it with 2.0.26.
 
 ## Reviewing a git diff — `/marginal-diff`
 

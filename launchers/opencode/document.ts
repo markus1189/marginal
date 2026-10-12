@@ -1,0 +1,1 @@
+../claude-code-mod/hooks/document.ts
