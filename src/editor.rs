@@ -950,7 +950,7 @@ mod tests {
         let mut e = Editor::default();
         e.set("something");
         assert_eq!(e.submit(), "something");
-        assert!(e.text().is_empty());
+        assert_eq!(e.text(), "");
         assert_eq!(e.cursor, 0);
     }
 
@@ -972,7 +972,7 @@ mod tests {
         e.word_right();
         e.history_prev();
         e.history_next();
-        assert!(e.text().is_empty());
-        assert!(e.text().trim().is_empty());
+        assert_eq!(e.text(), "");
+        assert_eq!(e.text().trim(), "");
     }
 }

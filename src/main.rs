@@ -2193,7 +2193,7 @@ mod tests {
             &End::Quit,
         );
         assert_eq!(code, 0);
-        assert!(feedback.is_empty());
+        assert_eq!(feedback, "");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

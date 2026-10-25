@@ -821,6 +821,9 @@ mod tests {
 
     #[test]
     fn empty_input_yields_no_marks() {
-        assert!(marks(&parse_tree(""), "").is_empty());
+        assert_eq!(
+            marks(&parse_tree(""), ""),
+            [] as [Vec<(usize, usize, &str)>; 0]
+        );
     }
 }

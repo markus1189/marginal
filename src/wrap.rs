@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn wrap_survives_multibyte_and_a_zero_width_pane() {
-        assert!(wrap("Prüfen köde — ✓ fertig", 0).is_empty());
+        assert_eq!(wrap("Prüfen köde — ✓ fertig", 0), [] as [String; 0]);
         let rows = wrap("Prüfen köde — ✓ fertig", 7);
         for r in &rows {
             assert!(cells_drawn(r) <= 7, "{r:?}");

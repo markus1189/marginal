@@ -3827,7 +3827,7 @@ Say the word and I will implement any tier.
         assert_eq!(a.mark_positions().len(), 4);
 
         a.toggle_steps();
-        assert!(a.mark_positions().is_empty());
+        assert_eq!(a.mark_positions(), [] as [(blocks::Pos, &str); 0]);
         assert_eq!(a.status, "ring: marks only (0)");
         assert!(!a.open_step_on(3), "and the gutter goes quiet with it");
         a.cursor = Pos::new(1, 1);

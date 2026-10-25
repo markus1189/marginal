@@ -1122,16 +1122,16 @@ mod tests {
 
     #[test]
     fn bullets_are_not_steps() {
-        assert!(step_lines("- one\n- two\n").is_empty());
-        assert!(step_lines("* one\n* two\n").is_empty());
-        assert!(step_lines("- [ ] 1. one\n- [ ] 2. two\n").is_empty());
+        assert_eq!(step_lines("- one\n- two\n"), [] as [usize; 0]);
+        assert_eq!(step_lines("* one\n* two\n"), [] as [usize; 0]);
+        assert_eq!(step_lines("- [ ] 1. one\n- [ ] 2. two\n"), [] as [usize; 0]);
     }
 
     /// A sentence that happens to start with a digit is one item long far more
     /// often than it is an enumeration.
     #[test]
     fn a_lone_ordinal_item_is_not_an_enumeration() {
-        assert!(step_lines("1. the only one\n").is_empty());
+        assert_eq!(step_lines("1. the only one\n"), [] as [usize; 0]);
     }
 
     /// The sub-steps of step 2 are reachable by `J`; they are not the decisions
@@ -1156,7 +1156,7 @@ mod tests {
     fn ordinals_that_do_not_open_a_list_item_are_not_steps() {
         let src = "Released in\n2019. It was a year.\n3. Then this.\n";
         assert_eq!(parse(src).len(), 1, "one paragraph, not three items");
-        assert!(step_lines(src).is_empty());
+        assert_eq!(step_lines(src), [] as [usize; 0]);
     }
 
     /// The second: a fenced block full of ordinals. No verbatim-span pass here,
@@ -1164,7 +1164,7 @@ mod tests {
     #[test]
     fn a_fenced_block_full_of_ordinals_holds_no_steps() {
         let src = "Steps:\n\n```sh\n1. not a step\n2. also not\n```\n";
-        assert!(step_lines(src).is_empty());
+        assert_eq!(step_lines(src), [] as [usize; 0]);
     }
 
     /// Two enumerations in one document are two lists, and every item of both is
@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn the_plain_backend_yields_no_steps() {
         let src = "1. first\n2. second\n";
-        assert!(steps(&crate::plain::parse_tree(src), src).is_empty());
+        assert_eq!(steps(&crate::plain::parse_tree(src), src), [] as [Pos; 0]);
     }
 
     const DOC: &str = "\
@@ -1471,7 +1471,7 @@ still para.
 
     #[test]
     fn empty_document_has_no_blocks() {
-        assert!(parse("").is_empty());
+        assert_eq!(parse(""), [] as [Block; 0]);
         assert_eq!(block_at(&[], 1), None);
     }
 
@@ -2154,7 +2154,10 @@ Really??
     /// belongs, which is why the rule is the inverse.
     #[test]
     fn a_query_string_is_not_a_question() {
-        assert!(qlines("See https://docs.rs/?q=1 for more.\n").is_empty());
+        assert_eq!(
+            qlines("See https://docs.rs/?q=1 for more.\n"),
+            [] as [usize; 0]
+        );
     }
 
     #[test]

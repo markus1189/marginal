@@ -157,7 +157,13 @@ mod tests {
             plain.iter().map(|b| b.kind).collect::<Vec<_>>(),
             ["paragraph"]
         );
-        assert!(!Format::Markdown.marks(&Format::Markdown.parse_tree(src), src)[0].is_empty());
-        assert!(Format::Plain.marks(&Format::Plain.parse_tree(src), src)[0].is_empty());
+        assert_ne!(
+            Format::Markdown.marks(&Format::Markdown.parse_tree(src), src)[0],
+            [] as [(usize, usize, &str); 0]
+        );
+        assert_eq!(
+            Format::Plain.marks(&Format::Plain.parse_tree(src), src)[0],
+            [] as [(usize, usize, &str); 0]
+        );
     }
 }
