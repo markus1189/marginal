@@ -96,7 +96,7 @@ export default {
 				// does for itself and marginal does not: without it opencode's last
 				// frame shows through every cell marginal leaves blank.
 				const renderer = context.renderer;
-				renderer.suspend();
+				await renderer.suspend();
 				renderer.currentRenderBuffer.clear();
 				process.stdout.write("\x1b[2J\x1b[H");
 				let status: number | null = null;
@@ -105,7 +105,7 @@ export default {
 					if (status === 2 && process.stdin.isTTY && !existsSync(resultPath)) await run("sh", ["-c", HOLD]);
 				} finally {
 					renderer.currentRenderBuffer.clear();
-					renderer.resume();
+					await renderer.resume();
 					renderer.requestRender();
 				}
 
