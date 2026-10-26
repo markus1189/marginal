@@ -97,14 +97,12 @@ export default {
 				// frame shows through every cell marginal leaves blank.
 				const renderer = context.renderer;
 				await renderer.suspend();
-				renderer.currentRenderBuffer.clear();
 				process.stdout.write("\x1b[2J\x1b[H");
 				let status: number | null = null;
 				try {
 					status = await run(binary, ["--result", resultPath, "--label", document.label, source]);
 					if (status === 2 && process.stdin.isTTY && !existsSync(resultPath)) await run("sh", ["-c", HOLD]);
 				} finally {
-					renderer.currentRenderBuffer.clear();
 					await renderer.resume();
 					renderer.requestRender();
 				}
