@@ -130,9 +130,7 @@ EOF
 chmod +x "$work/bin/tmux" "$work/bin/marginal"
 
 TMUX=stand-in TMUX_PANE=%0 PATH="$work/bin:$PATH" MARGINAL_BIN="$work/bin/marginal" \
-  bash "$launcher" > "$work/feedback.raw"
-# The repository root is a temp path; the golden file names it <root>.
-sed "s|$work/repo|<root>|g" "$work/feedback.raw" > "$work/feedback.md"
+  bash "$launcher" > "$work/feedback.md"
 
 # ---- goldens --------------------------------------------------------------
 
