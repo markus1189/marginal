@@ -998,8 +998,8 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('E') => app.edit_general(),
             // `]`/`[` rather than `n`/`N`: vim already spells "next/previous
             // change hunk" with brackets, and `n` is the one-key `no`.
-            KeyCode::Char(']') => app.goto_question(1),
-            KeyCode::Char('[') => app.goto_question(-1),
+            KeyCode::Char(']') => app.goto_mark(1),
+            KeyCode::Char('[') => app.goto_mark(-1),
             // Steps get their own pair so a long numbered plan cannot bury the
             // questions. `#` because it is what a numbered item is made of; `$`
             // is its neighbour, which costs `$` as end-of-line (`End` remains).

@@ -555,7 +555,7 @@ mode change is shown as `mode 100644 → 100755` under the file heading.
 | `x` | remove an annotation on the cursor's **line** — the most recent one, if several overlap |
 | `e` | edit that same annotation: its text reopens in the comment editor; `Enter` keeps its id and span, `Esc` leaves it as it was, and saving it **empty removes it** |
 | `E` | edit the most recent **general** comment, by the same rules — emptying it is how a general comment is removed, since it sits on no line for `x` to find |
-| `]` / `[` | next / previous open **question**, in document order, wrapping at both ends |
+| `]` / `[` | next / previous **annotation** or open **question**, in document order, wrapping at both ends |
 | `$` / `#` | next / previous uncommented **step** of a numbered list, by the same rules |
 | `Esc` | drop the selection |
 | `?` | every key on this list, grouped, over the source view — `j`/`k` scroll, `?`/`Esc`/`q` close |
@@ -575,9 +575,9 @@ on. The gutter cell between the line number and the selection bar shows which:
 | `▸` green | a step of a numbered list, not yet commented on |
 | `●` magenta | an annotation — including one you just wrote on a question or a step |
 
-Commenting turns a `?` or a `▸` into `●` and drops it from its ring, so the
+Commenting turns a `?` or a `▸` into `●`, so the
 fringe is a worklist that drains as you work down the message. The status field
-reports where you are in that ring — `question 2/5`, `step 4/7` — which is also
+reports where you are in the ring — `question 2/5`, `step 4/7` — which is also
 how you notice a detector has found more than you expected. The three states are
 exclusive, so one cell is enough: a line that carries an annotation has no open
 question and no open step left on it, and a step that asks something shows as
@@ -610,7 +610,7 @@ mid-line is never a step either.
 Steps have their own keys, `$` and `#`, so a document that *is* one long
 numbered list cannot bury its questions: of the 3,501 markdown files this was
 measured against, 675 hold an ordinal-marker line, median 5 and p90 15 — but the
-worst holds 210. Annotations are in neither ring; the track below shows them.
+worst holds 210.
 
 Questions and steps are derived from the source, not authored by you: they never
 appear in `--result` JSON, and a document full of them with no comments is still
@@ -630,7 +630,7 @@ only when there is something to scroll.
 The track is also a **map of the fringe**: a magenta `●` where you have
 annotated, a cyan `?` where the document asks something you have not, a green `▸`
 at a step you have not commented on, at the cell that part of the file falls in —
-the same glyphs as the gutter; `]`/`[` walk its `?`s and `$`/`#` its `▸`s. A cell is
+the same glyphs as the gutter; `]`/`[` walk its `●`s and `?`s, `$`/`#` its `▸`s. A cell is
 many rows on a large file, so marks collide, and outstanding work wins: question
 over step over dot, because the dot is work finished. Note that this ranking is
 the reverse of the gutter's, which is not a disagreement — the gutter decodes one

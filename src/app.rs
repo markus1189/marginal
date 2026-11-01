@@ -1460,8 +1460,8 @@ impl App {
     /// collapse to one stop; a ring that visits the same cell twice reads as a
     /// stuck key.
     ///
-    /// What the scrollbar paints on its track. `[`/`]` and `#`/`$` each walk
-    /// one kind of these; annotations are on the track but in neither ring.
+    /// What the scrollbar paints on its track. `]`/`[` walk the
+    /// annotations and questions, `$`/`#` the steps.
     pub fn mark_positions(&self) -> Vec<(Pos, &'static str)> {
         let mut out: Vec<(Pos, &'static str)> = self
             .annotations
@@ -1486,50 +1486,61 @@ impl App {
         out
     }
 
-    /// Next (`delta > 0`) or previous open question, wrapping at both ends.
-    /// Wrapping is the point: three questions should be three presses and back
-    /// to the first, not a ring with a dead end at each edge.
+    /// Next (`delta > 0`) or previous annotation or open question, wrapping at
+    /// both ends. Wrapping is the point: three stops should be three presses
+    /// and back to the first, not a ring with a dead end at each edge.
     ///
-    /// The ring shrinks as you work — answering a question drops it.
-    pub fn goto_question(&mut self, delta: isize) {
-        let stops: Vec<Pos> = self
-            .questions
+    /// Answering a question converts its stop into the annotation you wrote,
+    /// in the same place, rather than adding a second one.
+    pub fn goto_mark(&mut self, delta: isize) {
+        let stops = self
+            .annotations
             .iter()
-            .copied()
-            .filter(|q| self.open_question_on(q.line))
+            .filter(|a| !a.is_general())
+            .map(|a| (Pos::new(a.start_line, a.start_col), "annotation"))
+            .chain(
+                self.questions
+                    .iter()
+                    .filter(|q| self.open_question_on(q.line))
+                    .map(|&q| (q, "question")),
+            )
             .collect();
-        self.goto_stop(stops, delta, "question");
+        self.goto_stop(stops, delta, "no comments or open questions");
     }
 
-    /// Next or previous uncommented step, by the same rules as `goto_question`.
+    /// Next or previous uncommented step, by the same rules as `goto_mark`.
     pub fn goto_step(&mut self, delta: isize) {
-        let stops: Vec<Pos> = self
+        let stops = self
             .steps
             .iter()
-            .copied()
             .filter(|s| self.unanswered_step_on(s.line))
+            .map(|&s| (s, "step"))
             .collect();
-        self.goto_stop(stops, delta, "step");
+        self.goto_stop(stops, delta, "no open steps");
     }
 
-    fn goto_stop(&mut self, mut stops: Vec<Pos>, delta: isize, kind: &str) {
-        // Positions collapse to one stop; a ring that visits the same cell
-        // twice reads as a stuck key.
-        stops.sort_unstable();
-        stops.dedup();
+    fn goto_stop(&mut self, mut stops: Vec<(Pos, &'static str)>, delta: isize, empty: &str) {
+        // Annotations are stored in the order they were written, not the order
+        // they appear in. Positions collapse to one stop; a ring that visits
+        // the same cell twice reads as a stuck key.
+        stops.sort_unstable_by_key(|&(p, _)| p);
+        stops.dedup_by_key(|&mut (p, _)| p);
         let here = self.cursor;
         let found = if delta > 0 {
-            stops.iter().find(|&&p| p > here).or_else(|| stops.first())
+            stops
+                .iter()
+                .find(|&&(p, _)| p > here)
+                .or_else(|| stops.first())
         } else {
             stops
                 .iter()
                 .rev()
-                .find(|&&p| p < here)
+                .find(|&&(p, _)| p < here)
                 .or_else(|| stops.last())
         }
         .copied();
-        let Some(target) = found else {
-            self.status = format!("no open {kind}s");
+        let Some((target, kind)) = found else {
+            self.status = empty.into();
             return;
         };
         self.drop_region();
@@ -1537,7 +1548,7 @@ impl App {
         self.snap();
         // The count is not decoration: it is how you notice the set is not what
         // you expected before you have pressed the key twenty times.
-        let idx = stops.iter().position(|&p| p == target).unwrap_or(0) + 1;
+        let idx = stops.iter().position(|&(p, _)| p == target).unwrap_or(0) + 1;
         self.status = format!("{kind} {idx}/{}", stops.len());
     }
 
@@ -3434,19 +3445,37 @@ https://example.dev/a/very/long/path in it as well.
     fn question_navigation_wraps_at_both_ends() {
         let mut a = qapp();
         a.cursor = a.questions[1];
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!(a.cursor.line, 3, "forward off the end wraps to the first");
-        a.goto_question(-1);
+        a.goto_mark(-1);
         assert_eq!(a.cursor.line, 7, "back off the start wraps to the last");
+    }
+
+    /// Annotations are pushed in the order they were written; DOC line 6 is
+    /// annotated first here, line 3 second, so a ring walking
+    /// `self.annotations` directly would jump backwards.
+    #[test]
+    fn mark_navigation_runs_in_document_order_not_creation_order() {
+        let mut a = app();
+        a.cursor = Pos::new(6, 1);
+        commit(&mut a, "later line, written first");
+        a.cursor = Pos::new(3, 1);
+        commit(&mut a, "earlier line, written second");
+
+        a.cursor = Pos::new(1, 1);
+        a.goto_mark(1);
+        assert_eq!((a.cursor.line, a.status.as_str()), (3, "annotation 1/2"));
+        a.goto_mark(1);
+        assert_eq!((a.cursor.line, a.status.as_str()), (6, "annotation 2/2"));
     }
 
     #[test]
     fn navigation_with_nothing_open_says_so_and_stays_put() {
         let mut a = app();
         a.cursor = Pos::new(3, 1);
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!(a.cursor, Pos::new(3, 1));
-        assert_eq!(a.status, "no open questions");
+        assert_eq!(a.status, "no comments or open questions");
         a.goto_step(1);
         assert_eq!(a.status, "no open steps");
     }
@@ -3525,10 +3554,10 @@ https://example.dev/a/very/long/path in it as well.
     #[test]
     fn an_answer_drains_its_question_from_the_ring() {
         let mut a = qapp();
-        a.goto_question(1);
+        a.goto_mark(1);
         a.place("yes");
         assert!(!a.open_question_on(3));
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!(a.cursor.line, 7, "] did not move on to the next question");
     }
 
@@ -3658,27 +3687,30 @@ Is `?` in a code span quiet?
     fn the_ring_walks_questions_before_anything_is_annotated() {
         let mut a = qapp();
         a.cursor = Pos::new(1, 1);
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!(a.cursor.line, 3);
         assert_eq!(a.status, "question 1/2");
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!(a.cursor.line, 7);
         assert_eq!(a.status, "question 2/2");
     }
 
-    /// Annotations sit on the track but in neither ring: an answered question
-    /// leaves `]` with one stop fewer, not with an annotation in its place.
+    /// Answering a question does not add a second stop on the same line, it
+    /// converts the one that was there.
     #[test]
-    fn answering_a_question_drops_it_from_the_ring() {
+    fn answering_a_question_replaces_it_in_the_ring_rather_than_adding_to_it() {
         let mut a = qapp();
         a.cursor = Pos::new(3, 1);
         commit(&mut a, "yes — see the ticket");
         assert!(!a.open_question_on(3), "answered, so no longer open");
 
         a.cursor = Pos::new(1, 1);
-        a.goto_question(1);
+        a.goto_mark(1);
+        assert_eq!(a.cursor.line, 3);
+        assert_eq!(a.status, "annotation 1/2", "still two stops, not three");
+        a.goto_mark(1);
         assert_eq!(a.cursor.line, 7);
-        assert_eq!(a.status, "question 1/1");
+        assert_eq!(a.status, "question 2/2");
     }
 
     /// Derived from the source, not authored by the reader — so a document full
@@ -3767,7 +3799,7 @@ Say the word and I will implement any tier.
         assert_eq!(a.cursor.line, 2);
         a.goto_step(1);
         assert_eq!((a.cursor.line, a.status.as_str()), (1, "step 1/2"));
-        a.goto_question(1);
+        a.goto_mark(1);
         assert_eq!((a.cursor.line, a.status.as_str()), (1, "question 1/1"));
     }
 
@@ -3785,7 +3817,7 @@ Say the word and I will implement any tier.
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(walk(&mut a, App::goto_question), [1, 6, 1]);
+        assert_eq!(walk(&mut a, App::goto_mark), [1, 6, 1]);
         a.cursor = Pos::new(1, 1);
         assert_eq!(walk(&mut a, App::goto_step), [3, 4, 3]);
     }

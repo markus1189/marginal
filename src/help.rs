@@ -33,7 +33,7 @@ pub const KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("w / b", "move by inline node: code span, link, emphasis"),
             ("g / G", "first / last line"),
             ("C-n / C-p", "move by screen row inside a wrapped line"),
-            ("] / [", "next / previous open question"),
+            ("] / [", "next / previous annotation or open question"),
             ("$ / #", "next / previous uncommented numbered-list step"),
         ],
     ),
