@@ -974,7 +974,7 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('w') => app.move_inline(1),
             KeyCode::Char('b') => app.move_inline(-1),
             KeyCode::Char('0') | KeyCode::Home => app.goto_line_start(),
-            KeyCode::Char('$') | KeyCode::End => app.goto_line_end(),
+            KeyCode::End => app.goto_line_end(),
             KeyCode::Char('g') => app.goto_first(),
             KeyCode::Char('G') => app.goto_last(),
             KeyCode::Char('v') => app.toggle_blocks(),
@@ -998,13 +998,13 @@ fn handle_key(app: &mut App, k: KeyEvent) {
             KeyCode::Char('E') => app.edit_general(),
             // `]`/`[` rather than `n`/`N`: vim already spells "next/previous
             // change hunk" with brackets, and `n` is the one-key `no`.
-            KeyCode::Char(']') => app.goto_mark(1),
-            KeyCode::Char('[') => app.goto_mark(-1),
-            // The escape hatch for a document that is one long numbered list,
-            // where the steps outnumber everything else in the ring. `#` because
-            // it is what a numbered item is made of, and because every letter
-            // near the mark keys is spoken for.
-            KeyCode::Char('#') => app.toggle_steps(),
+            KeyCode::Char(']') => app.goto_question(1),
+            KeyCode::Char('[') => app.goto_question(-1),
+            // Steps get their own pair so a long numbered plan cannot bury the
+            // questions. `#` because it is what a numbered item is made of; `$`
+            // is its neighbour, which costs `$` as end-of-line (`End` remains).
+            KeyCode::Char('$') => app.goto_step(1),
+            KeyCode::Char('#') => app.goto_step(-1),
             KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Esc => app.clear_selection(),
             _ => {}

@@ -143,14 +143,6 @@ pub struct Outcome {
     pub feedback_markdown: String,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "`quit`, `peek`, `pretty` and `steps_in_ring` are independent modes \
-              of one long-lived screen: none constrains another, and every \
-              combination is reachable. The suggested state machine is the \
-              product of four orthogonal flags spelled out by hand. `expect` \
-              rather than `allow` so a fifth bool has to argue for itself."
-)]
 pub struct App {
     pub path: String,
     /// Overrides `path` everywhere a human reads it. A launcher that opens a
@@ -169,11 +161,6 @@ pub struct App {
     /// the source exactly as `questions` is, and absent from the result JSON for
     /// the same reason: the document wrote them, not you.
     pub steps: Vec<Pos>,
-    /// Whether `steps` join the `[`/`]` ring. On by default — a numbered plan is
-    /// the shape this tool is pointed at most — and off for the document that is
-    /// one long numbered list, where the ring would be indistinguishable from
-    /// `j`.
-    pub steps_in_ring: bool,
     pub cursor: Pos,
     pub sel: Sel,
     pub annotations: Vec<Annotation>,
@@ -588,7 +575,6 @@ impl App {
             marks,
             questions,
             steps,
-            steps_in_ring: true,
             cursor,
             sel: Sel::Here,
             annotations: Vec::new(),
@@ -1456,26 +1442,14 @@ impl App {
     /// a stop — as a question, which outranks it — and a ring with two stops on
     /// one line reads as a stuck key.
     pub fn open_step_on(&self, line: usize) -> bool {
-        self.steps_in_ring
-            && self.steps.iter().any(|s| s.line == line)
-            && self.annotations_on(line) == 0
-            && !self.questions.iter().any(|q| q.line == line)
+        self.unanswered_step_on(line) && !self.questions.iter().any(|q| q.line == line)
     }
 
-    /// Steps in or out of the ring, reporting what the ring became.
-    ///
-    /// The count is the point: the reason to reach for this key is a ring that
-    /// has too much in it, and the number is how you see the press worked
-    /// without walking the whole thing.
-    pub fn toggle_steps(&mut self) {
-        self.steps_in_ring = !self.steps_in_ring;
-        let n = self.mark_positions().len();
-        let what = if self.steps_in_ring {
-            "marks + steps"
-        } else {
-            "marks only"
-        };
-        self.status = format!("ring: {what} ({n})");
+    /// A step nobody has commented on, whether or not its line also asks
+    /// something. `#`/`$` walk these: a step that asks is still a step, and
+    /// skipping it would make `$` disagree with the numbering on screen.
+    fn unanswered_step_on(&self, line: usize) -> bool {
+        self.steps.iter().any(|s| s.line == line) && self.annotations_on(line) == 0
     }
 
     /// Every position worth jumping to, in document order, each labelled with
@@ -1486,10 +1460,8 @@ impl App {
     /// collapse to one stop; a ring that visits the same cell twice reads as a
     /// stuck key.
     ///
-    /// Also what the scrollbar paints on its track, which is the reason this is
-    /// public. The ring `[`/`]` walks and the marks the track shows are the same
-    /// set by construction — a track drawing its own idea of what counts as a
-    /// mark would send you looking for a stop the ring does not have.
+    /// What the scrollbar paints on its track. `[`/`]` and `#`/`$` each walk
+    /// one kind of these; annotations are on the track but in neither ring.
     pub fn mark_positions(&self) -> Vec<(Pos, &'static str)> {
         let mut out: Vec<(Pos, &'static str)> = self
             .annotations
@@ -1514,30 +1486,50 @@ impl App {
         out
     }
 
-    /// Next (`delta > 0`) or previous mark, wrapping at both ends. Wrapping is
-    /// the point: three marks should be three presses and back to the first,
-    /// not a ring with a dead end at each edge.
+    /// Next (`delta > 0`) or previous open question, wrapping at both ends.
+    /// Wrapping is the point: three questions should be three presses and back
+    /// to the first, not a ring with a dead end at each edge.
     ///
-    /// The ring shrinks as you work — answering a question or commenting on a
-    /// step replaces it with the annotation you wrote, in the same place.
-    pub fn goto_mark(&mut self, delta: isize) {
-        let marks = self.mark_positions();
+    /// The ring shrinks as you work — answering a question drops it.
+    pub fn goto_question(&mut self, delta: isize) {
+        let stops: Vec<Pos> = self
+            .questions
+            .iter()
+            .copied()
+            .filter(|q| self.open_question_on(q.line))
+            .collect();
+        self.goto_stop(stops, delta, "question");
+    }
+
+    /// Next or previous uncommented step, by the same rules as `goto_question`.
+    pub fn goto_step(&mut self, delta: isize) {
+        let stops: Vec<Pos> = self
+            .steps
+            .iter()
+            .copied()
+            .filter(|s| self.unanswered_step_on(s.line))
+            .collect();
+        self.goto_stop(stops, delta, "step");
+    }
+
+    fn goto_stop(&mut self, mut stops: Vec<Pos>, delta: isize, kind: &str) {
+        // Positions collapse to one stop; a ring that visits the same cell
+        // twice reads as a stuck key.
+        stops.sort_unstable();
+        stops.dedup();
         let here = self.cursor;
         let found = if delta > 0 {
-            marks
-                .iter()
-                .find(|&&(p, _)| p > here)
-                .or_else(|| marks.first())
+            stops.iter().find(|&&p| p > here).or_else(|| stops.first())
         } else {
-            marks
+            stops
                 .iter()
                 .rev()
-                .find(|&&(p, _)| p < here)
-                .or_else(|| marks.last())
+                .find(|&&p| p < here)
+                .or_else(|| stops.last())
         }
         .copied();
-        let Some((target, kind)) = found else {
-            self.status = "no marks".into();
+        let Some(target) = found else {
+            self.status = format!("no open {kind}s");
             return;
         };
         self.drop_region();
@@ -1545,8 +1537,8 @@ impl App {
         self.snap();
         // The count is not decoration: it is how you notice the set is not what
         // you expected before you have pressed the key twenty times.
-        let idx = marks.iter().position(|&(p, _)| p == target).unwrap_or(0) + 1;
-        self.status = format!("{kind} {idx}/{}", marks.len());
+        let idx = stops.iter().position(|&p| p == target).unwrap_or(0) + 1;
+        self.status = format!("{kind} {idx}/{}", stops.len());
     }
 
     fn is_whole_lines(&self, span: Span) -> bool {
@@ -3179,25 +3171,6 @@ https://example.dev/a/very/long/path in it as well.
         assert_eq!(a.annotations.len(), 1);
     }
 
-    /// Annotations are pushed in the order they were written, so a ring that
-    /// walked `self.annotations` directly would jump backwards through the
-    /// document whenever you annotated an earlier line last. DOC line 6 is
-    /// annotated first here, line 3 second, precisely to catch that.
-    #[test]
-    fn mark_navigation_runs_in_document_order_not_creation_order() {
-        let mut a = app();
-        a.cursor = Pos::new(6, 1);
-        commit(&mut a, "later line, written first");
-        a.cursor = Pos::new(3, 1);
-        commit(&mut a, "earlier line, written second");
-
-        a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
-        assert_eq!(a.cursor.line, 3);
-        a.goto_mark(1);
-        assert_eq!(a.cursor.line, 6);
-    }
-
     /// Written bottom-up, the review used to come out bottom-up: `result()`
     /// cloned `annotations` in creation order and `feedback_markdown` walked
     /// it the same way, so an agent was told about line 6 before line 1.
@@ -3458,43 +3431,24 @@ https://example.dev/a/very/long/path in it as well.
     }
 
     #[test]
-    fn mark_navigation_wraps_at_both_ends() {
-        let mut a = app();
-        a.cursor = Pos::new(3, 1);
-        commit(&mut a, "one");
-        a.cursor = Pos::new(6, 1);
-        commit(&mut a, "two");
-
-        a.cursor = Pos::new(6, 1);
-        a.goto_mark(1);
+    fn question_navigation_wraps_at_both_ends() {
+        let mut a = qapp();
+        a.cursor = a.questions[1];
+        a.goto_question(1);
         assert_eq!(a.cursor.line, 3, "forward off the end wraps to the first");
-        a.goto_mark(-1);
-        assert_eq!(a.cursor.line, 6, "back off the start wraps to the last");
-    }
-
-    /// The readout is the only way to notice the set is not what you expected.
-    #[test]
-    fn mark_navigation_reports_position_in_the_set() {
-        let mut a = app();
-        a.cursor = Pos::new(3, 1);
-        commit(&mut a, "one");
-        a.cursor = Pos::new(6, 1);
-        commit(&mut a, "two");
-
-        a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
-        assert_eq!(a.status, "annotation 1/2");
-        a.goto_mark(1);
-        assert_eq!(a.status, "annotation 2/2");
+        a.goto_question(-1);
+        assert_eq!(a.cursor.line, 7, "back off the start wraps to the last");
     }
 
     #[test]
-    fn mark_navigation_on_an_empty_document_says_so_and_stays_put() {
+    fn navigation_with_nothing_open_says_so_and_stays_put() {
         let mut a = app();
         a.cursor = Pos::new(3, 1);
-        a.goto_mark(1);
+        a.goto_question(1);
         assert_eq!(a.cursor, Pos::new(3, 1));
-        assert_eq!(a.status, "no marks");
+        assert_eq!(a.status, "no open questions");
+        a.goto_step(1);
+        assert_eq!(a.status, "no open steps");
     }
 
     // ---- one-key answers ----------------------------------------------------
@@ -3571,10 +3525,10 @@ https://example.dev/a/very/long/path in it as well.
     #[test]
     fn an_answer_drains_its_question_from_the_ring() {
         let mut a = qapp();
-        a.goto_mark(1);
+        a.goto_question(1);
         a.place("yes");
         assert!(!a.open_question_on(3));
-        a.goto_mark(1);
+        a.goto_question(1);
         assert_eq!(a.cursor.line, 7, "] did not move on to the next question");
     }
 
@@ -3704,30 +3658,27 @@ Is `?` in a code span quiet?
     fn the_ring_walks_questions_before_anything_is_annotated() {
         let mut a = qapp();
         a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
+        a.goto_question(1);
         assert_eq!(a.cursor.line, 3);
         assert_eq!(a.status, "question 1/2");
-        a.goto_mark(1);
+        a.goto_question(1);
         assert_eq!(a.cursor.line, 7);
         assert_eq!(a.status, "question 2/2");
     }
 
-    /// The whole point of the merged ring: answering a question does not add a
-    /// second stop on the same line, it converts the one that was there.
+    /// Annotations sit on the track but in neither ring: an answered question
+    /// leaves `]` with one stop fewer, not with an annotation in its place.
     #[test]
-    fn answering_a_question_replaces_it_in_the_ring_rather_than_adding_to_it() {
+    fn answering_a_question_drops_it_from_the_ring() {
         let mut a = qapp();
         a.cursor = Pos::new(3, 1);
         commit(&mut a, "yes — see the ticket");
         assert!(!a.open_question_on(3), "answered, so no longer open");
 
         a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
-        assert_eq!(a.cursor.line, 3);
-        assert_eq!(a.status, "annotation 1/2", "still two stops, not three");
-        a.goto_mark(1);
+        a.goto_question(1);
         assert_eq!(a.cursor.line, 7);
-        assert_eq!(a.status, "question 2/2");
+        assert_eq!(a.status, "question 1/1");
     }
 
     /// Derived from the source, not authored by the reader — so a document full
@@ -3780,17 +3731,17 @@ Say the word and I will implement any tier.
         let mut a = sapp();
         assert!(a.questions.is_empty(), "this reply asks nothing at all");
         a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
+        a.goto_step(1);
         assert_eq!(a.cursor.line, 3);
         assert_eq!(a.status, "step 1/4");
-        a.goto_mark(1);
+        a.goto_step(1);
         assert_eq!(a.cursor.line, 5);
-        a.goto_mark(-1);
+        a.goto_step(-1);
         assert_eq!(a.cursor.line, 3, "and back");
     }
 
-    /// The same drain as a question: comment on step 2 and the ring stops
-    /// offering it, so `]` walks what is left rather than what you have done.
+    /// The same drain as a question: comment on step 2 and `$` stops offering
+    /// it, so it walks what is left rather than what you have done.
     #[test]
     fn commenting_on_a_step_drops_it_from_the_ring() {
         let mut a = sapp();
@@ -3798,58 +3749,45 @@ Say the word and I will implement any tier.
         commit(&mut a, "do this one first");
         assert!(!a.open_step_on(5));
 
-        a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
-        assert_eq!(a.status, "step 1/4", "still four stops, not five");
-        a.goto_mark(1);
-        assert_eq!(a.cursor.line, 5);
-        assert_eq!(a.status, "annotation 2/4");
+        a.cursor = Pos::new(3, 1);
+        a.goto_step(1);
+        assert_eq!(a.cursor.line, 6);
+        assert_eq!(a.status, "step 2/3");
     }
 
-    /// A step that also asks something is one stop, not two. It is in the ring
-    /// as the question — which outranks it, being what the document asked rather
-    /// than what it offered.
+    /// A step that also asks something is in both rings: the gutter shows it as
+    /// the question, which outranks it, but `$` must not skip a numbered item.
     #[test]
-    fn a_step_that_asks_something_is_a_single_stop() {
+    fn a_step_that_asks_something_is_in_both_rings() {
         let src = "1. Should the parser move?\n2. Rename the module.\n";
-        let a = App::open("R.md".into(), src, Format::Markdown);
+        let mut a = App::open("R.md".into(), src, Format::Markdown);
         assert!(a.open_question_on(1));
-        assert!(!a.open_step_on(1), "already a stop, as a question");
-        let kinds: Vec<&str> = a.mark_positions().iter().map(|&(_, k)| k).collect();
-        assert_eq!(kinds, ["question", "step"]);
+        assert!(!a.open_step_on(1), "the gutter shows it as a question");
+        a.goto_step(1);
+        assert_eq!(a.cursor.line, 2);
+        a.goto_step(1);
+        assert_eq!((a.cursor.line, a.status.as_str()), (1, "step 1/2"));
+        a.goto_question(1);
+        assert_eq!((a.cursor.line, a.status.as_str()), (1, "question 1/1"));
     }
 
-    /// The escape hatch for the document that is one long numbered list, where
-    /// the ring would be indistinguishable from `j`.
+    /// The two rings are disjoint: a plan with questions in it does not make
+    /// `]` walk the numbering, nor `$` the questions.
     #[test]
-    fn the_toggle_takes_the_steps_back_out_of_the_ring() {
-        let mut a = sapp();
-        assert_eq!(a.mark_positions().len(), 4);
-
-        a.toggle_steps();
-        assert_eq!(a.mark_positions(), [] as [(blocks::Pos, &str); 0]);
-        assert_eq!(a.status, "ring: marks only (0)");
-        assert!(!a.open_step_on(3), "and the gutter goes quiet with it");
+    fn questions_and_steps_have_separate_rings() {
+        let src = "Intro?\n\n1. one\n2. two\n\nOutro?\n";
+        let mut a = App::open("R.md".into(), src, Format::Markdown);
+        let walk = |a: &mut App, f: fn(&mut App, isize)| {
+            (0..3)
+                .map(|_| {
+                    f(a, 1);
+                    a.cursor.line
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(walk(&mut a, App::goto_question), [1, 6, 1]);
         a.cursor = Pos::new(1, 1);
-        a.goto_mark(1);
-        assert_eq!(a.status, "no marks");
-
-        a.toggle_steps();
-        assert_eq!(a.status, "ring: marks + steps (4)");
-        assert_eq!(a.mark_positions().len(), 4);
-    }
-
-    /// An annotation still stands on its own with the steps switched off — the
-    /// toggle takes one kind of mark out of the ring, not the ring.
-    #[test]
-    fn the_toggle_leaves_annotations_and_questions_alone() {
-        let mut a = sapp();
-        a.cursor = Pos::new(5, 1);
-        commit(&mut a, "this one first");
-        a.toggle_steps();
-        let kinds: Vec<&str> = a.mark_positions().iter().map(|&(_, k)| k).collect();
-        assert_eq!(kinds, ["annotation"]);
-        assert_eq!(a.status, "ring: marks only (1)");
+        assert_eq!(walk(&mut a, App::goto_step), [3, 4, 3]);
     }
 
     /// Derived from the source like a question, and out of the result for the

@@ -2036,18 +2036,6 @@ mod tests {
         assert_eq!(gutter_mark(&buf, 4), "▸", "step 2 is still outstanding");
     }
 
-    /// The toggle is not only a ring key: the gutter reads the same predicate, so
-    /// switching steps off quiets the fringe as well as the jumps. A gutter still
-    /// full of `▸` after the press would advertise stops `]` no longer has.
-    #[test]
-    fn switching_steps_off_quiets_the_gutter_too() {
-        let mut app = App::open("REPLY.md".into(), SDOC, Format::Markdown);
-        app.toggle_steps();
-        let buf = render_buf(&mut app, 80, 20);
-        assert_eq!(gutter_mark(&buf, 3), " ");
-        assert_eq!(gutter_mark(&buf, 4), " ");
-    }
-
     /// All three glyphs have to be single-width, or the fixed two-cell gutter
     /// stops lining up with the body column beside it. A lone `1.` is no
     /// enumeration, so the left-hand document has the same first line and no

@@ -1032,8 +1032,8 @@ fn ordinal_marker(line: &str, from: usize) -> bool {
 ///
 /// Measured over the 3,501 markdown files in `~/Stuff` on 2026-08-19: 675 hold
 /// at least one ordinal-marker line, median 5 and p90 15 — but the worst holds
-/// 210, which is a ring nobody can walk. Hence `App::steps_in_ring`, and hence
-/// these filters rather than "every list item".
+/// 210, which is a ring nobody can walk. Hence steps get their own keys, and
+/// hence these filters rather than "every list item".
 ///
 /// Taken from the tree, never from a line scan, and that is the whole point.
 /// Two shapes a `^ *[0-9]+[.)]` scan gets wrong, both checked against comrak

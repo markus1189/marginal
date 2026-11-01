@@ -28,12 +28,13 @@ pub const KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("h/j/k/l, arrows", "move by character / line"),
             ("C-d / C-u", "half page down / up"),
             ("C-f / C-b, PgDn/PgUp", "full page down / up"),
-            ("0 / $, Home/End", "start / end of line"),
+            ("0 or Home / End", "start / end of line"),
             ("J / K", "move by navigation unit"),
             ("w / b", "move by inline node: code span, link, emphasis"),
             ("g / G", "first / last line"),
             ("C-n / C-p", "move by screen row inside a wrapped line"),
-            ("] / [", "next / previous mark: annotation, question, step"),
+            ("] / [", "next / previous open question"),
+            ("$ / #", "next / previous uncommented numbered-list step"),
         ],
     ),
     (
@@ -71,7 +72,6 @@ pub const KEYS: [(&str, &[(&str, &str)]); 5] = [
         &[
             ("P", "pretty on / off: soft wrap, aligned tables"),
             ("z", "peek at the selection, wrapped"),
-            ("#", "numbered-list steps in / out of the mark ring"),
             ("?", "this list; j/k scroll, ? / Esc / q close"),
         ],
     ),
